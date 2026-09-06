@@ -110,7 +110,8 @@ class Fleetlight(Adw.Application):
         self.window.set_icon_name("io.github.fleetlight.Linux")
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        header.set_title_widget(Adw.WindowTitle(title="Fleetlight", subtitle=f"Linux · {__version__}"))
+        self.window_title = Adw.WindowTitle(title="Fleetlight", subtitle=f"Linux · {__version__}")
+        header.set_title_widget(self.window_title)
         settings = Gtk.Button(icon_name="emblem-system-symbolic", tooltip_text="Settings and configuration")
         settings.connect("clicked", self.settings)
         header.pack_start(settings)
@@ -230,6 +231,7 @@ class Fleetlight(Adw.Application):
         hosts = self.configuration["hosts"]
         online = sum(self.snapshots.get(h["id"], {}).get("status") == "online" for h in hosts)
         self.summary.set_text(f"{online} of {len(hosts)} online")
+        self.window_title.set_subtitle(f"Linux {__version__} · {online}/{len(hosts)} online")
         selected_id = self.selected
         self.host_list.unselect_all()
         clear(self.host_list)

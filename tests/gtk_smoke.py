@@ -13,6 +13,7 @@ def verify():
     try:
         assert app.window is not None
         assert app.summary.get_text() == "4 of 4 online"
+        assert "4/4 online" in app.window_title.get_subtitle()
         assert app.selected == "local"
         app.search.set_text("Studio")
         app.populate_hosts()
