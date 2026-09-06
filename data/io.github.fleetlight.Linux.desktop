@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Fleetlight
+Comment=Your computers, services and app versions at a glance
+Exec=fleetlight
+Icon=io.github.fleetlight.Linux
+Terminal=false
+Categories=System;Monitor;Network;
+Keywords=SSH;fleet;monitor;servers;
+StartupNotify=true
+StartupWMClass=io.github.fleetlight.Linux

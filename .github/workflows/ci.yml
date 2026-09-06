@@ -1,0 +1,17 @@
+name: Linux checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native test dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 xvfb dbus-x11
+      - name: Public source privacy check
+        run: python3 scripts/privacy_check.py
+      - name: Unit and collector tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Native GTK smoke test
+        run: dbus-run-session -- xvfb-run -a python3 tests/gtk_smoke.py
