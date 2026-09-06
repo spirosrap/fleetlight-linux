@@ -15,6 +15,20 @@ from fleetlight.monitor import issues
 
 
 class UpdateTests(unittest.TestCase):
+    def test_batch_filters_and_freezes_reviewed_releases(self):
+        hosts = [{"id": str(i), "name": "Host " + str(i), "local": True} for i in range(5)]
+        snapshots = {h["id"]: {"status": "online"} for h in hosts}
+        checks = {h["id"]: {"cli": dict(updates.plan("1.0.0", "1.1.0", "standalone"), checked_at=100)} for h in hosts}
+        checks["1"]["cli"]["state"] = "protected"
+        checks["2"]["cli"]["state"] = "current"
+        snapshots["3"]["status"] = "offline"
+        checks["4"]["cli"]["checked_at"] = -2000
+        pending, skipped = updates.batch_candidates(hosts, snapshots, checks, "cli", now=200)
+        self.assertEqual([x["host"]["id"] for x in pending], ["0"])
+        self.assertEqual([x["reason"] for x in skipped], ["protected", "current", "offline", "check again"])
+        checks["0"]["cli"]["latest"] = "9.0.0"
+        self.assertEqual(pending[0]["checked"]["latest"], "1.1.0")
+
     def test_receipts_require_marker_version_and_verification(self):
         good = ['FLEETLIGHT_CODEX_UPDATE', 'ACTIVE_VERSION:1.2.3', 'VERIFY:ok']
         self.assertEqual(update_job.parse_result('cli', '1.2.3', '', 0, good)[0], 'succeeded')

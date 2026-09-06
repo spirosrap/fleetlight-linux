@@ -4,7 +4,7 @@ A native GTK4/libadwaita dashboard for your computers. Monitor Linux and macOS h
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
-## Version 0.2.0
+## Version 0.3.0
 
 - A Wayland-native desktop application with a searchable fleet sidebar, attention filter and automatic checks.
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
@@ -18,7 +18,7 @@ A native GTK4/libadwaita dashboard for your computers. Monitor Linux and macOS h
 - Editable private configuration, an add-computer dialog and optional start at login.
 - A read-only JSON CLI for diagnostics, plus a fictional demo mode for screenshots.
 
-The Linux edition does not yet provide tray integration, Android controller pairing, wake-on-LAN or fleet-wide update batches. The Linux app monitors hosts directly and does not depend on a Mac controller.
+The Linux edition does not yet provide tray integration, Android controller pairing or wake-on-LAN. The Linux app monitors hosts directly and does not depend on a Mac controller.
 
 ## Install
 
@@ -82,6 +82,8 @@ History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, capped a
 - **ChatGPT on Apple Silicon macOS:** checks OpenAI's official appcast, verifies the downloaded bundle's identity, version and OpenAI signing team, and restores the previous bundle if replacement verification fails.
 - **ChatGPT on Arch:** refreshes isolated package metadata, checks package integrity and runs a full `pacman -Syu` after confirmation. Modified packages are protected from this action.
 - **ChatGPT on APT:** validates the supported official repository and installed package, refreshes metadata and upgrades the package. Linux installation requires existing passwordless sudo permission; Fleetlight does not collect passwords or configure sudo.
+
+**Update all Codex CLI** and **Update all ChatGPT** show the number of eligible fleet updates. Each button opens a review with the computers and versions to update, plus skipped computers (current, offline, protected or unchecked). Batches run sequentially, stop on failure, and offer **Stop after current update** to cancel remaining work without interrupting an installer. The queue is saved alongside the active job and resumes after a controller restart.
 
 Updates run one at a time in Fleetlight. Jobs continue after an SSH interruption or controller crash, and Fleetlight resumes watching the saved job when reopened. It verifies the active version before reporting success. Job state and logs are retained on each target at `~/.local/state/fleetlight/update-jobs`; controller receipts are in the local state folder. Do not remove these while a job is running. Package-manager locks also apply; do not run competing manual updates.
 

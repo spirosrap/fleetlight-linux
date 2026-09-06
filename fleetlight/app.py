@@ -93,11 +93,20 @@ class Fleetlight(Adw.Application):
         self.last_update_check = 0
         self.active_job = None
         self.last_jobs = {}
+        self.batch = None
         self.journal_path = config.state_path().with_name("update-controller.json")
         if not demo:
             try:
                 journal = json.loads(self.journal_path.read_text())
                 self.active_job = journal.get("active_job")
+                self.batch = journal.get("batch")
+                if self.batch:
+                    if self.batch["kind"] not in ("cli", "desktop") or not isinstance(self.batch["pending"], list) or len(self.batch["pending"]) > 32:
+                        raise ValueError("Invalid saved batch")
+                    for item in self.batch["pending"]:
+                        config.validate({"version": 1, "hosts": [item["host"]]})
+                        if not updates.version(item["checked"].get("latest")):
+                            raise ValueError("Invalid saved release")
                 self.last_jobs = journal.get("last_jobs", {})
                 if not isinstance(self.last_jobs, dict):
                     self.last_jobs = {}
@@ -107,6 +116,7 @@ class Fleetlight(Adw.Application):
                         raise ValueError("Invalid saved job")
             except (ValueError, OSError, TypeError, KeyError, AttributeError):
                 self.active_job = None
+                self.batch = None
                 self.last_jobs = {}
         self.history = History() if not demo else History(Path("/nonexistent/fleetlight-demo"))
         self.connect("activate", self.activate_window)
@@ -150,6 +160,24 @@ class Fleetlight(Adw.Application):
         add.connect("clicked", self.add_computer)
         header.pack_end(add)
         toolbar.add_top_bar(header)
+        fleet_bar = margins(box(True, 6), 10)
+        buttons = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=False,
+                              min_children_per_line=1, max_children_per_line=3,
+                              column_spacing=8, row_spacing=6)
+        self.batch_buttons = {}
+        for kind, title in (("cli", "Update all Codex CLI"), ("desktop", "Update all ChatGPT")):
+            button = Gtk.Button(label=title)
+            button.connect("clicked", lambda _, selected=kind: self.request_batch(selected))
+            buttons.insert(button, -1)
+            self.batch_buttons[kind] = button
+        self.stop_batch = Gtk.Button(label="Stop after current update")
+        self.stop_batch.connect("clicked", self.cancel_batch)
+        buttons.insert(self.stop_batch, -1)
+        fleet_bar.append(buttons)
+        self.batch_label = label("", "muted")
+        self.batch_label.set_wrap(True)
+        fleet_bar.append(self.batch_label)
+        toolbar.add_top_bar(fleet_bar)
         self.toasts = Adw.ToastOverlay()
         layout = Adw.OverlaySplitView(min_sidebar_width=220, max_sidebar_width=260)
         sidebar = box(True, 12)
@@ -205,6 +233,8 @@ class Fleetlight(Adw.Application):
             self.render_detail()
         elif self.active_job:
             self.watch_job()
+        elif self.batch and self.batch.get("running") and self.batch.get("pending"):
+            self.advance_batch()
         else:
             self.check()
         if load_error:
@@ -305,6 +335,7 @@ class Fleetlight(Adw.Application):
             self.render_detail()
 
     def render_detail(self):
+        self.render_batch()
         host = next((h for h in self.configuration["hosts"] if h["id"] == self.selected), None)
         if host is None:
             return
@@ -543,6 +574,108 @@ class Fleetlight(Adw.Application):
             self.toast("Checks completed, but the local receipt could not be saved")
         return GLib.SOURCE_REMOVE
 
+    def render_batch(self):
+        if not hasattr(self, "batch_buttons"):
+            return
+        blocked = self.demo or self.busy or self.update_checks_running or bool(self.active_job)
+        for kind, button in self.batch_buttons.items():
+            candidates, _ = updates.batch_candidates(self.configuration["hosts"], self.snapshots, self.app_updates, kind)
+            title = "Update all Codex CLI" if kind == "cli" else "Update all ChatGPT"
+            button.set_label(title + " (" + str(len(candidates)) + ")")
+            button.set_sensitive(not blocked and bool(candidates))
+            button.set_tooltip_text("Run Check now to refresh available releases" if not candidates else "Review computers and start sequential updates")
+        running = bool(self.batch and self.batch.get("running"))
+        self.stop_batch.set_visible(running and bool(self.batch.get("pending")))
+        if self.batch:
+            done = len(self.batch.get("results", []))
+            total = self.batch.get("total", 0)
+            text = ("Codex CLI" if self.batch["kind"] == "cli" else "ChatGPT") + " fleet updates: " + str(done) + "/" + str(total) + " completed"
+            if running and self.active_job:
+                text += " · " + self.active_job["host"]["name"] + " · " + self.active_job.get("phase", "Updating")
+            elif self.batch.get("stopped"):
+                text += " · " + self.batch["stopped"]
+            self.batch_label.set_text(text)
+        else:
+            self.batch_label.set_text("Fleet-wide updates · only computers with available releases are included")
+
+    def request_batch(self, kind):
+        if self.demo or self.busy or self.update_checks_running or self.active_job:
+            return
+        pending, skipped = updates.batch_candidates(self.configuration["hosts"], self.snapshots, self.app_updates, kind)
+        if not pending:
+            self.toast("No eligible updates. Run Check now to refresh releases.")
+            return
+        title = "Codex CLI" if kind == "cli" else "ChatGPT"
+        body = "Update " + title + " sequentially on these computers:\n\n"
+        body += "\n".join(item["host"]["name"] + " → " + item["checked"]["latest"] for item in pending)
+        if skipped:
+            body += "\n\nSkipped: " + "; ".join(item["name"] + " (" + item["reason"] + ")" for item in skipped)
+        if kind == "desktop":
+            body += "\n\nChatGPT may close and reopen. Finish active work first."
+            if any(item["checked"].get("provider") == "linux-pacman" for item in pending):
+                body += " Arch computers require a full system upgrade, including other packages."
+        body += "\n\nThe batch stops if an update fails. You can stop remaining updates without interrupting the active installer."
+        dialog = Adw.MessageDialog(transient_for=self.window, heading="Update all " + title + "?", body=body)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("update", "Update " + str(len(pending)) + " computers")
+        dialog.set_response_appearance("update", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", lambda _, response: self.begin_batch(kind, pending) if response == "update" else None)
+        dialog.present()
+
+    def begin_batch(self, kind, pending):
+        if self.active_job or self.busy or self.update_checks_running:
+            return
+        # Recheck eligibility after the review dialog; use only the reviewed hosts.
+        fresh, _ = updates.batch_candidates([item["host"] for item in pending], self.snapshots,
+                    {item["host"]["id"]: {kind: item["checked"]} for item in pending}, kind)
+        if len(fresh) != len(pending):
+            self.toast("The release checks expired. Check again before starting.")
+            return
+        self.batch = {"kind": kind, "pending": fresh, "results": [], "total": len(fresh), "running": True}
+        try:
+            self.persist_jobs()
+        except OSError:
+            self.batch = None
+            self.toast("Could not save the batch; no updates started")
+            return
+        self.advance_batch()
+
+    def advance_batch(self):
+        if self.active_job or not self.batch:
+            return
+        if self.batch.get("pending"):
+            item = self.batch["pending"].pop(0)
+            # begin_update saves the active job and remaining queue together before dispatch.
+            self.begin_update(item["host"], self.batch["kind"], item["checked"])
+            if not self.active_job:
+                self.batch["pending"].insert(0, item)
+                self.batch["running"] = False
+                self.batch["stopped"] = "Could not start the next update; retry after checking"
+                self.render_batch()
+            return
+        self.batch["running"] = False
+        try:
+            self.persist_jobs()
+        except OSError:
+            self.toast("Could not save the batch summary")
+        self.render_batch()
+        self.check()
+
+    def cancel_batch(self, *_):
+        if self.batch:
+            previous = list(self.batch["pending"])
+            self.batch["pending"] = []
+            self.batch["stopped"] = "Remaining updates cancelled"
+            try:
+                self.persist_jobs()
+            except OSError:
+                self.batch["pending"] = previous
+                self.batch.pop("stopped", None)
+                self.toast("Could not save cancellation; remaining updates are still queued")
+            self.render_batch()
+
     def request_update(self, host, kind, checked):
         if self.active_job or self.update_checks_running or self.busy or self.demo:
             return
@@ -565,7 +698,7 @@ class Fleetlight(Adw.Application):
         dialog.present()
 
     def persist_jobs(self):
-        config.atomic_json(self.journal_path, {"active_job": self.active_job, "last_jobs": self.last_jobs})
+        config.atomic_json(self.journal_path, {"active_job": self.active_job, "last_jobs": self.last_jobs, "batch": self.batch})
 
     def begin_update(self, host, kind, checked):
         if self.active_job or self.update_checks_running or self.busy:
@@ -609,6 +742,11 @@ class Fleetlight(Adw.Application):
         self.active_job.update({k:v for k,v in receipt.items() if k not in ("host", "id", "kind")})
         state = receipt.get("state")
         if state in ("succeeded", "failed", "busy", "interrupted", "unknown"):
+            if self.batch and self.batch.get("running"):
+                self.batch.setdefault("results", []).append({"host": self.active_job["host"]["name"], "state": state})
+                if state != "succeeded":
+                    self.batch["pending"] = []
+                    self.batch["stopped"] = "Stopped after " + self.active_job["host"]["name"] + ": " + receipt.get("phase", state)
             self.last_jobs[self.active_job["host"]["id"]] = dict(self.active_job)
             self.toast(receipt.get("phase", "Update completed"))
             self.active_job = None
@@ -622,7 +760,10 @@ class Fleetlight(Adw.Application):
         if self.active_job:
             GLib.timeout_add_seconds(3 if state != "disconnected" else 10, self.watch_job)
         else:
-            self.check()
+            if self.batch and self.batch.get("running"):
+                self.advance_batch()
+            else:
+                self.check()
         return GLib.SOURCE_REMOVE
 
     def close_requested(self, *_):

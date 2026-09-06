@@ -176,3 +176,23 @@ def start_job(host, kind, checked, ident=None):
 
 def job_status(host, ident):
     return job_request(host, {"operation": "status", "id": ident})
+
+
+def batch_candidates(hosts, snapshots, checks, kind, now=None):
+    """Freeze only online, supported, fresh, available releases for review."""
+    if kind not in ("cli", "desktop"):
+        raise ValueError("Unknown application")
+    now = time.time() if now is None else now
+    eligible, skipped = [], []
+    for host in hosts:
+        checked = checks.get(host["id"], {}).get(kind, {})
+        reason = checked.get("state", "not checked")
+        if snapshots.get(host["id"], {}).get("status") != "online":
+            reason = "offline"
+        elif now - checked.get("checked_at", 0) > 1800:
+            reason = "check again"
+        elif reason == "available" and version(checked.get("latest")):
+            eligible.append({"host": dict(host), "checked": dict(checked)})
+            continue
+        skipped.append({"name": host["name"], "reason": reason})
+    return eligible, skipped

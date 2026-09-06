@@ -30,10 +30,46 @@ def verify():
         assert isinstance(button, Gtk.Button) and button.get_label() == "Update"
         assert not button.get_sensitive()
         assert app.app_updates["local"]["cli"]["state"] == "available"
+        assert "Update all Codex CLI" in app.batch_buttons["cli"].get_label()
+        assert "Update all ChatGPT" in app.batch_buttons["desktop"].get_label()
+        assert not app.batch_buttons["cli"].get_sensitive()
+        # Drive the real queue state machine with fake jobs: no SSH or installation.
+        from fleetlight import updates
+        pending, _ = updates.batch_candidates(app.configuration["hosts"], app.snapshots, app.app_updates, "cli")
+        launched = []
+        app.persist_jobs = lambda: None
+        app.check = lambda *a, **k: None
+        def fake_start(host, kind, checked):
+            launched.append(host["id"])
+            app.active_job = {"id": "a" * 32, "host": host, "kind": kind, "state": "running"}
+        app.begin_update = fake_start
+        app.begin_batch("cli", pending)
+        assert len(launched) == 1
+        # A new controller restores both the running job and remaining queue.
+        import json, os, tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "fleetlight"
+            state.mkdir()
+            (state / "update-controller.json").write_text(json.dumps({"active_job": app.active_job, "batch": app.batch, "last_jobs": {}}))
+            with patch.dict(os.environ, {"XDG_STATE_HOME": directory}):
+                recovered = Fleetlight()
+            assert recovered.active_job["host"]["id"] == launched[0]
+            assert len(recovered.batch["pending"]) == len(pending) - 1
+        app.receive_job({"state": "succeeded", "phase": "Verified"})
+        assert len(launched) == 2
+        app.receive_job({"state": "failed", "phase": "Fixture failure"})
+        assert len(launched) == 2 and not app.batch["running"]
+        assert not app.batch["pending"] and "Fixture failure" in app.batch["stopped"]
+        app.begin_batch("cli", pending)
+        app.cancel_batch()
+        assert app.active_job is not None and not app.batch["pending"]
+        app.receive_job({"state": "succeeded", "phase": "Verified"})
+        assert len(launched) == 3 and not app.batch["running"]
         app.settings()
         app.add_computer()
         assert len(app.get_windows()) >= 1
-        print("GTK smoke test passed: window, host selection, filters, settings, add dialog")
+        print("GTK smoke test passed: UI, batch sequencing, failure stop, cancellation and recovery")
     except Exception:
         failures.append(traceback.format_exc())
     finally:
