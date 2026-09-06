@@ -279,6 +279,7 @@ class Fleetlight(Adw.Application):
         pending = self.pending_restarts.get(snapshot["id"])
         if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
             self.pending_restarts.pop(snapshot["id"], None)
+            self.app_updates.setdefault(snapshot["id"], {})["restart"] = {"state": "current", "checked_at": time.time(), "detail": "Restart verified; computer is online"}
             self.toast(pending["name"] + " restarted and is back online")
             try:
                 self.persist_jobs()

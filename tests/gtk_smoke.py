@@ -68,6 +68,14 @@ def verify():
         assert app.active_job is not None and not app.batch["pending"]
         app.receive_job({"state": "succeeded", "phase": "Verified"})
         assert len(launched) == 3 and not app.batch["running"]
+        host_id = app.configuration["hosts"][0]["id"]
+        app.pending_restarts[host_id] = {"name": "Fixture", "boot_id": "old-boot"}
+        snapshot = dict(app.snapshots[host_id], id=host_id, boot_id="old-boot", status="online")
+        app.receive(snapshot)
+        assert host_id in app.pending_restarts
+        app.receive(dict(snapshot, boot_id="new-boot"))
+        assert host_id not in app.pending_restarts
+        assert app.app_updates[host_id]["restart"]["detail"].startswith("Restart verified")
         app.settings()
         app.add_computer()
         assert len(app.get_windows()) >= 1
