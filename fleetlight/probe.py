@@ -165,6 +165,7 @@ def collect(services=()):
     return {"schema": 1, "hostname": platform.node(), "os": system, "distribution": distro,
             "architecture": platform.machine(), "codex_installation": codex_installation(),
             "package_manager": manager,
+            "boot_id": text("/proc/sys/kernel/random/boot_id").strip() if system == "Linux" else None,
             "kernel": platform.release(), "checked_at": time.time(), "uptime": uptime,
             "disk_percent": round(100 * disk.used / disk.total), "disk_free": disk.free,
             "memory_percent": memory(system), "load": round(os.getloadavg()[0], 2),

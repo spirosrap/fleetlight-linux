@@ -125,7 +125,10 @@ def check_host(host, snapshot, official):
             desktop = plan(app.get("version"), None, app.get("provider"), "Repository check timed out or the SSH connection failed")
     else:
         desktop = plan(app.get("version"), None, None, "Unsupported operating system")
-    return {"cli": cli, "desktop": desktop}
+    result = {"cli": cli, "desktop": desktop}
+    if snapshot.get("os") == "Linux":
+        result.update(check_system(host))
+    return result
 
 
 def check_all(hosts, snapshots, callback):
@@ -164,14 +167,18 @@ def job_request(host, request):
 
 
 def start_job(host, kind, checked, ident=None):
-    if kind not in ("cli", "desktop") or not version(checked.get("latest")):
+    if kind not in ("cli", "desktop", "system", "restart") or not version(checked.get("latest")):
         raise ValueError("A verified release check is required")
     if checked.get("state") not in ("available", "current"):
         raise ValueError("This installation is protected or unavailable")
     ident = ident or uuid.uuid4().hex
+    if kind in ("system", "restart"):
+        script = "python3 -c " + shlex.quote((ROOT / "system_ops.py").read_text()) + (" update" if kind == "system" else " restart")
+    else:
+        script = (ROOT / ("updaters/cli.sh" if kind == "cli" else "updaters/desktop.sh")).read_text()
     return job_request(host, {"operation": "start", "id": ident, "kind": kind,
                               "target": checked["latest"], "build": checked.get("build") or "",
-                              "script": (ROOT / ("updaters/cli.sh" if kind == "cli" else "updaters/desktop.sh")).read_text()})
+                              "script": script})
 
 
 def job_status(host, ident):
@@ -180,7 +187,7 @@ def job_status(host, ident):
 
 def batch_candidates(hosts, snapshots, checks, kind, now=None):
     """Freeze only online, supported, fresh, available releases for review."""
-    if kind not in ("cli", "desktop"):
+    if kind not in ("cli", "desktop", "system", "restart"):
         raise ValueError("Unknown application")
     now = time.time() if now is None else now
     eligible, skipped = [], []
@@ -189,6 +196,8 @@ def batch_candidates(hosts, snapshots, checks, kind, now=None):
         reason = checked.get("state", "not checked")
         if snapshots.get(host["id"], {}).get("status") != "online":
             reason = "offline"
+        elif kind == "restart" and not snapshots.get(host["id"], {}).get("boot_id"):
+            reason = "boot identity unavailable"
         elif now - checked.get("checked_at", 0) > 1800:
             reason = "check again"
         elif reason == "available" and version(checked.get("latest")):
@@ -196,3 +205,21 @@ def batch_candidates(hosts, snapshots, checks, kind, now=None):
             continue
         skipped.append({"name": host["name"], "reason": reason})
     return eligible, skipped
+
+
+def check_system(host):
+    try:
+        source = (ROOT / "system_ops.py").read_text()
+        code, output, _ = run_process(connection(host, "python3 -c " + shlex.quote(source) + " check"), timeout=180)
+        raw = next(line.split("=", 1)[1] for line in output.splitlines() if line.startswith("FLEETLIGHT_SYSTEM_CHECK="))
+        value = json.loads(raw)
+        if code or value.get("state") not in ("available", "current", "protected", "unknown", "unsupported"):
+            raise ValueError("Invalid system check")
+        system = {"state": value["state"], "latest": "0.0.0", "checked_at": time.time(),
+                  "detail": value.get("detail", ""), "provider": value.get("manager"), "packages": value.get("packages", [])}
+        restart = value.get("restart", {})
+        reboot = {"state": "available" if restart.get("required") is True else "unknown" if restart.get("required") is None else "current",
+                  "latest": "0.0.0", "checked_at": time.time(), "detail": restart.get("reason", "Restart requirement unknown")}
+        return {"system": system, "restart": reboot}
+    except (OSError, TimeoutError, ValueError, StopIteration, TypeError):
+        return {kind: {"state": "unknown", "checked_at": time.time(), "detail": "System check failed"} for kind in ("system", "restart")}

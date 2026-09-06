@@ -10,6 +10,7 @@ A native GTK4/libadwaita dashboard for your computers. Monitor Linux and macOS h
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
 - Root disk, memory, uptime, load, configured systemd services, Codex CLI and ChatGPT package versions.
 - Installed/latest application versions and in-app Codex CLI and ChatGPT update buttons, including remote Apple Silicon Macs.
+- Fleet-wide Linux package updates and confirmed restarts, with new-boot verification.
 - Durable update jobs with progress, verification and reconnect recovery.
 - Per-service **Warn when stopped** preferences for optional services.
 - A local history of status and service transitions, with recent changes on each computer's page.
@@ -84,6 +85,10 @@ History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, capped a
 - **ChatGPT on APT:** validates the supported official repository and installed package, refreshes metadata and upgrades the package. Linux installation requires existing passwordless sudo permission; Fleetlight does not collect passwords or configure sudo.
 
 **Update all Codex CLI** and **Update all ChatGPT** show the number of eligible fleet updates. Each button opens a review with the computers and versions to update, plus skipped computers (current, offline, protected or unchecked). Batches run sequentially, stop on failure, and offer **Stop after current update** to cancel remaining work without interrupting an installer. The queue is saved alongside the active job and resumes after a controller restart.
+
+**Update all Linux packages** refreshes package metadata and upgrades eligible Arch, APT and DNF computers using existing passwordless sudo. Services may restart, but computers are never automatically rebooted by an update batch. If an available system update would replace a locally modified ChatGPT package, the host is protected from the batch.
+
+**Restart required computers** reviews computers with an OS reboot flag, a replaced running Arch kernel, a `needs-restarting` request, or a core-package restart recommendation recorded by Fleetlight. Each confirmed restart is scheduled with a one-minute delay; the local controller goes last. Scheduling is not reported as a verified reboot: Fleetlight waits for the computer to return with a different Linux boot ID. Open Fleetlight again after restarting its own computer (or enable start at login) to see the verification. These checks cannot identify every third-party application's restart requirement.
 
 Updates run one at a time in Fleetlight. Jobs continue after an SSH interruption or controller crash, and Fleetlight resumes watching the saved job when reopened. It verifies the active version before reporting success. Job state and logs are retained on each target at `~/.local/state/fleetlight/update-jobs`; controller receipts are in the local state folder. Do not remove these while a job is running. Package-manager locks also apply; do not run competing manual updates.
 

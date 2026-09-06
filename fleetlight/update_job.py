@@ -56,6 +56,15 @@ def version(raw):
 
 
 def parse_result(kind, target, build, code, lines):
+    if kind in ("system", "restart"):
+        marker = "FLEETLIGHT_SYSTEM_UPDATE" if kind == "system" else "FLEETLIGHT_RESTART"
+        if code == 0 and marker in lines and "VERIFY:ok" in lines:
+            detail = "Restart scheduled in one minute; return not yet verified" if kind == "restart" else "System packages verified"
+            if "REBOOT:required" in lines:
+                detail += " · Restart required"
+            return "succeeded", detail, ""
+        reason = next((line[7:] for line in reversed(lines) if line.startswith("UPDATE:")), "failed")
+        return "failed", ERRORS.get(reason, "System action failed. Check the log before retrying."), ""
     values = {}
     for line in lines:
         if ":" in line:
@@ -103,7 +112,7 @@ def worker(directory, lock_fd):
                 line = raw.rstrip("\r\n")
                 log.write(raw)
                 log.flush()
-                if line.startswith(("FLEETLIGHT_", "ACTIVE_VERSION:", "AFTER_VERSION:", "AFTER_BUILD:", "VERIFY:", "UPDATE:", "RELAUNCH:")):
+                if line.startswith(("FLEETLIGHT_", "ACTIVE_VERSION:", "AFTER_VERSION:", "AFTER_BUILD:", "VERIFY:", "UPDATE:", "RELAUNCH:", "REBOOT:")):
                     lines.append(line)
                 if line.startswith("PHASE:"):
                     state["phase"] = line[6:][:200]
@@ -142,7 +151,7 @@ def handle(request):
                 stream.seek(max(0, log.stat().st_size - 12000))
                 state["log"] = stream.read(12000).decode(errors="replace")
         return state
-    if request.get("operation") != "start" or request.get("kind") not in ("cli", "desktop"):
+    if request.get("operation") != "start" or request.get("kind") not in ("cli", "desktop", "system", "restart"):
         raise ValueError("Unknown operation")
     if not version(request.get("target")) or (request.get("build") and not str(request["build"]).isdigit()):
         raise ValueError("Invalid target release")

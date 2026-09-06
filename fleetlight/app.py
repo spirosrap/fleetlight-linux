@@ -17,6 +17,8 @@ from .monitor import History, issues, refresh
 from . import updates
 
 
+ACTION_NAMES = {"cli": "Codex CLI", "desktop": "ChatGPT", "system": "Linux packages", "restart": "required restarts"}
+
 CSS = b"""
 window { background: #10151d; color: #e6edf5; }
 headerbar { background: #141b25; border-bottom: 1px solid #293342; }
@@ -94,14 +96,16 @@ class Fleetlight(Adw.Application):
         self.active_job = None
         self.last_jobs = {}
         self.batch = None
+        self.pending_restarts = {}
         self.journal_path = config.state_path().with_name("update-controller.json")
         if not demo:
             try:
                 journal = json.loads(self.journal_path.read_text())
                 self.active_job = journal.get("active_job")
                 self.batch = journal.get("batch")
+                self.pending_restarts = journal.get("pending_restarts", {})
                 if self.batch:
-                    if self.batch["kind"] not in ("cli", "desktop") or not isinstance(self.batch["pending"], list) or len(self.batch["pending"]) > 32:
+                    if self.batch["kind"] not in ("cli", "desktop", "system", "restart") or not isinstance(self.batch["pending"], list) or len(self.batch["pending"]) > 32:
                         raise ValueError("Invalid saved batch")
                     for item in self.batch["pending"]:
                         config.validate({"version": 1, "hosts": [item["host"]]})
@@ -165,7 +169,7 @@ class Fleetlight(Adw.Application):
                               min_children_per_line=1, max_children_per_line=3,
                               column_spacing=8, row_spacing=6)
         self.batch_buttons = {}
-        for kind, title in (("cli", "Update all Codex CLI"), ("desktop", "Update all ChatGPT")):
+        for kind, title in (("cli", "Update all Codex CLI"), ("desktop", "Update all ChatGPT"), ("system", "Update all Linux packages"), ("restart", "Restart required computers")):
             button = Gtk.Button(label=title)
             button.connect("clicked", lambda _, selected=kind: self.request_batch(selected))
             buttons.insert(button, -1)
@@ -272,6 +276,14 @@ class Fleetlight(Adw.Application):
         threading.Thread(target=work, daemon=True).start()
 
     def receive(self, snapshot):
+        pending = self.pending_restarts.get(snapshot["id"])
+        if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
+            self.pending_restarts.pop(snapshot["id"], None)
+            self.toast(pending["name"] + " restarted and is back online")
+            try:
+                self.persist_jobs()
+            except OSError:
+                self.toast("Could not save restart verification")
         self.snapshots[snapshot["id"]] = snapshot
         self.populate_hosts()
         return GLib.SOURCE_REMOVE
@@ -423,6 +435,13 @@ class Fleetlight(Adw.Application):
             log_scroll.set_child(log_view)
             expander.set_child(log_scroll)
             apps.append(expander)
+        if data.get("os") == "Linux":
+            system_card = self.section("Linux updates", "Distribution packages and restart status")
+            checked = self.app_updates.get(host["id"], {})
+            for kind, title in (("system", "System packages"), ("restart", "Restart")):
+                status = checked.get(kind, {})
+                self.detail_row(system_card, title, status.get("detail", "Checking…"), "system-software-update-symbolic",
+                                "warning" if status.get("state") in ("available", "protected", "unknown") else "muted")
         services = self.section("Services", "Configured system services")
         states = data.get("services", {})
         for name in host.get("services", []):
@@ -556,6 +575,8 @@ class Fleetlight(Adw.Application):
         threading.Thread(target=work, daemon=True).start()
 
     def receive_updates(self, ident, result):
+        if ident in self.pending_restarts and "restart" in result:
+            result["restart"].update(state="scheduled", detail="Restart scheduled; waiting to verify a new boot")
         self.app_updates[ident] = result
         if self.selected == ident:
             self.render_detail()
@@ -580,7 +601,7 @@ class Fleetlight(Adw.Application):
         blocked = self.demo or self.busy or self.update_checks_running or bool(self.active_job)
         for kind, button in self.batch_buttons.items():
             candidates, _ = updates.batch_candidates(self.configuration["hosts"], self.snapshots, self.app_updates, kind)
-            title = "Update all Codex CLI" if kind == "cli" else "Update all ChatGPT"
+            title = "Restart required computers" if kind == "restart" else "Update all " + ACTION_NAMES[kind]
             button.set_label(title + " (" + str(len(candidates)) + ")")
             button.set_sensitive(not blocked and bool(candidates))
             button.set_tooltip_text("Run Check now to refresh available releases" if not candidates else "Review computers and start sequential updates")
@@ -589,11 +610,13 @@ class Fleetlight(Adw.Application):
         if self.batch:
             done = len(self.batch.get("results", []))
             total = self.batch.get("total", 0)
-            text = ("Codex CLI" if self.batch["kind"] == "cli" else "ChatGPT") + " fleet updates: " + str(done) + "/" + str(total) + " completed"
+            text = ACTION_NAMES[self.batch["kind"]] + " fleet updates: " + str(done) + "/" + str(total) + " completed"
             if running and self.active_job:
                 text += " · " + self.active_job["host"]["name"] + " · " + self.active_job.get("phase", "Updating")
             elif self.batch.get("stopped"):
                 text += " · " + self.batch["stopped"]
+            if self.pending_restarts:
+                text += " · Awaiting restart verification: " + ", ".join(item["name"] for item in self.pending_restarts.values())
             self.batch_label.set_text(text)
         else:
             self.batch_label.set_text("Fleet-wide updates · only computers with available releases are included")
@@ -605,19 +628,24 @@ class Fleetlight(Adw.Application):
         if not pending:
             self.toast("No eligible updates. Run Check now to refresh releases.")
             return
-        title = "Codex CLI" if kind == "cli" else "ChatGPT"
+        title = ACTION_NAMES[kind]
         body = "Update " + title + " sequentially on these computers:\n\n"
-        body += "\n".join(item["host"]["name"] + " → " + item["checked"]["latest"] for item in pending)
+        body += "\n".join(item["host"]["name"] + (" → " + item["checked"]["latest"] if kind in ("cli", "desktop") else " · " + item["checked"].get("detail", "")) for item in pending)
         if skipped:
             body += "\n\nSkipped: " + "; ".join(item["name"] + " (" + item["reason"] + ")" for item in skipped)
         if kind == "desktop":
             body += "\n\nChatGPT may close and reopen. Finish active work first."
             if any(item["checked"].get("provider") == "linux-pacman" for item in pending):
                 body += " Arch computers require a full system upgrade, including other packages."
+        if kind == "system":
+            body += "\n\nThis installs all available distribution package upgrades using passwordless sudo. Services may restart during installation. Computers are not automatically rebooted."
+        elif kind == "restart":
+            pending.sort(key=lambda item: item["host"].get("local", False))
+            body += "\n\nSave your work. Each computer will restart after a one-minute delay. The local controller is scheduled last. Fleetlight verifies a new boot when each computer returns."
         body += "\n\nThe batch stops if an update fails. You can stop remaining updates without interrupting the active installer."
-        dialog = Adw.MessageDialog(transient_for=self.window, heading="Update all " + title + "?", body=body)
+        dialog = Adw.MessageDialog(transient_for=self.window, heading="Restart required computers?" if kind == "restart" else "Update all " + title + "?", body=body)
         dialog.add_response("cancel", "Cancel")
-        dialog.add_response("update", "Update " + str(len(pending)) + " computers")
+        dialog.add_response("update", ("Restart " if kind == "restart" else "Update ") + str(len(pending)) + " computers")
         dialog.set_response_appearance("update", Adw.ResponseAppearance.SUGGESTED)
         dialog.set_default_response("cancel")
         dialog.set_close_response("cancel")
@@ -698,14 +726,15 @@ class Fleetlight(Adw.Application):
         dialog.present()
 
     def persist_jobs(self):
-        config.atomic_json(self.journal_path, {"active_job": self.active_job, "last_jobs": self.last_jobs, "batch": self.batch})
+        config.atomic_json(self.journal_path, {"active_job": self.active_job, "last_jobs": self.last_jobs, "batch": self.batch, "pending_restarts": self.pending_restarts})
 
     def begin_update(self, host, kind, checked):
         if self.active_job or self.update_checks_running or self.busy:
             return
         ident = uuid.uuid4().hex
         self.active_job = {"id": ident, "host": dict(host), "kind": kind, "target": checked["latest"],
-                           "state": "queued", "phase": "Starting " + ("Codex CLI" if kind == "cli" else "ChatGPT") + " update"}
+                           "boot_id": self.snapshots.get(host["id"], {}).get("boot_id"),
+                           "state": "queued", "phase": "Starting " + ACTION_NAMES[kind]}
         try:
             self.persist_jobs()
         except OSError:
@@ -742,6 +771,11 @@ class Fleetlight(Adw.Application):
         self.active_job.update({k:v for k,v in receipt.items() if k not in ("host", "id", "kind")})
         state = receipt.get("state")
         if state in ("succeeded", "failed", "busy", "interrupted", "unknown"):
+            if state == "succeeded" and self.active_job["kind"] == "restart":
+                host = self.active_job["host"]
+                self.pending_restarts[host["id"]] = {"name": host["name"], "boot_id": self.active_job.get("boot_id"), "scheduled_at": time.time()}
+                if host["id"] in self.app_updates:
+                    self.app_updates[host["id"]]["restart"] = {"state": "scheduled", "detail": "Waiting for new boot"}
             if self.batch and self.batch.get("running"):
                 self.batch.setdefault("results", []).append({"host": self.active_job["host"]["name"], "state": state})
                 if state != "succeeded":

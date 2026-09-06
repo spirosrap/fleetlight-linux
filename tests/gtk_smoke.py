@@ -32,6 +32,8 @@ def verify():
         assert app.app_updates["local"]["cli"]["state"] == "available"
         assert "Update all Codex CLI" in app.batch_buttons["cli"].get_label()
         assert "Update all ChatGPT" in app.batch_buttons["desktop"].get_label()
+        assert "Update all Linux packages" in app.batch_buttons["system"].get_label()
+        assert "Restart required computers" in app.batch_buttons["restart"].get_label()
         assert not app.batch_buttons["cli"].get_sensitive()
         # Drive the real queue state machine with fake jobs: no SSH or installation.
         from fleetlight import updates
