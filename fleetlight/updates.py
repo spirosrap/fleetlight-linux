@@ -1,0 +1,178 @@
+"""Release checks and durable update orchestration for Linux and macOS."""
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import time
+import urllib.request
+import uuid
+import xml.etree.ElementTree as ET
+
+from .config import validate
+from .monitor import run_process
+from .update_job import version
+
+ROOT = Path(__file__).parent
+REGISTRY = "https://registry.npmjs.org/@openai/codex/latest"
+APPCAST = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
+
+
+def connection(host, command):
+    validate({"version": 1, "hosts": [host]})
+    if host.get("local"):
+        return ["/bin/sh", "-c", command]
+    return ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
+            "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2", "--", host["alias"], command]
+
+
+def parse_appcast(raw):
+    if len(raw) > 2_000_000:
+        raise ValueError("Release feed is too large")
+    item = ET.fromstring(raw).find("./channel/item")
+    if item is None:
+        raise ValueError("No release was found")
+    fields = {element.tag.rsplit("}", 1)[-1]: element.text for element in item}
+    release, build = fields.get("shortVersionString"), fields.get("version", "")
+    enclosure = item.find("enclosure")
+    url = enclosure.get("url", "") if enclosure is not None else ""
+    if not version(release) or not build.isdigit() or not re.fullmatch(r"https://persistent\.oaistatic\.com/codex-app-prod/ChatGPT-darwin-arm64-[0-9.]+\.zip", url):
+        raise ValueError("Invalid official application release")
+    return {"version": release, "build": build}
+
+
+def releases():
+    result = {}
+    try:
+        request = urllib.request.Request(REGISTRY, headers={"User-Agent": "Fleetlight/0.2"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read(1_000_000))
+        if not version(data.get("version")):
+            raise ValueError("Invalid stable version")
+        result["cli"] = {"version": data["version"]}
+    except Exception:
+        result["cli"] = {"error": "Could not check the official npm registry"}
+    try:
+        # The official appcast rejects Python's default HTTP user agent.
+        code, raw, _ = run_process(["curl", "-fsSL", "--connect-timeout", "10", "--max-time", "20", APPCAST], 25)
+        if code:
+            raise ValueError("Feed unavailable")
+        result["desktop"] = parse_appcast(raw)
+    except Exception:
+        result["desktop"] = {"error": "Could not check the official macOS appcast"}
+    return result
+
+
+def plan(installed, latest, provider, detail="", build=None, installed_build=None, protected=False):
+    status = "unknown"
+    if version(installed) and version(latest):
+        newer = (int(build) > int(installed_build)) if build and installed_build and str(installed_build).isdigit() else version(latest) > version(installed)
+        status = "available" if newer else "current"
+    elif not installed:
+        status = "missing"
+    if protected:
+        status = "protected"
+    return {"state": status, "installed": installed, "latest": latest, "provider": provider,
+            "build": build, "installed_build": installed_build, "detail": detail, "checked_at": time.time()}
+
+
+def parse_desktop_check(code, output, error=""):
+    lines = output.splitlines()
+    fields = dict(line.split(":", 1) for line in lines if ":" in line)
+    installed = fields.get("INSTALLED_VERSION")
+    latest = fields.get("AVAILABLE_VERSION")
+    provider = fields.get("PROVIDER")
+    modified = fields.get("INSTALLATION") == "modified"
+    if code == 0 and "FLEETLIGHT_CODEX_APP_RELEASE_CHECK" in lines and fields.get("VERIFY") == "ok":
+        result = plan(installed, latest, provider, "Local app repair detected; review it before updating" if modified else "Repository metadata refreshed", protected=modified)
+        if not modified and version(installed) and version(latest):
+            result["state"] = "available" if fields.get("UPDATE_AVAILABLE") == "1" else "current"
+        return result
+    from .update_job import ERRORS
+    reason = fields.get("CHECK", "failed")
+    detail = ERRORS.get(reason, "Update check failed. Check the connection and try again.")
+    result = plan(installed, None, provider, detail, protected=modified or reason == "installation-invalid")
+    if result["state"] == "missing" and reason != "missing":
+        result["state"] = "unknown"
+    return result
+
+
+def check_host(host, snapshot, official):
+    info = snapshot.get("codex_installation", {})
+    installed = snapshot.get("codex")
+    cli = plan(installed, official.get("cli", {}).get("version"), info.get("method"), official.get("cli", {}).get("error", "Official stable release"))
+    if cli["state"] == "available" and info.get("method") not in ("standalone", "npm", "mise"):
+        cli.update(state="unsupported", detail="This installation method requires a manual update")
+    if snapshot.get("status") != "online":
+        cli.update(state="offline", detail="Computer is offline")
+        return {"cli": cli, "desktop": {**cli, "installed": None, "latest": None}}
+    app = snapshot.get("chatgpt", {})
+    if snapshot.get("os") == "Darwin":
+        release = official.get("desktop", {})
+        desktop = plan(app.get("version"), release.get("version"), "macos-appcast", release.get("error", "Signed OpenAI application"), release.get("build"), app.get("build"))
+        if snapshot.get("architecture") != "arm64":
+            desktop.update(state="unsupported", detail="The current macOS app requires Apple Silicon")
+        elif app.get("version") and not app.get("writable", False):
+            desktop.update(state="protected", detail="This account cannot replace /Applications/ChatGPT.app")
+    elif snapshot.get("os") == "Linux":
+        try:
+            script = (ROOT / "updaters/desktop_check.sh").read_text()
+            code, output, error = run_process(connection(host, "/bin/sh -c " + shlex.quote(script)), timeout=180)
+            desktop = parse_desktop_check(code, output, error)
+        except (OSError, TimeoutError):
+            desktop = plan(app.get("version"), None, app.get("provider"), "Repository check timed out or the SSH connection failed")
+    else:
+        desktop = plan(app.get("version"), None, None, "Unsupported operating system")
+    return {"cli": cli, "desktop": desktop}
+
+
+def check_all(hosts, snapshots, callback):
+    official = releases()
+    with ThreadPoolExecutor(max_workers=min(4, len(hosts) or 1)) as pool:
+        pending = {pool.submit(check_host, host, snapshots.get(host["id"], {}), official): host["id"] for host in hosts}
+        for future in as_completed(pending):
+            ident = pending[future]
+            try:
+                value = future.result()
+            except Exception:
+                value = {kind: plan(None, None, None, "Update check failed") for kind in ("cli", "desktop")}
+            callback(ident, value)
+
+
+def job_request(host, request):
+    source = (ROOT / "update_job.py").read_text()
+    payload = dict(request)
+    if request["operation"] == "start":
+        payload["worker_source"] = source
+    command = "python3 -c " + shlex.quote(source)
+    # The payload travels through stdin; no shell interpolation and no secrets in argv.
+    try:
+        result = subprocess.run(connection(host, command), input=json.dumps(payload), text=True,
+                                capture_output=True, timeout=25)
+    except (OSError, subprocess.TimeoutExpired):
+        return {"id": request["id"], "state": "disconnected", "phase": "Connection lost; checking the existing job again"}
+    marker = next((line[len("FLEETLIGHT_JOB="):] for line in result.stdout.splitlines() if line.startswith("FLEETLIGHT_JOB=")), None)
+    try:
+        parsed = json.loads(marker)
+        if not isinstance(parsed, dict) or parsed.get("id") != request["id"]:
+            raise ValueError("Bad receipt")
+        return parsed
+    except (TypeError, ValueError):
+        return {"id": request["id"], "state": "disconnected", "phase": "No verified job receipt; checking the same job again"}
+
+
+def start_job(host, kind, checked, ident=None):
+    if kind not in ("cli", "desktop") or not version(checked.get("latest")):
+        raise ValueError("A verified release check is required")
+    if checked.get("state") not in ("available", "current"):
+        raise ValueError("This installation is protected or unavailable")
+    ident = ident or uuid.uuid4().hex
+    return job_request(host, {"operation": "start", "id": ident, "kind": kind,
+                              "target": checked["latest"], "build": checked.get("build") or "",
+                              "script": (ROOT / ("updaters/cli.sh" if kind == "cli" else "updaters/desktop.sh")).read_text()})
+
+
+def job_status(host, ident):
+    return job_request(host, {"operation": "status", "id": ident})

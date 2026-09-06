@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import threading
 import time
+import uuid
 from urllib.parse import quote
 
 import gi
@@ -13,6 +14,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 from . import __version__
 from . import actions, config
 from .monitor import History, issues, refresh
+from . import updates
 
 
 CSS = b"""
@@ -78,7 +80,7 @@ def uptime(seconds):
 
 class Fleetlight(Adw.Application):
     def __init__(self, configuration=None, demo=False):
-        super().__init__(application_id="io.github.fleetlight.Linux", flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        super().__init__(application_id="io.github.fleetlight.Linux.Demo" if demo else "io.github.fleetlight.Linux", flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.config_file = configuration
         self.demo = demo
         self.window = None
@@ -86,6 +88,26 @@ class Fleetlight(Adw.Application):
         self.busy = False
         self.selected = None
         self.timer = None
+        self.app_updates = {}
+        self.update_checks_running = False
+        self.last_update_check = 0
+        self.active_job = None
+        self.last_jobs = {}
+        self.journal_path = config.state_path().with_name("update-controller.json")
+        if not demo:
+            try:
+                journal = json.loads(self.journal_path.read_text())
+                self.active_job = journal.get("active_job")
+                self.last_jobs = journal.get("last_jobs", {})
+                if not isinstance(self.last_jobs, dict):
+                    self.last_jobs = {}
+                if self.active_job:
+                    config.validate({"version": 1, "hosts": [self.active_job["host"]]})
+                    if not isinstance(self.active_job["id"], str) or len(self.active_job["id"]) != 32:
+                        raise ValueError("Invalid saved job")
+            except (ValueError, OSError, TypeError, KeyError, AttributeError):
+                self.active_job = None
+                self.last_jobs = {}
         self.history = History() if not demo else History(Path("/nonexistent/fleetlight-demo"))
         self.connect("activate", self.activate_window)
 
@@ -108,6 +130,7 @@ class Fleetlight(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.window = Adw.ApplicationWindow(application=self, title="Fleetlight", default_width=1100, default_height=780)
         self.window.set_icon_name("io.github.fleetlight.Linux")
+        self.window.connect("close-request", self.close_requested)
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
         self.window_title = Adw.WindowTitle(title="Fleetlight", subtitle=f"Linux · {__version__}")
@@ -178,6 +201,10 @@ class Fleetlight(Adw.Application):
         self.timer = GLib.timeout_add_seconds(self.configuration.get("refresh_seconds", 60), self.auto_check)
         if self.demo:
             self.refresh_button.set_sensitive(False)
+            self.app_updates = {h["id"]: {kind: updates.plan("1.0.0", "1.1.0" if kind == "cli" else "1.0.0", "standalone" if kind == "cli" else "macos-appcast") for kind in ("cli", "desktop")} for h in self.configuration["hosts"]}
+            self.render_detail()
+        elif self.active_job:
+            self.watch_job()
         else:
             self.check()
         if load_error:
@@ -188,12 +215,13 @@ class Fleetlight(Adw.Application):
 
     def auto_check(self):
         if not self.demo:
-            self.check()
+            self.check(force_updates=False)
         return GLib.SOURCE_CONTINUE
 
-    def check(self):
-        if self.busy or self.demo:
+    def check(self, force_updates=True):
+        if self.busy or self.demo or self.update_checks_running or self.active_job:
             return
+        self.force_update_check = force_updates
         self.busy = True
         self.refresh_button.set_sensitive(False)
         self.spinner.start()
@@ -225,6 +253,8 @@ class Fleetlight(Adw.Application):
         self.populate_hosts()
         if warning:
             self.toast(warning)
+        if self.force_update_check or time.time() - self.last_update_check > 900:
+            self.check_application_updates()
         return GLib.SOURCE_REMOVE
 
     def populate_hosts(self):
@@ -275,7 +305,9 @@ class Fleetlight(Adw.Application):
             self.render_detail()
 
     def render_detail(self):
-        host = next(h for h in self.configuration["hosts"] if h["id"] == self.selected)
+        host = next((h for h in self.configuration["hosts"] if h["id"] == self.selected), None)
+        if host is None:
+            return
         data = self.snapshots.get(host["id"], {})
         clear(self.content)
         hero = box(False, 12)
@@ -335,23 +367,43 @@ class Fleetlight(Adw.Application):
         card.append(label(f"Load {data.get('load', '—')} · {data.get('cpus', '—')} CPUs", "muted"))
         metrics.append(card)
         self.content.append(metrics)
-        apps = self.section("Applications", "Installed versions from this computer")
-        self.detail_row(apps, "Codex CLI", data.get("codex") or "Not detected", "utilities-terminal-symbolic")
+        apps = self.section("Applications", "Installed and available versions")
+        self.update_row(apps, host, "cli", "Codex CLI", data.get("codex"), "utilities-terminal-symbolic")
         desktop = data.get("chatgpt", {})
-        self.detail_row(apps, "ChatGPT", desktop.get("version") or "Not detected", "applications-internet-symbolic")
-        if desktop.get("provider"):
-            note = label(desktop["provider"] + " · " + desktop.get("status", "installed"), "muted")
-            note.set_wrap(True)
-            apps.append(note)
-        if desktop.get("provider") in ("APT", "pacman"):
-            note = label("Package metadata only. Local app repairs are preserved; file integrity is not asserted.", "muted")
-            note.set_wrap(True)
-            apps.append(note)
+        self.update_row(apps, host, "desktop", "ChatGPT", desktop.get("version"), "applications-internet-symbolic")
+        if self.active_job and self.active_job["host"]["id"] == host["id"]:
+            progress = Gtk.ProgressBar()
+            progress.pulse()
+            apps.append(progress)
+            phase = label(self.active_job.get("phase", "Preparing update"), "good")
+            phase.set_wrap(True)
+            apps.append(phase)
+        last = self.last_jobs.get(host["id"])
+        if last:
+            result_label = label(last.get("phase", ""), "good" if last.get("state") == "succeeded" else "warning")
+            result_label.set_wrap(True)
+            apps.append(result_label)
+        log = (self.active_job or {}).get("log") if (self.active_job or {}).get("host", {}).get("id") == host["id"] else (last or {}).get("log")
+        if log:
+            expander = Gtk.Expander(label="Update log")
+            log_view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+            log_view.get_buffer().set_text(log[-12000:])
+            log_scroll = Gtk.ScrolledWindow(min_content_height=120, max_content_height=200)
+            log_scroll.set_child(log_view)
+            expander.set_child(log_scroll)
+            apps.append(expander)
         services = self.section("Services", "Configured system services")
         states = data.get("services", {})
         for name in host.get("services", []):
             state = states.get(name, "not checked")
-            self.detail_row(services, name, state, "emblem-system-symbolic", "good" if state == "active" else "warning")
+            optional = name in host.get("optional_services", [])
+            neutral = state == "unsupported" or (optional and state in ("inactive", "not installed"))
+            self.detail_row(services, name + (" · optional" if optional else ""), state, "emblem-system-symbolic", "good" if state == "active" else "muted" if neutral else "warning")
+            required = Gtk.CheckButton(label="Warn when stopped")
+            required.set_active(not optional)
+            required.set_sensitive(not self.demo and not self.busy and not self.update_checks_running and not self.active_job)
+            required.connect("toggled", lambda button, service=name: self.service_preference(host, service, button.get_active()))
+            services.append(required)
         if not host.get("services"):
             note = label("No services configured. Add systemd unit names in Settings.", "muted")
             note.set_wrap(True)
@@ -371,6 +423,7 @@ class Fleetlight(Adw.Application):
         if data.get("package_manager") in actions.UPDATE_COMMANDS:
             update = Gtk.Button(label="System updates…")
             update.connect("clicked", lambda *_: self.confirm_update(host, data["package_manager"]))
+            update.set_sensitive(not self.active_job and not self.update_checks_running)
             controls.append(update)
         if self.demo:
             controls.set_sensitive(False)
@@ -405,6 +458,178 @@ class Fleetlight(Adw.Application):
         value_label.set_wrap(True)
         row.append(value_label)
         parent.append(row)
+
+    def update_row(self, parent, host, kind, name, installed, icon):
+        row = box(False, 10)
+        row.append(Gtk.Image.new_from_icon_name(icon))
+        description = box(True, 4)
+        description.set_hexpand(True)
+        description.append(label(name))
+        checked = self.app_updates.get(host["id"], {}).get(kind, {})
+        state = checked.get("state", "checking" if self.update_checks_running else "unknown")
+        latest = checked.get("latest")
+        versions = (installed or checked.get("installed") or "Not detected") + (" → " + latest if state == "available" else "")
+        description.append(label(versions, "muted"))
+        detail = checked.get("detail", "Checking for updates…" if self.update_checks_running else "Press Check now to check releases")
+        if state == "current":
+            detail = "Up to date" + (" · " + checked["provider"] if checked.get("provider") else "")
+        if state == "protected":
+            detail = "Protected · " + detail
+        note = label(detail, "warning" if state in ("protected", "unknown", "unsupported") else "muted")
+        note.set_wrap(True)
+        description.append(note)
+        row.append(description)
+        if state == "available":
+            button = Gtk.Button(label="Update")
+            button.add_css_class("suggested-action")
+            button.set_valign(Gtk.Align.CENTER)
+            button.set_sensitive(not self.demo and not self.busy and not self.update_checks_running and not self.active_job)
+            button.connect("clicked", lambda *_: self.request_update(host, kind, checked))
+            row.append(button)
+        elif state == "current":
+            row.append(label("Current", "good"))
+        parent.append(row)
+
+    def service_preference(self, host, name, required):
+        candidate = json.loads(json.dumps(self.configuration))
+        updated = next(h for h in candidate["hosts"] if h["id"] == host["id"])
+        optional = set(updated.get("optional_services", []))
+        optional.discard(name) if required else optional.add(name)
+        updated["optional_services"] = sorted(optional)
+        try:
+            config.atomic_json(self.config_file or config.config_path(), config.validate(candidate))
+        except (ValueError, OSError):
+            self.toast("Could not save the service preference")
+            self.render_detail()
+            return
+        self.configuration = candidate
+        if host["id"] in self.snapshots:
+            self.snapshots[host["id"]]["optional_services"] = updated["optional_services"]
+        self.populate_hosts()
+        self.render_detail()
+
+    def check_application_updates(self):
+        if self.update_checks_running or self.active_job or self.demo:
+            return
+        self.update_checks_running = True
+        self.refresh_button.set_sensitive(False)
+        self.refresh_button.set_label("Checking updates…")
+        self.spinner.start()
+        self.render_detail()
+        def work():
+            try:
+                updates.check_all(self.configuration["hosts"], dict(self.snapshots),
+                                  lambda ident, result: GLib.idle_add(self.receive_updates, ident, result))
+            finally:
+                GLib.idle_add(self.finished_updates)
+        threading.Thread(target=work, daemon=True).start()
+
+    def receive_updates(self, ident, result):
+        self.app_updates[ident] = result
+        if self.selected == ident:
+            self.render_detail()
+        return GLib.SOURCE_REMOVE
+
+    def finished_updates(self):
+        self.update_checks_running = False
+        self.last_update_check = time.time()
+        self.refresh_button.set_label("Check now")
+        self.refresh_button.set_sensitive(True)
+        self.spinner.stop()
+        self.render_detail()
+        try:
+            config.atomic_json(config.state_path().with_name("application-checks.json"), self.app_updates)
+        except OSError:
+            self.toast("Checks completed, but the local receipt could not be saved")
+        return GLib.SOURCE_REMOVE
+
+    def request_update(self, host, kind, checked):
+        if self.active_job or self.update_checks_running or self.busy or self.demo:
+            return
+        if checked.get("state") != "available" or time.time() - checked.get("checked_at", 0) > 1800:
+            self.toast("Run Check now before updating")
+            return
+        if kind == "cli":
+            self.begin_update(host, kind, checked)
+            return
+        body = "Install ChatGPT " + checked["latest"] + " on " + host["name"] + "? The app may close and reopen after verification. Finish any active work first."
+        if checked.get("provider") == "linux-pacman":
+            body += "\n\nArch requires a full system upgrade. Other system packages will also be updated. Locally modified ChatGPT files block this update."
+        dialog = Adw.MessageDialog(transient_for=self.window, heading="Update ChatGPT?", body=body)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("update", "Update and reopen")
+        dialog.set_response_appearance("update", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", lambda _, response: self.begin_update(host, kind, checked) if response == "update" else None)
+        dialog.present()
+
+    def persist_jobs(self):
+        config.atomic_json(self.journal_path, {"active_job": self.active_job, "last_jobs": self.last_jobs})
+
+    def begin_update(self, host, kind, checked):
+        if self.active_job or self.update_checks_running or self.busy:
+            return
+        ident = uuid.uuid4().hex
+        self.active_job = {"id": ident, "host": dict(host), "kind": kind, "target": checked["latest"],
+                           "state": "queued", "phase": "Starting " + ("Codex CLI" if kind == "cli" else "ChatGPT") + " update"}
+        try:
+            self.persist_jobs()
+        except OSError:
+            self.active_job = None
+            self.toast("Update was not started: its recovery receipt could not be saved")
+            return
+        self.last_jobs.pop(host["id"], None)
+        self.refresh_button.set_sensitive(False)
+        self.spinner.start()
+        self.render_detail()
+        def start():
+            try:
+                receipt = updates.start_job(host, kind, checked, ident)
+            except Exception as error:
+                receipt = {"state": "failed", "phase": "Update could not start: " + str(error)}
+            GLib.idle_add(self.receive_job, receipt)
+        threading.Thread(target=start, daemon=True).start()
+
+    def watch_job(self):
+        if not self.active_job:
+            return GLib.SOURCE_REMOVE
+        job = dict(self.active_job)
+        self.refresh_button.set_sensitive(False)
+        self.spinner.start()
+        def poll():
+            receipt = updates.job_status(job["host"], job["id"])
+            GLib.idle_add(self.receive_job, receipt)
+        threading.Thread(target=poll, daemon=True).start()
+        return GLib.SOURCE_REMOVE
+
+    def receive_job(self, receipt):
+        if not self.active_job:
+            return GLib.SOURCE_REMOVE
+        self.active_job.update({k:v for k,v in receipt.items() if k not in ("host", "id", "kind")})
+        state = receipt.get("state")
+        if state in ("succeeded", "failed", "busy", "interrupted", "unknown"):
+            self.last_jobs[self.active_job["host"]["id"]] = dict(self.active_job)
+            self.toast(receipt.get("phase", "Update completed"))
+            self.active_job = None
+            self.spinner.stop()
+            self.refresh_button.set_sensitive(True)
+        try:
+            self.persist_jobs()
+        except OSError:
+            self.toast("Could not save the latest update receipt; keep Fleetlight open")
+        self.render_detail()
+        if self.active_job:
+            GLib.timeout_add_seconds(3 if state != "disconnected" else 10, self.watch_job)
+        else:
+            self.check()
+        return GLib.SOURCE_REMOVE
+
+    def close_requested(self, *_):
+        if self.active_job:
+            self.toast("An update is running. Keep Fleetlight open to follow progress.")
+            return True
+        return False
 
     def terminal(self, host, manager=None):
         try:
@@ -456,7 +681,7 @@ class Fleetlight(Adw.Application):
         save.add_css_class("suggested-action")
         save.set_sensitive(not self.demo)
         def add(*_):
-            if self.busy:
+            if self.busy or self.update_checks_running or self.active_job:
                 error.set_text("Wait for the current check to finish")
                 return
             import uuid
@@ -500,7 +725,7 @@ class Fleetlight(Adw.Application):
         save = Gtk.Button(label="Save settings")
         save.add_css_class("suggested-action")
         def apply(*_):
-            if self.busy:
+            if self.busy or self.update_checks_running or self.active_job:
                 error.set_text("Wait for the current check to finish")
                 return
             buffer = editor.get_buffer()

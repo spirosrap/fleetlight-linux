@@ -68,7 +68,7 @@ def probe_host(host):
         if data.get("nonce") != nonce or data.get("schema") != 1:
             raise ValueError("Invalid probe receipt")
         data.pop("nonce", None)
-        data.update(id=host["id"], status="online", check_ms=round(1000 * (time.monotonic() - start)))
+        data.update(optional_services=host.get("optional_services", []), id=host["id"], status="online", check_ms=round(1000 * (time.monotonic() - start)))
         return data
     except (OSError, TimeoutError, ValueError, TypeError):
         return {**base, "error": "Check timed out or returned an invalid receipt"}
@@ -95,7 +95,7 @@ def issues(snapshot):
     if (snapshot.get("memory_percent") or 0) >= 95:
         result.append("Memory usage is high")
     for name, state in snapshot.get("services", {}).items():
-        if state not in ("active", "unsupported"):
+        if state not in ("active", "unsupported") and not (name in snapshot.get("optional_services", []) and state in ("inactive", "not installed")):
             result.append(name + ": " + state)
     return result
 

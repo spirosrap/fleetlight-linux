@@ -46,19 +46,43 @@ def memory(system):
     return None
 
 
+def codex_executable():
+    shell = os.environ.get("SHELL", "/bin/sh")
+    found = command([shell, "-ic", "command -v codex"], timeout=3).splitlines()
+    if found and os.path.isfile(found[-1]) and os.access(found[-1], os.X_OK):
+        return found[-1]
+    return shutil.which("codex")
+
+
 def codex_version():
     paths = [str(Path.home() / suffix) for suffix in (
         ".local/bin", ".local/share/mise/shims", ".npm-global/bin")]
     paths += sorted(glob.glob(str(Path.home() / ".nvm/versions/node/*/bin")), reverse=True)
     paths += ["/opt/homebrew/bin", "/usr/local/bin"]
     os.environ["PATH"] = os.pathsep.join(paths + [os.environ.get("PATH", "")])
-    executable = shutil.which("codex")
+    executable = codex_executable()
     if executable:
         result = command([executable, "--version"], timeout=5)
         match = re.search(r"codex(?:-cli)?\s+(\d+\.\d+\.\d+[^\s]*)", result)
         if match:
             return match[1]
     return None
+
+
+def codex_installation():
+    executable = codex_executable()
+    if not executable:
+        return {}
+    resolved = os.path.realpath(executable)
+    paths = executable + ":" + resolved
+    method = "unknown"
+    if "/.codex/packages/standalone/" in paths:
+        method = "standalone"
+    elif "/mise/shims/" in paths or "/mise/installs/codex/" in paths:
+        method = "mise"
+    elif "/node_modules/@openai/codex/" in paths:
+        method = "npm"
+    return {"method": method}
 
 
 def desktop_app(system):
@@ -69,7 +93,8 @@ def desktop_app(system):
             with path.open("rb") as stream:
                 data = plistlib.load(stream)
             if data.get("CFBundleIdentifier") == "com.openai.codex":
-                result.update(version=data.get("CFBundleShortVersionString"), provider="macOS app", status="installed")
+                result.update(version=data.get("CFBundleShortVersionString"), build=data.get("CFBundleVersion"),
+                              writable=os.access("/Applications", os.W_OK), provider="macOS app", status="installed")
         except (OSError, ValueError, plistlib.InvalidFileException):
             pass
         return result
@@ -136,13 +161,15 @@ def collect(services=()):
         if line.startswith("PRETTY_NAME="):
             distro = line.split("=", 1)[1].strip('"')
     manager = next((name for name in ("pacman", "apt", "dnf") if shutil.which(name)), None)
+    cli = codex_version()
     return {"schema": 1, "hostname": platform.node(), "os": system, "distribution": distro,
+            "architecture": platform.machine(), "codex_installation": codex_installation(),
             "package_manager": manager,
             "kernel": platform.release(), "checked_at": time.time(), "uptime": uptime,
             "disk_percent": round(100 * disk.used / disk.total), "disk_free": disk.free,
             "memory_percent": memory(system), "load": round(os.getloadavg()[0], 2),
             "cpus": os.cpu_count() or 1, "services": service_states,
-            "codex": codex_version(), "chatgpt": desktop_app(system)}
+            "codex": cli, "chatgpt": desktop_app(system)}
 
 
 if __name__ == "__main__":

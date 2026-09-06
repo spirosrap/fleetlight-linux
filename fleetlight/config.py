@@ -50,6 +50,9 @@ def validate(config):
             raise ValueError("At most 20 services are supported per computer")
         if any(not isinstance(s, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,100}", s) for s in services):
             raise ValueError("Use systemd service names without paths or command options")
+        optional = host.get("optional_services", [])
+        if not isinstance(optional, list) or any(not isinstance(s, str) or s not in services for s in optional):
+            raise ValueError("optional_services must be a list of configured service names")
     return config
 
 

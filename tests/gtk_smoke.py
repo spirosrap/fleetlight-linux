@@ -24,6 +24,12 @@ def verify():
         assert app.host_list.get_row_at_index(0) is None
         app.attention.set_active(False)
         assert app.host_list.get_row_at_index(0) is not None
+        parent = Gtk.Box()
+        app.update_row(parent, app.configuration["hosts"][0], "cli", "Codex CLI", "1.0.0", "utilities-terminal-symbolic")
+        button = parent.get_first_child().get_last_child()
+        assert isinstance(button, Gtk.Button) and button.get_label() == "Update"
+        assert not button.get_sensitive()
+        assert app.app_updates["local"]["cli"]["state"] == "available"
         app.settings()
         app.add_computer()
         assert len(app.get_windows()) >= 1
