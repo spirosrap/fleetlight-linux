@@ -10,7 +10,7 @@ def result(code=0, output=''):
 
 class SystemTests(unittest.TestCase):
     def test_arch_protects_modified_app_when_update_would_replace_it(self):
-        with patch.object(system_ops.platform, 'system', return_value='Linux'), patch.object(system_ops.shutil, 'which', return_value='/bin/tool'), patch.object(system_ops, 'reboot_status', return_value={'required':False}), patch.object(system_ops, 'run', side_effect=[result(0, 'openai-codex-desktop 1 -> 2\nlinux 1 -> 2\n'), result(1)]):
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), patch.object(system_ops.shutil, 'which', return_value='/bin/tool'), patch.object(system_ops, 'reboot_status', return_value={'required':False}), patch.object(system_ops, 'run', side_effect=[result(0, 'linux 1 -> 2\n'), result(0), result(1)]):
             self.assertEqual(system_ops.check()['state'], 'protected')
 
     def test_metadata_failure_never_reported_current(self):

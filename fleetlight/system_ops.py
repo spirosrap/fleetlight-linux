@@ -56,7 +56,7 @@ def check():
             result['detail'] = 'Package metadata refresh failed'
             return result
         packages = [line.split()[0] for line in completed.stdout.splitlines() if ' -> ' in line]
-        protected = 'openai-codex-desktop' in packages and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
+        protected = bool(packages) and run(['pacman', '-Q', 'openai-codex-desktop']).returncode == 0 and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
     elif manager == 'apt':
         completed = run(['sudo', '-n', 'apt-get', 'update'])
         if completed.returncode:
@@ -67,7 +67,8 @@ def check():
             result['detail'] = 'Package upgrade planning failed'
             return result
         packages = [line.split()[1] for line in completed.stdout.splitlines() if line.startswith('Inst ')]
-        verification = run(['dpkg', '--verify', 'chatgpt']) if 'chatgpt' in packages else None
+        installed = run(['dpkg-query', '-W', '-f=${Status}', 'chatgpt']) if packages else None
+        verification = run(['dpkg', '--verify', 'chatgpt']) if installed is not None and installed.stdout.strip() == 'install ok installed' else None
         protected = verification is not None and (verification.returncode != 0 or bool(verification.stdout.strip()))
     else:
         completed = run(['dnf', '-q', 'check-update', '--refresh'])
@@ -77,7 +78,7 @@ def check():
         packages = [line.split()[0] for line in completed.stdout.splitlines() if len(line.split()) == 3 and '.' in line.split()[0]]
         protected = False
     result.update(packages=packages, state='protected' if protected else 'available' if packages else 'current',
-                  detail='ChatGPT has local modifications and would be replaced' if protected else str(len(packages)) + ' package updates')
+                  detail='ChatGPT has local modifications; review system upgrades manually' if protected else str(len(packages)) + ' package updates')
     return result
 
 
