@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def run(args, env=None):
@@ -58,9 +59,23 @@ def check():
         packages = [line.split()[0] for line in completed.stdout.splitlines() if ' -> ' in line]
         protected = bool(packages) and run(['pacman', '-Q', 'openai-codex-desktop']).returncode == 0 and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
     elif manager == 'apt':
-        completed = run(['sudo', '-n', 'apt-get', 'update'])
+        for attempt in range(3):
+            completed = run(['sudo', '-n', 'apt-get', 'update'])
+            output = completed.stdout.lower()
+            locked = any(message in output for message in (
+                'could not get lock', 'unable to acquire', 'held by process'))
+            if not completed.returncode or not locked or attempt == 2:
+                break
+            time.sleep(3)
         if completed.returncode:
-            result['detail'] = 'Package metadata refresh needs passwordless sudo or repository repair'
+            if locked:
+                result['detail'] = 'Another package operation is running; retry after it finishes'
+            elif 'sudo:' in output and any(message in output for message in (
+                    'password is required', 'not allowed', 'not in the sudoers')):
+                result['detail'] = 'Passwordless sudo is required for package metadata refresh'
+            else:
+                result['detail'] = 'Package metadata refresh failed; check repository or network errors'
+            result['error_output'] = completed.stdout[-4000:]
             return result
         completed = run(['apt-get', '-s', 'upgrade'])
         if completed.returncode:

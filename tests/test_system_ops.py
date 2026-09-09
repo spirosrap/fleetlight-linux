@@ -17,6 +17,24 @@ class SystemTests(unittest.TestCase):
         with patch.object(system_ops.platform, 'system', return_value='Linux'), patch.object(system_ops.shutil, 'which', return_value='/bin/tool'), patch.object(system_ops, 'reboot_status', return_value={'required':False}), patch.object(system_ops, 'run', return_value=result(1)):
             self.assertEqual(system_ops.check()['state'], 'unknown')
 
+    def apt_check(self, responses):
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), patch.object(system_ops.shutil, 'which', side_effect=lambda name: '/bin/apt' if name == 'apt' else None), patch.object(system_ops, 'reboot_status', return_value={'required': False}), patch.object(system_ops, 'run', side_effect=responses), patch.object(system_ops.time, 'sleep'):
+            return system_ops.check()
+
+    def test_apt_lock_retries_without_blaming_sudo(self):
+        lock = result(100, 'E: Could not get lock /var/lib/apt/lists/lock. It is held by process 123')
+        self.assertEqual(self.apt_check([lock, result(), result()])['state'], 'current')
+        failure = self.apt_check([lock, lock, lock])
+        self.assertIn('Another package operation', failure['detail'])
+        self.assertIn('held by process', failure['error_output'])
+
+    def test_apt_permission_and_repository_failures_are_distinct(self):
+        denied = self.apt_check([result(1, 'sudo: a password is required')])
+        self.assertIn('Passwordless sudo', denied['detail'])
+        repo = self.apt_check([result(100, 'E: Repository has no Release file')])
+        self.assertNotIn('sudo', repo['detail'])
+        self.assertIn('Repository', repo['error_output'])
+
     def test_no_update_when_protected(self):
         with patch.object(system_ops, 'check', return_value={'state':'protected'}), patch.object(system_ops.subprocess, 'call') as install:
             self.assertEqual(system_ops.update(), 1)
