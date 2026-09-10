@@ -348,7 +348,7 @@ class Fleetlight(Adw.Application):
         clear(self.host_list)
         selected_row = None
         query = self.search.get_text().casefold()
-        for host in hosts:
+        for host in sorted(hosts, key=lambda host: not host.get("local", False)):
             if query and query not in host["name"].casefold():
                 continue
             snapshot = self.snapshots.get(host["id"], {})
