@@ -132,6 +132,34 @@ def desktop_app(system):
     return result
 
 
+def cpu_temperature(system, root="/sys"):
+    """Hottest readable CPU sensor in Celsius; never substitute GPU/battery heat."""
+    if system != "Linux":
+        return None
+    values = []
+    def read_value(path):
+        try:
+            value = int(text(path).strip()) / 1000
+            if -20 <= value <= 150:
+                values.append(value)
+        except ValueError:
+            pass
+    for device in Path(root, "class/hwmon").glob("hwmon*"):
+        driver = text(device / "name").strip()
+        if driver not in ("coretemp", "k10temp", "k8temp", "zenpower"):
+            continue
+        inputs = list(device.glob("temp*_input"))
+        # AMD Tctl may include a control offset; prefer physical die readings.
+        physical = [p for p in inputs if text(p.with_name(p.name.replace("_input", "_label"))).strip().startswith(("Tdie", "Tccd"))]
+        for path in physical or inputs:
+            read_value(path)
+    if not values:
+        for zone in Path(root, "class/thermal").glob("thermal_zone*"):
+            if text(zone / "type").strip().lower() in ("x86_pkg_temp", "cpu-thermal", "cpu_thermal"):
+                read_value(zone / "temp")
+    return round(max(values), 1) if values else None
+
+
 def collect_metrics(system=None):
     """Cheap live values; Linux uses kernel files and statvfs, without subprocesses."""
     system = system or platform.system()
@@ -148,7 +176,8 @@ def collect_metrics(system=None):
             uptime = max(0, int(time.time()) - int(match[1]))
     return {"metrics_checked_at": time.time(), "uptime": uptime,
             "disk_percent": round(100 * disk.used / disk.total), "disk_free": disk.free,
-            "memory_percent": memory(system), "load": round(os.getloadavg()[0], 2)}
+            "memory_percent": memory(system), "load": round(os.getloadavg()[0], 2),
+            "cpu_temperature": cpu_temperature(system)}
 
 
 def collect(services=()):

@@ -313,7 +313,7 @@ class Fleetlight(Adw.Application):
         current = self.snapshots.get(snapshot["id"], {})
         if snapshot.get("status") == "online" and current.get("metrics_checked_at", 0) > snapshot.get("metrics_checked_at", 0):
             snapshot = {**snapshot, **{key: current[key] for key in (
-                "metrics_checked_at", "uptime", "disk_percent", "disk_free", "memory_percent", "load")}}
+                "metrics_checked_at", "uptime", "disk_percent", "disk_free", "memory_percent", "load", "cpu_temperature") if key in current}}
         pending = self.pending_restarts.get(snapshot["id"])
         if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
             self.pending_restarts.pop(snapshot["id"], None)
@@ -449,6 +449,14 @@ class Fleetlight(Adw.Application):
         card.append(label(f"Load {data.get('load', '—')} · {data.get('cpus', '—')} CPUs", "muted"))
         metrics.append(card)
         self.content.append(metrics)
+        temperature = data.get("cpu_temperature") if online else None
+        card = box(True, 10)
+        card.add_css_class("card")
+        card.append(label("CPU TEMPERATURE", "eyebrow"))
+        card.append(label(f"{temperature:.1f} °C" if temperature is not None else "—", "metric"))
+        card.append(label("Hottest CPU sensor" if temperature is not None else
+                          ("Waiting for a check" if not online else "CPU sensor unavailable"), "muted"))
+        metrics.append(card)
         apps = self.section("Applications", "Installed and available versions")
         self.update_row(apps, host, "cli", "Codex CLI", data.get("codex"), "utilities-terminal-symbolic")
         desktop = data.get("chatgpt", {})

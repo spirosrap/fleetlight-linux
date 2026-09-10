@@ -6,7 +6,9 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
-## Version 0.3.1
+## Version 0.3.2
+
+- Show CPU temperature in Celsius for Linux hosts with readable Intel/AMD CPU sensors or supported CPU thermal zones. Local readings update every two seconds; remote readings arrive with normal SSH checks. Missing sensors and macOS currently show “CPU sensor unavailable”; no privileged sensor commands are run.
 
 - Refresh local memory, load, disk space and uptime every two seconds with lightweight collection.
 - Show the current computer first in the fleet sidebar, preserving the other computers' order.
