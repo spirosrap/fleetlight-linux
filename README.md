@@ -6,7 +6,12 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
-## Version 0.3.0
+## Version 0.3.1
+
+- Refresh local memory, load, disk space and uptime every two seconds with lightweight collection.
+- Show the current computer first in the fleet sidebar, preserving the other computers' order.
+
+### Existing features
 
 - A Wayland-native desktop application with a searchable fleet sidebar, attention filter and automatic checks.
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
