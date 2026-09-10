@@ -132,8 +132,9 @@ def desktop_app(system):
     return result
 
 
-def collect(services=()):
-    system = platform.system()
+def collect_metrics(system=None):
+    """Cheap live values; Linux uses kernel files and statvfs, without subprocesses."""
+    system = system or platform.system()
     disk = shutil.disk_usage("/")
     uptime = None
     if system == "Linux":
@@ -145,6 +146,14 @@ def collect(services=()):
         match = re.search(r"sec = (\d+)", command(["sysctl", "-n", "kern.boottime"]))
         if match:
             uptime = max(0, int(time.time()) - int(match[1]))
+    return {"metrics_checked_at": time.time(), "uptime": uptime,
+            "disk_percent": round(100 * disk.used / disk.total), "disk_free": disk.free,
+            "memory_percent": memory(system), "load": round(os.getloadavg()[0], 2)}
+
+
+def collect(services=()):
+    system = platform.system()
+    metrics = collect_metrics(system)
     service_states = {}
     for service in services:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,100}", service):
@@ -166,9 +175,7 @@ def collect(services=()):
             "architecture": platform.machine(), "codex_installation": codex_installation(),
             "package_manager": manager,
             "boot_id": text("/proc/sys/kernel/random/boot_id").strip() if system == "Linux" else None,
-            "kernel": platform.release(), "checked_at": time.time(), "uptime": uptime,
-            "disk_percent": round(100 * disk.used / disk.total), "disk_free": disk.free,
-            "memory_percent": memory(system), "load": round(os.getloadavg()[0], 2),
+            "kernel": platform.release(), "checked_at": time.time(), **metrics,
             "cpus": os.cpu_count() or 1, "services": service_states,
             "codex": cli, "chatgpt": desktop_app(system)}
 

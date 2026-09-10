@@ -14,6 +14,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 from . import __version__
 from . import actions, config
 from .monitor import History, issues, refresh
+from .probe import collect_metrics
 from . import updates
 
 
@@ -90,6 +91,7 @@ class Fleetlight(Adw.Application):
         self.busy = False
         self.selected = None
         self.timer = None
+        self.local_metrics_busy = False
         self.app_updates = {}
         self.update_checks_running = False
         self.last_update_check = 0
@@ -231,6 +233,8 @@ class Fleetlight(Adw.Application):
         self.populate_hosts()
         self.window.present()
         self.timer = GLib.timeout_add_seconds(self.configuration.get("refresh_seconds", 60), self.auto_check)
+        if not self.demo:
+            GLib.timeout_add_seconds(2, self.check_local_metrics)
         if self.demo:
             self.refresh_button.set_sensitive(False)
             self.app_updates = {h["id"]: {kind: updates.plan("1.0.0", "1.1.0" if kind == "cli" else "1.0.0", "standalone" if kind == "cli" else "macos-appcast") for kind in ("cli", "desktop")} for h in self.configuration["hosts"]}
@@ -275,7 +279,41 @@ class Fleetlight(Adw.Application):
             GLib.idle_add(self.finished, warning)
         threading.Thread(target=work, daemon=True).start()
 
+    def check_local_metrics(self):
+        hosts = [h for h in self.configuration["hosts"] if h.get("local")]
+        if self.demo or self.local_metrics_busy or not hosts:
+            return GLib.SOURCE_CONTINUE
+        self.local_metrics_busy = True
+        def work():
+            try:
+                metrics = collect_metrics()
+            except (OSError, ValueError):
+                metrics = None
+            GLib.idle_add(self.receive_local_metrics, hosts, metrics)
+        threading.Thread(target=work, daemon=True).start()
+        return GLib.SOURCE_CONTINUE
+
+    def receive_local_metrics(self, hosts, metrics):
+        self.local_metrics_busy = False
+        if metrics is None:
+            return GLib.SOURCE_REMOVE
+        changed = False
+        for host in hosts:
+            if host not in self.configuration["hosts"]:
+                continue
+            snapshot = self.snapshots.get(host["id"], {})
+            if snapshot.get("status") == "online" and metrics["metrics_checked_at"] > snapshot.get("metrics_checked_at", 0):
+                self.snapshots[host["id"]] = {**snapshot, **metrics}
+                changed = True
+        if changed:
+            self.populate_hosts()
+        return GLib.SOURCE_REMOVE
+
     def receive(self, snapshot):
+        current = self.snapshots.get(snapshot["id"], {})
+        if snapshot.get("status") == "online" and current.get("metrics_checked_at", 0) > snapshot.get("metrics_checked_at", 0):
+            snapshot = {**snapshot, **{key: current[key] for key in (
+                "metrics_checked_at", "uptime", "disk_percent", "disk_free", "memory_percent", "load")}}
         pending = self.pending_restarts.get(snapshot["id"])
         if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
             self.pending_restarts.pop(snapshot["id"], None)
@@ -486,7 +524,8 @@ class Fleetlight(Adw.Application):
                 line = label(time.strftime("%H:%M", time.localtime(event["time"])) + "  ·  " + event["message"], "muted")
                 line.set_wrap(True)
                 activity.append(line)
-        footer = label(f"Automatic checks every {self.configuration.get('refresh_seconds', 60)} seconds · " +
+        footer = label(("Local metrics every 2 seconds · " if host.get("local") else "") +
+                       f"Full checks every {self.configuration.get('refresh_seconds', 60)} seconds · " +
                        (f"Last check took {data['check_ms'] / 1000:.1f}s" if data.get("check_ms") else "No verified receipt yet"), "muted")
         footer.set_wrap(True)
         self.content.append(footer)

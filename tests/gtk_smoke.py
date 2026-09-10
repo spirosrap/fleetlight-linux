@@ -15,6 +15,20 @@ def verify():
         assert app.summary.get_text() == "4 of 4 online"
         assert "4/4 online" in app.window_title.get_subtitle()
         assert app.selected == "local"
+        # Live metrics preserve full receipts and leave remote hosts alone.
+        local = app.configuration["hosts"][0]
+        from fleetlight.probe import collect_metrics
+        metrics = collect_metrics()
+        original = dict(app.snapshots["local"])
+        remote = dict(app.snapshots["studio"])
+        app.receive_local_metrics([local], metrics)
+        assert app.snapshots["local"]["metrics_checked_at"] == metrics["metrics_checked_at"]
+        assert app.snapshots["local"]["services"] == original["services"]
+        assert app.snapshots["studio"] == remote
+        app.receive(original)
+        assert app.snapshots["local"]["metrics_checked_at"] == metrics["metrics_checked_at"]
+        app.receive_local_metrics([local], dict(metrics, metrics_checked_at=0))
+        assert app.snapshots["local"]["metrics_checked_at"] == metrics["metrics_checked_at"]
         app.search.set_text("Studio")
         app.populate_hosts()
         assert app.selected == "studio"
