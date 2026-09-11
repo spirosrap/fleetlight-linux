@@ -60,8 +60,26 @@ def check():
         protected = bool(packages) and run(['pacman', '-Q', 'openai-codex-desktop']).returncode == 0 and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
     elif manager == 'apt':
         for attempt in range(3):
-            completed = run(['sudo', '-n', 'apt-get', 'update'])
+            # Keep this comfortably inside the controller's remote-check timeout.
+            # `timeout` runs as root so it can also stop the apt child cleanly.
+            # Without explicit bounds, apt can wait indefinitely for a stale lock or
+            # a repository that accepts a connection but never responds.
+            completed = run([
+                'sudo', '-n', 'timeout', '--signal=TERM', '--kill-after=5s', '90s',
+                'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-q',
+                '-o', 'APT::Update::Error-Mode=any',
+                '-o', 'Acquire::Languages=none',
+                '-o', 'Acquire::Retries=2',
+                '-o', 'Acquire::http::Timeout=15',
+                '-o', 'Acquire::https::Timeout=15',
+                '-o', 'DPkg::Lock::Timeout=0',
+                'update',
+            ])
             output = completed.stdout.lower()
+            if completed.returncode in (124, 137):
+                result['detail'] = 'Package metadata refresh timed out; check repository, network, or package-manager activity and retry'
+                result['error_output'] = completed.stdout[-4000:]
+                return result
             locked = any(message in output for message in (
                 'could not get lock', 'unable to acquire', 'held by process'))
             if not completed.returncode or not locked or attempt == 2:

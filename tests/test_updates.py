@@ -65,6 +65,15 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             updates.parse_appcast('<rss><channel><item><enclosure url="https://example.org/app.zip"/></item></channel></rss>')
 
+    def test_system_check_timeout_explains_what_to_retry(self):
+        host = {'id': 'test', 'name': 'Test', 'local': True}
+        with patch('fleetlight.updates.run_process', side_effect=TimeoutError):
+            checked = updates.check_system(host)
+        for kind in ('system', 'restart'):
+            self.assertEqual(checked[kind]['state'], 'unknown')
+            self.assertIn('timed out', checked[kind]['detail'])
+            self.assertIn('package-manager or network', checked[kind]['detail'])
+
     def test_durable_job_lock_idempotency_and_verbose_receipt(self):
         source = Path(update_job.__file__).read_text()
         with tempfile.TemporaryDirectory() as home:

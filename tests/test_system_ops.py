@@ -35,6 +35,32 @@ class SystemTests(unittest.TestCase):
         self.assertNotIn('sudo', repo['detail'])
         self.assertIn('Repository', repo['error_output'])
 
+    def test_apt_check_bounds_network_and_lock_waits(self):
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=lambda name: '/bin/apt' if name == 'apt' else None), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', side_effect=[result(), result()]) as run:
+            self.assertEqual(system_ops.check()['state'], 'current')
+        command = run.call_args_list[0].args[0]
+        self.assertEqual(command[:10], ['sudo', '-n', 'timeout', '--signal=TERM', '--kill-after=5s', '90s',
+                                        'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-q'])
+        self.assertIn('APT::Update::Error-Mode=any', command)
+        self.assertIn('Acquire::Retries=2', command)
+        self.assertIn('Acquire::http::Timeout=15', command)
+        self.assertIn('Acquire::https::Timeout=15', command)
+        self.assertIn('DPkg::Lock::Timeout=0', command)
+        self.assertEqual(command[-1], 'update')
+
+    def test_apt_refresh_timeout_is_reported(self):
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=lambda name: '/bin/apt' if name == 'apt' else None), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', return_value=result(124, 'timed out')):
+            checked = system_ops.check()
+        self.assertEqual(checked['state'], 'unknown')
+        self.assertIn('timed out', checked['detail'])
+        self.assertIn('timed out', checked['error_output'])
+
     def test_no_update_when_protected(self):
         with patch.object(system_ops, 'check', return_value={'state':'protected'}), patch.object(system_ops.subprocess, 'call') as install:
             self.assertEqual(system_ops.update(), 1)

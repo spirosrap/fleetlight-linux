@@ -221,5 +221,9 @@ def check_system(host):
         reboot = {"state": "available" if restart.get("required") is True else "unknown" if restart.get("required") is None else "current",
                   "latest": "0.0.0", "checked_at": time.time(), "detail": restart.get("reason", "Restart requirement unknown")}
         return {"system": system, "restart": reboot}
-    except (OSError, TimeoutError, ValueError, StopIteration, TypeError):
+    except TimeoutError:
+        return {kind: {"state": "unknown", "checked_at": time.time(),
+                       "detail": "System package check timed out; check package-manager or network activity and retry"}
+                for kind in ("system", "restart")}
+    except (OSError, ValueError, StopIteration, TypeError):
         return {kind: {"state": "unknown", "checked_at": time.time(), "detail": "System check failed"} for kind in ("system", "restart")}
