@@ -49,6 +49,35 @@ def verify():
         assert "Update all Linux packages" in app.batch_buttons["system"].get_label()
         assert "Restart required computers" in app.batch_buttons["restart"].get_label()
         assert not app.batch_buttons["cli"].get_sensitive()
+        # Old failures are collapsed history, and dismissal survives a restart without deleting logs.
+        import json, os, tempfile
+        from unittest.mock import patch
+        receipt = {"id": "b" * 32, "kind": "desktop", "state": "failed", "phase": "Old package failure", "log": "Original failure log"}
+        app.last_jobs["local"] = receipt
+        history = Gtk.Box()
+        app.update_history(history, local)
+        expander = history.get_first_child()
+        assert isinstance(expander, Gtk.Expander) and not expander.get_expanded()
+        assert expander.get_label() == "Previous ChatGPT attempt: failed"
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "fleetlight"
+            state.mkdir()
+            app.journal_path = state / "update-controller.json"
+            dismiss = expander.get_child().get_first_child().get_next_sibling().get_next_sibling()
+            dismiss.emit("clicked")
+            with patch.dict(os.environ, {"XDG_STATE_HOME": directory}):
+                restored = Fleetlight()
+            assert restored.last_jobs["local"]["dismissed"] is True
+            assert restored.last_jobs["local"]["log"] == receipt["log"]
+            assert restored.last_jobs["local"]["state"] == "failed"
+            history = Gtk.Box()
+            app.update_history(history, local)
+            assert history.get_first_child().get_label() == "Update history"
+            app.last_jobs["local"] = receipt
+            with patch.object(app, "persist_jobs", side_effect=OSError("fixture")):
+                app.dismiss_update_result("local")
+            assert not app.last_jobs["local"].get("dismissed")
+        app.last_jobs.clear()
         # Drive the real queue state machine with fake jobs: no SSH or installation.
         from fleetlight import updates
         pending, _ = updates.batch_candidates(app.configuration["hosts"], app.snapshots, app.app_updates, "cli")

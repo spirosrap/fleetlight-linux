@@ -468,20 +468,7 @@ class Fleetlight(Adw.Application):
             phase = label(self.active_job.get("phase", "Preparing update"), "good")
             phase.set_wrap(True)
             apps.append(phase)
-        last = self.last_jobs.get(host["id"])
-        if last:
-            result_label = label(last.get("phase", ""), "good" if last.get("state") == "succeeded" else "warning")
-            result_label.set_wrap(True)
-            apps.append(result_label)
-        log = (self.active_job or {}).get("log") if (self.active_job or {}).get("host", {}).get("id") == host["id"] else (last or {}).get("log")
-        if log:
-            expander = Gtk.Expander(label="Update log")
-            log_view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-            log_view.get_buffer().set_text(log[-12000:])
-            log_scroll = Gtk.ScrolledWindow(min_content_height=120, max_content_height=200)
-            log_scroll.set_child(log_view)
-            expander.set_child(log_scroll)
-            apps.append(expander)
+        self.update_history(apps, host)
         if data.get("os") == "Linux":
             system_card = self.section("Linux updates", "Distribution packages and restart status")
             checked = self.app_updates.get(host["id"], {})
@@ -772,6 +759,51 @@ class Fleetlight(Adw.Application):
         dialog.set_close_response("cancel")
         dialog.connect("response", lambda _, response: self.begin_update(host, kind, checked) if response == "update" else None)
         dialog.present()
+
+    def update_history(self, parent, host):
+        active = self.active_job if (self.active_job or {}).get("host", {}).get("id") == host["id"] else None
+        last = self.last_jobs.get(host["id"])
+        receipt = active or last
+        if not receipt:
+            return
+        historical = active is None
+        title = "Update log"
+        if historical:
+            title = "Update history" if receipt.get("dismissed") else "Previous " + ACTION_NAMES.get(receipt.get("kind"), "update") + " attempt: " + receipt.get("state", "unknown")
+        expander = Gtk.Expander(label=title)
+        details = box(True, 8)
+        if historical:
+            note = label("Saved result of a previous attempt. Current status is shown above and under Linux updates.", "muted")
+            note.set_wrap(True)
+            details.append(note)
+            result = label(receipt.get("phase", ""), "good" if receipt.get("state") == "succeeded" else "warning")
+            result.set_wrap(True)
+            details.append(result)
+            if not receipt.get("dismissed"):
+                dismiss = Gtk.Button(label="Dismiss result")
+                dismiss.connect("clicked", lambda _: self.dismiss_update_result(host["id"]))
+                details.append(dismiss)
+        if receipt.get("log"):
+            view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+            view.get_buffer().set_text(receipt["log"][-12000:])
+            scroll = Gtk.ScrolledWindow(min_content_height=120, max_content_height=200)
+            scroll.set_child(view)
+            details.append(scroll)
+        expander.set_child(details)
+        parent.append(expander)
+
+    def dismiss_update_result(self, host_id):
+        previous = self.last_jobs.get(host_id)
+        if not previous:
+            return
+        self.last_jobs[host_id] = dict(previous, dismissed=True)
+        try:
+            self.persist_jobs()
+        except OSError:
+            self.last_jobs[host_id] = previous
+            self.toast("Could not save dismissal; the update log has been kept")
+            return
+        self.render_detail()
 
     def persist_jobs(self):
         config.atomic_json(self.journal_path, {"active_job": self.active_job, "last_jobs": self.last_jobs, "batch": self.batch, "pending_restarts": self.pending_restarts})
