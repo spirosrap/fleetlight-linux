@@ -59,6 +59,39 @@ def verify():
         expander = history.get_first_child()
         assert isinstance(expander, Gtk.Expander) and not expander.get_expanded()
         assert expander.get_label() == "Previous ChatGPT attempt: failed"
+        # Real local metric refreshes rebuild the detail pane every two seconds.
+        def find_history(widget):
+            if isinstance(widget, Gtk.Expander):
+                return widget
+            child = widget.get_first_child()
+            while child:
+                found = find_history(child)
+                if found is not None:
+                    return found
+                child = child.get_next_sibling()
+            return None
+        app.selected = "local"
+        app.render_detail()
+        opened = find_history(app.content)
+        opened.set_expanded(True)
+        app.receive_local_metrics([local], dict(metrics, metrics_checked_at=metrics["metrics_checked_at"] + 10))
+        refreshed = find_history(app.content)
+        assert refreshed is not opened and refreshed.get_expanded()
+        refreshed.set_expanded(False)
+        app.receive_updates("local", app.app_updates["local"])
+        assert not find_history(app.content).get_expanded()
+        find_history(app.content).set_expanded(True)
+        app.last_jobs["studio"] = dict(receipt)
+        app.selected = "studio"
+        app.render_detail()
+        assert not find_history(app.content).get_expanded()
+        app.selected = "local"
+        app.render_detail()
+        assert find_history(app.content).get_expanded()
+        app.last_jobs["local"] = dict(receipt, id="c" * 32)
+        app.render_detail()
+        assert not find_history(app.content).get_expanded()
+        app.last_jobs["local"] = receipt
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "fleetlight"
             state.mkdir()

@@ -97,6 +97,7 @@ class Fleetlight(Adw.Application):
         self.last_update_check = 0
         self.active_job = None
         self.last_jobs = {}
+        self.update_history_expanded = {}
         self.batch = None
         self.pending_restarts = {}
         self.journal_path = config.state_path().with_name("update-controller.json")
@@ -771,6 +772,10 @@ class Fleetlight(Adw.Application):
         if historical:
             title = "Update history" if receipt.get("dismissed") else "Previous " + ACTION_NAMES.get(receipt.get("kind"), "update") + " attempt: " + receipt.get("state", "unknown")
         expander = Gtk.Expander(label=title)
+        # Refreshes rebuild this widget; retain the user's choice for this job only.
+        history_key = (host["id"], receipt.get("id"))
+        expander.set_expanded(self.update_history_expanded.get(history_key, False))
+        expander.connect("notify::expanded", lambda widget, _: self.update_history_expanded.__setitem__(history_key, widget.get_expanded()))
         details = box(True, 8)
         if historical:
             note = label("Saved result of a previous attempt. Current status is shown above and under Linux updates.", "muted")
