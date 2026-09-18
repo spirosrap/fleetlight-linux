@@ -124,7 +124,7 @@ def update():
         return 1
     if checked['packages']:
         print('PHASE:Installing system package updates', flush=True)
-        commands = {'pacman': ['sudo', '-n', 'pacman', '-Syu', '--noconfirm'],
+        commands = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
                     'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'upgrade'],
                     'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}
         # No timeout: interrupting a package manager can leave the system broken.

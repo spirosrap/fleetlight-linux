@@ -65,6 +65,15 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             updates.parse_appcast('<rss><channel><item><enclosure url="https://example.org/app.zip"/></item></channel></rss>')
 
+    def test_failed_job_hides_once_the_release_is_current(self):
+        last = {"state": "failed", "kind": "desktop", "target": "26.911.61220",
+                "phase": "The package manager reported a failure. Inspect the update log before retrying."}
+        current = {"desktop": {"state": "current", "installed": "26.911.61220", "latest": "26.911.61220"}}
+        self.assertIsNone(updates.relevant_job(last, current))
+        pending = {"desktop": {"state": "available", "installed": "26.908.70816", "latest": "26.911.61220"}}
+        self.assertEqual(updates.relevant_job(last, pending), last)
+        self.assertEqual(updates.relevant_job({"state": "succeeded", "kind": "desktop", "phase": "Verified 26.911.61220"}, current)["state"], "succeeded")
+
     def test_system_check_timeout_explains_what_to_retry(self):
         host = {'id': 'test', 'name': 'Test', 'local': True}
         with patch('fleetlight.updates.run_process', side_effect=TimeoutError):

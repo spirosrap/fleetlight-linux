@@ -111,7 +111,7 @@ VERIFY:failed
     was_running=0
     if pgrep -f "$main_pattern" >/dev/null 2>&1; then was_running=1; fi
     printf 'PHASE:Installing the Arch system update\n'
-    if ! sudo -n pacman -Syu --noconfirm >"$pacman_update_log" 2>&1; then
+    if ! sudo -n env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syu --noconfirm >"$pacman_update_log" 2>&1; then
       tail -n 12 "$pacman_update_log" 2>/dev/null || true
       printf 'UPDATE:install-failed
 VERIFY:failed

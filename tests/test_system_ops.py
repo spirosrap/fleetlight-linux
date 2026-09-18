@@ -61,6 +61,15 @@ class SystemTests(unittest.TestCase):
         self.assertIn('timed out', checked['detail'])
         self.assertIn('timed out', checked['error_output'])
 
+    def test_pacman_update_allows_omarchy_guarded_upgrades(self):
+        checked = {'state': 'available', 'packages': ['aether'], 'manager': 'pacman'}
+        verified = {'state': 'current', 'packages': [], 'manager': 'pacman', 'restart': {'required': False}}
+        with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
+                patch.object(system_ops.subprocess, 'call', return_value=0) as install:
+            self.assertEqual(system_ops.update(), 0)
+        install.assert_called_once_with(
+            ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'])
+
     def test_no_update_when_protected(self):
         with patch.object(system_ops, 'check', return_value={'state':'protected'}), patch.object(system_ops.subprocess, 'call') as install:
             self.assertEqual(system_ops.update(), 1)

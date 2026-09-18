@@ -12,7 +12,7 @@ import uuid
 import xml.etree.ElementTree as ET
 
 from .config import validate
-from .monitor import run_process
+from .monitor import python_command, run_process
 from .update_job import version
 
 ROOT = Path(__file__).parent
@@ -149,7 +149,7 @@ def job_request(host, request):
     payload = dict(request)
     if request["operation"] == "start":
         payload["worker_source"] = source
-    command = "python3 -c " + shlex.quote(source)
+    command = python_command(source)
     # The payload travels through stdin; no shell interpolation and no secrets in argv.
     try:
         result = subprocess.run(connection(host, command), input=json.dumps(payload), text=True,
@@ -173,7 +173,7 @@ def start_job(host, kind, checked, ident=None):
         raise ValueError("This installation is protected or unavailable")
     ident = ident or uuid.uuid4().hex
     if kind in ("system", "restart"):
-        script = "python3 -c " + shlex.quote((ROOT / "system_ops.py").read_text()) + (" update" if kind == "system" else " restart")
+        script = python_command((ROOT / "system_ops.py").read_text(), "update" if kind == "system" else "restart")
     else:
         script = (ROOT / ("updaters/cli.sh" if kind == "cli" else "updaters/desktop.sh")).read_text()
     return job_request(host, {"operation": "start", "id": ident, "kind": kind,
@@ -207,10 +207,25 @@ def batch_candidates(hosts, snapshots, checks, kind, now=None):
     return eligible, skipped
 
 
+def relevant_job(last, checks):
+    """Keep a failed job visible only while that update is still outstanding."""
+    if not isinstance(last, dict):
+        return None
+    if last.get("state") == "succeeded":
+        return last
+    checked = checks.get(last.get("kind"), {}) if isinstance(checks, dict) else {}
+    if checked.get("state") == "current":
+        return None
+    if last.get("kind") in ("cli", "desktop") and version(checked.get("installed")) and version(last.get("target")):
+        if version(checked["installed"]) >= version(last["target"]):
+            return None
+    return last
+
+
 def check_system(host):
     try:
         source = (ROOT / "system_ops.py").read_text()
-        code, output, _ = run_process(connection(host, "python3 -c " + shlex.quote(source) + " check"), timeout=180)
+        code, output, _ = run_process(connection(host, python_command(source, "check")), timeout=180)
         raw = next(line.split("=", 1)[1] for line in output.splitlines() if line.startswith("FLEETLIGHT_SYSTEM_CHECK="))
         value = json.loads(raw)
         if code or value.get("state") not in ("available", "current", "protected", "unknown", "unsupported"):

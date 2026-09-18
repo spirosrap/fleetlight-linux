@@ -125,6 +125,17 @@ class Fleetlight(Adw.Application):
                 self.active_job = None
                 self.batch = None
                 self.last_jobs = {}
+            try:
+                saved = json.loads(config.state_path().with_name("application-checks.json").read_text())
+                if isinstance(saved, dict):
+                    self.app_updates = saved
+                    if self.dismiss_resolved_jobs(saved):
+                        try:
+                            self.persist_jobs()
+                        except OSError:
+                            pass
+            except (ValueError, OSError, TypeError, KeyError):
+                pass
         self.history = History() if not demo else History(Path("/nonexistent/fleetlight-demo"))
         self.connect("activate", self.activate_window)
 
@@ -614,6 +625,11 @@ class Fleetlight(Adw.Application):
         if ident in self.pending_restarts and "restart" in result:
             result["restart"].update(state="scheduled", detail="Restart scheduled; waiting to verify a new boot")
         self.app_updates[ident] = result
+        if self.dismiss_resolved_jobs({ident: result}):
+            try:
+                self.persist_jobs()
+            except OSError:
+                pass
         if self.selected == ident:
             self.render_detail()
         return GLib.SOURCE_REMOVE
@@ -796,6 +812,17 @@ class Fleetlight(Adw.Application):
             details.append(scroll)
         expander.set_child(details)
         parent.append(expander)
+
+    def dismiss_resolved_jobs(self, checks_by_host):
+        changed = False
+        for ident, checks in checks_by_host.items():
+            last = self.last_jobs.get(ident)
+            if not last or last.get("dismissed"):
+                continue
+            if updates.relevant_job(last, checks) is None:
+                self.last_jobs[ident] = dict(last, dismissed=True)
+                changed = True
+        return changed
 
     def dismiss_update_result(self, host_id):
         previous = self.last_jobs.get(host_id)

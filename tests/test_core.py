@@ -80,7 +80,16 @@ class CollectorTests(unittest.TestCase):
             self.assertIn("StrictHostKeyChecking=yes", args)
             self.assertIn("BatchMode=yes", args)
             self.assertEqual(args[args.index("--") + 1], "user@example.org")
+            remote = args[-1]
+            self.assertTrue(remote.startswith("PATH=/opt/homebrew/bin:"))
+            self.assertIn("python3 -c", remote)
             self.assertEqual(result["status"], "access")
+
+    def test_xcode_license_is_unsupported_python(self):
+        detail, status = classify_error(
+            "You have not agreed to the Xcode license agreements. Please run 'sudo xcodebuild -license'")
+        self.assertEqual(status, "unsupported")
+        self.assertIn("Xcode license", detail)
 
     def test_timeout_is_bounded(self):
         import sys
@@ -123,7 +132,7 @@ class HistoryAndActionTests(unittest.TestCase):
         host = {"id": "server", "name": "Server", "alias": "server"}
         command = terminal_command(host, "pacman")
         self.assertEqual(command[command.index("--") + 1], "server")
-        self.assertTrue(command[-1].startswith("sudo pacman -Syu"))
+        self.assertTrue(command[-1].startswith("sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syu"))
         self.assertNotIn("--noconfirm", command[-1])
         with self.assertRaises(ValueError):
             terminal_command(host, "arbitrary")

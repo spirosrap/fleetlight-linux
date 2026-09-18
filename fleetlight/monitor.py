@@ -33,11 +33,20 @@ def classify_error(error):
         return "SSH host key needs verification in a terminal", "access"
     if "Permission denied" in error:
         return "SSH authentication failed", "access"
+    if "xcodebuild -license" in error or "Xcode license" in error:
+        return "Apple Python is blocked by the Xcode license; Homebrew Python is preferred", "unsupported"
     if "python3" in error and ("not found" in error or "No such" in error):
         return "Python 3 is required on this computer", "unsupported"
     if "resolve hostname" in error:
         return "SSH alias or hostname could not be resolved", "offline"
     return "SSH connection unavailable", "offline"
+
+
+def python_command(source, extra=""):
+    """Run remote Python with Homebrew/CLT first. Apple /usr/bin/python3 can be an Xcode stub."""
+    command = ("PATH=/opt/homebrew/bin:/usr/local/bin:/Library/Developer/CommandLineTools/usr/bin:$PATH "
+               "python3 -c " + shlex.quote(source))
+    return command + ((" " + extra) if extra else "")
 
 
 def probe_host(host):
@@ -52,7 +61,7 @@ def probe_host(host):
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
                 "-o", "ConnectTimeout=6", "-o", "ConnectionAttempts=1",
                 "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1",
-                "--", host["alias"], "python3 -c " + shlex.quote(source) + " " + shlex.quote(request)]
+                "--", host["alias"], python_command(source, shlex.quote(request))]
     start = time.monotonic()
     base = {"id": host["id"], "checked_at": time.time(), "status": "offline"}
     try:
