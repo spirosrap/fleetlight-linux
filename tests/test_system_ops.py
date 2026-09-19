@@ -75,11 +75,28 @@ class SystemTests(unittest.TestCase):
         verified = {'state': 'current', 'packages': [], 'manager': 'omarchy', 'restart': {'required': False}}
         with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
                 patch.object(system_ops, 'run', return_value=result()), \
+                patch.dict(system_ops.os.environ, {'PATH': '/usr/bin'}, clear=True), \
                 patch.object(system_ops.subprocess, 'call', return_value=0) as install:
             self.assertEqual(system_ops.update(), 0)
         install.assert_called_once()
         self.assertEqual(install.call_args.args[0], ['omarchy-update', '-y'])
-        self.assertEqual(install.call_args.kwargs['env']['OMARCHY_UPDATE_LOGGED'], '1')
+        env = install.call_args.kwargs['env']
+        self.assertEqual(env['OMARCHY_UPDATE_LOGGED'], '1')
+        self.assertEqual(env['OMARCHY_PATH'], '/usr/share/omarchy')
+        self.assertTrue(env['PATH'].startswith('/usr/share/omarchy/bin:'))
+
+    def test_omarchy_env_defaults_path_for_ssh_jobs(self):
+        with patch.dict(system_ops.os.environ, {'PATH': '/usr/bin'}, clear=True):
+            env = system_ops.omarchy_env()
+        self.assertEqual(env['OMARCHY_PATH'], '/usr/share/omarchy')
+        self.assertEqual(env['OMARCHY_UPDATE_LOGGED'], '1')
+        self.assertTrue(env['PATH'].startswith('/usr/share/omarchy/bin:'))
+
+    def test_omarchy_env_keeps_existing_checkout_path(self):
+        with patch.dict(system_ops.os.environ, {'OMARCHY_PATH': '/home/dev/omarchy', 'PATH': '/usr/bin'}, clear=True):
+            env = system_ops.omarchy_env()
+        self.assertEqual(env['OMARCHY_PATH'], '/home/dev/omarchy')
+        self.assertTrue(env['PATH'].startswith('/home/dev/omarchy/bin:'))
 
     def test_omarchy_check_includes_aur_packages(self):
         def which(name):

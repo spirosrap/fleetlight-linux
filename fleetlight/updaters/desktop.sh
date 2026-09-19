@@ -112,7 +112,7 @@ VERIFY:failed
     if pgrep -f "$main_pattern" >/dev/null 2>&1; then was_running=1; fi
     printf 'PHASE:Installing the Arch system update\n'
     if command -v omarchy-update >/dev/null 2>&1; then
-      env OMARCHY_UPDATE_LOGGED=1 omarchy-update -y >"$pacman_update_log" 2>&1
+      env OMARCHY_UPDATE_LOGGED=1 OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}" omarchy-update -y >"$pacman_update_log" 2>&1
     else
       sudo -n env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syu --noconfirm >"$pacman_update_log" 2>&1
     fi

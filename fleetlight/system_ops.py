@@ -135,6 +135,13 @@ def check():
     return result
 
 
+def omarchy_env():
+    env = dict(os.environ, LC_ALL='C', OMARCHY_UPDATE_LOGGED='1')
+    env.setdefault('OMARCHY_PATH', '/usr/share/omarchy')
+    env['PATH'] = env['OMARCHY_PATH'] + '/bin:' + env.get('PATH', '/usr/bin:/bin')
+    return env
+
+
 def update():
     print('FLEETLIGHT_SYSTEM_UPDATE\nPHASE:Refreshing and checking system packages', flush=True)
     checked = check()
@@ -150,7 +157,7 @@ def update():
             if run(['sudo', '-n', 'true']).returncode != 0:
                 print('UPDATE:permission-required\nVERIFY:failed')
                 return 1
-            code = subprocess.call(['omarchy-update', '-y'], env=dict(os.environ, LC_ALL='C', OMARCHY_UPDATE_LOGGED='1'))
+            code = subprocess.call(['omarchy-update', '-y'], env=omarchy_env())
         else:
             commands = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
                         'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'upgrade'],
