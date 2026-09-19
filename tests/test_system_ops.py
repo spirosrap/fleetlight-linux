@@ -10,7 +10,12 @@ def result(code=0, output=''):
 
 class SystemTests(unittest.TestCase):
     def test_arch_protects_modified_app_when_update_would_replace_it(self):
-        with patch.object(system_ops.platform, 'system', return_value='Linux'), patch.object(system_ops.shutil, 'which', return_value='/bin/tool'), patch.object(system_ops, 'reboot_status', return_value={'required':False}), patch.object(system_ops, 'run', side_effect=[result(0, 'linux 1 -> 2\n'), result(0), result(1)]):
+        def which(name):
+            return '/bin/' + name if name in ('omarchy-update', 'pacman', 'checkupdates') else None
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=which), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', side_effect=[result(0, 'linux 1 -> 2\n'), result(0), result(1)]):
             self.assertEqual(system_ops.check()['state'], 'protected')
 
     def test_metadata_failure_never_reported_current(self):
@@ -111,6 +116,44 @@ class SystemTests(unittest.TestCase):
         self.assertEqual(checked['manager'], 'omarchy')
         self.assertEqual(checked['packages'], ['linux', 'yay-pkg'])
         self.assertEqual(checked['state'], 'available')
+
+    def test_omarchy_check_includes_mise_and_pending_migrations(self):
+        def which(name):
+            return '/usr/bin/' + name if name in (
+                'omarchy-update', 'pacman', 'checkupdates', 'mise', 'omarchy-migrate') else None
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=which), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', side_effect=[
+                    result(2),
+                    result(0, '{"node":{"current":"20.0.0","latest":"22.0.0"}}'),
+                    result(0, '1780000000.sh\n')]):
+            checked = system_ops.check()
+        self.assertEqual(checked['packages'], ['mise:node', 'omarchy:migrations'])
+        self.assertEqual(checked['state'], 'available')
+
+    def test_apt_check_includes_flatpak_updates(self):
+        def which(name):
+            return '/bin/' + name if name in ('apt', 'flatpak') else None
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=which), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', side_effect=[
+                    result(), result(), result(0, 'com.brave.Browser\n'), result(0, 'org.gnome.Platform\n')]):
+            checked = system_ops.check()
+        self.assertEqual(checked['packages'], ['flatpak:com.brave.Browser', 'flatpak:org.gnome.Platform'])
+        self.assertEqual(checked['state'], 'available')
+        self.assertIn('2 package updates', checked['detail'])
+
+    def test_sidecar_only_update_skips_the_distribution_upgrade(self):
+        checked = {'state': 'available', 'packages': ['flatpak:org.gnome.Platform'], 'manager': 'apt'}
+        verified = {'state': 'current', 'packages': [], 'manager': 'apt', 'restart': {'required': False}}
+        with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
+                patch.object(system_ops, 'install_sidecars', return_value=0) as sidecars, \
+                patch.object(system_ops.subprocess, 'call') as install:
+            self.assertEqual(system_ops.update(), 0)
+        install.assert_not_called()
+        sidecars.assert_called_once()
 
     def test_no_update_when_protected(self):
         with patch.object(system_ops, 'check', return_value={'state':'protected'}), patch.object(system_ops.subprocess, 'call') as install:

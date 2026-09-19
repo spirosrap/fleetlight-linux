@@ -14,7 +14,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 from . import __version__
 from . import actions, config
 from . import agents as agent_quota
-from .monitor import History, issues, refresh
+from .monitor import History, issues, linux_update_issues, refresh
 from .probe import collect_metrics
 from . import updates
 
@@ -423,7 +423,8 @@ class Fleetlight(Adw.Application):
             if query and query not in host["name"].casefold():
                 continue
             snapshot = self.snapshots.get(host["id"], {})
-            if self.attention.get_active() and not issues(snapshot):
+            trouble = issues(snapshot) + linux_update_issues(self.app_updates.get(host["id"]))
+            if self.attention.get_active() and not trouble:
                 continue
             row = Gtk.ListBoxRow()
             row.host_id = host["id"]
@@ -431,7 +432,7 @@ class Fleetlight(Adw.Application):
             icon = Gtk.Image.new_from_icon_name("computer-symbolic" if host.get("local") else "network-server-symbolic")
             icon.set_pixel_size(24)
             online_host = snapshot.get("status") == "online"
-            icon.add_css_class("good" if online_host and not issues(snapshot) else "warning" if online_host else "muted")
+            icon.add_css_class("good" if online_host and not trouble else "warning" if online_host else "muted")
             body.append(icon)
             names = box(True, 3)
             name = label(host["name"])
@@ -482,7 +483,7 @@ class Fleetlight(Adw.Application):
         badge.set_valign(Gtk.Align.CENTER)
         hero.append(badge)
         self.content.append(hero)
-        trouble = issues(data) if data else []
+        trouble = (issues(data) if data else []) + linux_update_issues(self.app_updates.get(host["id"]))
         if trouble:
             alert = box(True, 5)
             alert.add_css_class("card")

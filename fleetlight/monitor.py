@@ -109,6 +109,18 @@ def issues(snapshot):
     return result
 
 
+def linux_update_issues(checks):
+    """Linux package and restart findings used by the companion as well as this app."""
+    result = []
+    if not isinstance(checks, dict):
+        return result
+    for kind, fallback in (("system", "Linux package updates available"), ("restart", "Restart required")):
+        status = checks.get(kind, {})
+        if status.get("state") in ("available", "protected"):
+            result.append(status.get("detail") or fallback)
+    return result
+
+
 class History:
     def __init__(self, path=None):
         self.path = Path(path or state_path())

@@ -59,6 +59,59 @@ def aur_updates():
     return [line.split()[0] for line in completed.stdout.splitlines() if ' -> ' in line]
 
 
+def omarchy_extra_updates():
+    names = []
+    if shutil.which('mise'):
+        completed = run(['mise', 'outdated', '--json'], {'MISE_MINIMUM_RELEASE_AGE': '0'})
+        if completed.returncode in (0, 1) and completed.stdout.strip().startswith('{'):
+            try:
+                data = json.loads(completed.stdout)
+            except ValueError:
+                data = {}
+            if isinstance(data, dict):
+                for name, value in data.items():
+                    if isinstance(value, dict) and value.get('current') != value.get('latest'):
+                        names.append('mise:' + name)
+    if shutil.which('omarchy-migrate'):
+        completed = run(['omarchy-migrate', '--pending'],
+                        {'OMARCHY_PATH': os.environ.get('OMARCHY_PATH', '/usr/share/omarchy')})
+        if completed.returncode <= 1 and completed.stdout.strip():
+            names.append('omarchy:migrations')
+    return names
+
+
+def sidecar_updates():
+    """Snap and Flatpak updates counted by the macOS/Android companion."""
+    names = []
+    if shutil.which('snap'):
+        completed = run(['snap', 'refresh', '--list'])
+        if completed.returncode == 0 and 'All snaps up to date' not in completed.stdout:
+            lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+            if lines and lines[0].split()[0].lower() == 'name':
+                lines = lines[1:]
+            names.extend('snap:' + line.split()[0] for line in lines if line.split())
+    if shutil.which('flatpak'):
+        for scope in ('--user', '--system'):
+            completed = run(['flatpak', 'remote-ls', '--updates', scope, '--columns=application'])
+            if completed.returncode:
+                continue
+            names.extend('flatpak:' + line.strip() for line in completed.stdout.splitlines()
+                         if line.strip() and ' ' not in line.strip())
+    return names
+
+
+def install_sidecars():
+    code = 0
+    if shutil.which('snap') and subprocess.call(['sudo', '-n', 'snap', 'refresh']):
+        code = 1
+    if shutil.which('flatpak'):
+        if subprocess.call(['flatpak', 'update', '-y', '--noninteractive', '--user']):
+            code = 1
+        if subprocess.call(['sudo', '-n', 'flatpak', 'update', '-y', '--noninteractive', '--system']):
+            code = 1
+    return code
+
+
 def check():
     manager = linux_manager()
     result = {'manager': manager, 'packages': [], 'state': 'unknown', 'restart': reboot_status()}
@@ -78,6 +131,7 @@ def check():
         protected = bool(packages) and run(['pacman', '-Q', 'openai-codex-desktop']).returncode == 0 and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
         if manager == 'omarchy' and not protected:
             packages += [name for name in aur_updates() if name not in packages]
+            packages += [name for name in omarchy_extra_updates() if name not in packages]
     elif manager == 'apt':
         for attempt in range(3):
             # Keep this comfortably inside the controller's remote-check timeout.
@@ -130,6 +184,7 @@ def check():
             return result
         packages = [line.split()[0] for line in completed.stdout.splitlines() if len(line.split()) == 3 and '.' in line.split()[0]]
         protected = False
+    packages += [name for name in sidecar_updates() if name not in packages]
     result.update(packages=packages, state='protected' if protected else 'available' if packages else 'current',
                   detail='ChatGPT has local modifications; review system upgrades manually' if protected else str(len(packages)) + ' package updates')
     return result
@@ -153,19 +208,27 @@ def update():
         print('PHASE:Installing system package updates', flush=True)
         # No timeout: interrupting a package manager can leave the system broken.
         # Skip omarchy-update's `script` PTY wrapper so gum cannot wait on a job with no operator.
-        if checked['manager'] == 'omarchy':
-            if run(['sudo', '-n', 'true']).returncode != 0:
-                print('UPDATE:permission-required\nVERIFY:failed')
+        distro = [package for package in checked['packages'] if not package.startswith(('snap:', 'flatpak:'))]
+        sidecars = [package for package in checked['packages'] if package.startswith(('snap:', 'flatpak:'))]
+        if distro:
+            if checked['manager'] == 'omarchy':
+                if run(['sudo', '-n', 'true']).returncode != 0:
+                    print('UPDATE:permission-required\nVERIFY:failed')
+                    return 1
+                code = subprocess.call(['omarchy-update', '-y'], env=omarchy_env())
+            else:
+                commands = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
+                            'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'upgrade'],
+                            'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}
+                code = subprocess.call(commands[checked['manager']])
+            if code != 0:
+                print('UPDATE:install-failed\nVERIFY:failed')
                 return 1
-            code = subprocess.call(['omarchy-update', '-y'], env=omarchy_env())
-        else:
-            commands = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
-                        'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'upgrade'],
-                        'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}
-            code = subprocess.call(commands[checked['manager']])
-        if code != 0:
-            print('UPDATE:install-failed\nVERIFY:failed')
-            return 1
+        if sidecars:
+            print('PHASE:Installing snap and Flatpak updates', flush=True)
+            if install_sidecars():
+                print('UPDATE:install-failed\nVERIFY:failed')
+                return 1
     core = {'glibc', 'systemd', 'dbus', 'libc6', 'linux', 'linux-lts', 'linux-zen', 'linux-hardened'}
     if any(package.split('.')[0] in core for package in checked['packages']):
         marker = Path.home() / '.local/state/fleetlight/system-restart.json'

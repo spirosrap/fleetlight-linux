@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from fleetlight import update_job, updates
 from fleetlight.config import validate
-from fleetlight.monitor import issues
+from fleetlight.monitor import issues, linux_update_issues
 
 
 class UpdateTests(unittest.TestCase):
@@ -86,6 +86,9 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(issues(snapshot), ['docker: failed'])
         snapshot['optional_services'] = []
         self.assertEqual(len(issues(snapshot)), 2)
+        self.assertEqual(linux_update_issues({'system': {'state': 'available', 'detail': '2 package updates'}}),
+                         ['2 package updates'])
+        self.assertEqual(linux_update_issues({'system': {'state': 'current'}}), [])
         with self.assertRaises(ValueError):
             validate({'version': 1, 'hosts': [{'id':'test', 'name':'Test', 'local':True, 'optional_services':['unknown']}]})
 
