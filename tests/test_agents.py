@@ -27,12 +27,13 @@ class AgentQuotaTests(unittest.TestCase):
         self.assertEqual(windows[0]["label"], "weekly")
         self.assertNotIn("accountId", str(windows))
 
-    def test_cursor_remaining_uses_included_allowance(self):
+    def test_cursor_remaining_uses_plan_percent(self):
         remaining, detail = agents.summarize_cursor({
             "planUsage": {"includedSpend": 2000, "limit": 2000, "totalPercentUsed": 5.0, "email": "hidden"},
+            "billingCycleEnd": "1792330885000",
         })
-        self.assertEqual(remaining, 0)
-        self.assertIn("included", detail)
+        self.assertEqual(remaining, 95)
+        self.assertIn("95% remaining", detail)
         self.assertNotIn("hidden", detail)
         remaining, _ = agents.summarize_cursor({"planUsage": {"totalPercentUsed": 41}})
         self.assertEqual(remaining, 59)

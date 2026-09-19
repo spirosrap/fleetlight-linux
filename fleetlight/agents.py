@@ -28,9 +28,12 @@ def remaining_percent(used):
 
 def until(timestamp):
     try:
-        seconds = max(0, int(float(timestamp) - time.time()))
+        value = float(timestamp)
     except (TypeError, ValueError):
         return ""
+    if value > 10_000_000_000:
+        value /= 1000
+    seconds = max(0, int(value - time.time()))
     days, rest = divmod(seconds, 86400)
     hours, rest = divmod(rest, 3600)
     minutes = rest // 60
@@ -202,30 +205,19 @@ def cursor_token():
     return None
 
 
-def money(cents):
-    try:
-        return f"${float(cents) / 100:.2f}"
-    except (TypeError, ValueError):
-        return None
-
-
 def summarize_cursor(payload):
     plan = payload.get("planUsage") if isinstance(payload, dict) else None
     if not isinstance(plan, dict):
         return None
-    limit = plan.get("limit")
-    included = plan.get("includedSpend")
-    if isinstance(limit, (int, float)) and limit > 0 and isinstance(included, (int, float)):
-        remaining = max(0, min(100, round(100 * (1 - float(included) / float(limit)))))
-        left = money(max(0, limit - included))
-        total = money(limit)
-        detail = f"{left} of {total} included left" if left and total else f"{remaining}% included remaining"
-        return remaining, detail
     used = plan.get("totalPercentUsed")
+    if used is None:
+        used = plan.get("autoPercentUsed")
     remaining = remaining_percent(used)
     if remaining is None:
         return None
-    return remaining, f"{remaining}% remaining this period"
+    reset = until(payload.get("billingCycleEnd"))
+    detail = f"{remaining}% remaining this period" + (f" · {reset}" if reset else "")
+    return remaining, detail
 
 
 def collect_cursor():
@@ -271,7 +263,7 @@ def demo_usage():
         "codex": {"id": "codex", "name": "Codex", "state": "ok", "plan": "Pro",
                   "remaining_percent": 64, "detail": "64% weekly · 3d 12h"},
         "cursor": {"id": "cursor", "name": "Cursor", "state": "ok",
-                   "remaining_percent": 41, "detail": "$8.20 of $20.00 included left"},
+                   "remaining_percent": 41, "detail": "41% remaining this period · 12d 4h"},
     }
 
 
