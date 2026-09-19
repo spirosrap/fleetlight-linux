@@ -14,6 +14,8 @@ import time
 import urllib.error
 import urllib.request
 
+from . import __version__
+
 
 NAMES = ("codex", "cursor")
 CURSOR_USAGE = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
@@ -127,7 +129,7 @@ def collect_codex():
     except OSError:
         return unavailable("codex", "Codex CLI could not be started")
     try:
-        rpc(process, 1, "initialize", {"clientInfo": {"name": "fleetlight", "version": "0.3.5"}})
+        rpc(process, 1, "initialize", {"clientInfo": {"name": "fleetlight", "version": __version__}})
         process.stdin.write(json.dumps({"method": "initialized", "params": {}}) + "\n")
         process.stdin.flush()
         account = ((rpc(process, 2, "account/read", timeout=5).get("result") or {}).get("account") or {})
@@ -227,7 +229,7 @@ def collect_cursor():
     request = urllib.request.Request(
         CURSOR_USAGE, data=b"{}", method="POST",
         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
-                 "Connect-Protocol-Version": "1", "User-Agent": "Fleetlight/0.3.5"})
+                 "Connect-Protocol-Version": "1", "User-Agent": "Fleetlight/" + __version__})
     try:
         with urllib.request.urlopen(request, timeout=12) as response:
             payload = json.loads(response.read().decode("utf-8", "replace"))

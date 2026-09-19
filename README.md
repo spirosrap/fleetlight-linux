@@ -6,6 +6,10 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
+## Version 0.3.6
+
+- Optional automatic updates from Settings: Codex CLI, ChatGPT and Linux packages install as soon as checks find them. Off by default. Computers are not restarted automatically.
+
 ## Version 0.3.5
 
 - Show remaining Codex and Cursor quota from this computer’s signed-in sessions. Settings can show or hide each agent.
@@ -20,6 +24,7 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 ### Existing features
 
 - A Wayland-native desktop application with a searchable fleet sidebar, attention filter and automatic checks.
+- Optional automatic Codex CLI, ChatGPT and Linux package updates from Settings. Off by default; computers are not restarted automatically.
 - Show remaining Codex and Cursor quota from this computer's signed-in sessions, with Settings toggles for each agent.
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
 - Root disk, memory, uptime, load, configured systemd services, Codex CLI and ChatGPT package versions.
@@ -72,6 +77,7 @@ The public app starts with **This Computer only**. It never imports or probes yo
 {
   "version": 1,
   "refresh_seconds": 60,
+  "auto_updates": false,
   "hosts": [
     {"id": "local", "name": "This Computer", "local": true, "services": []},
     {"id": "server", "name": "Home Server", "alias": "home-server", "services": ["tailscaled", "docker"]}
@@ -85,7 +91,7 @@ Service names refer to system-level systemd units. macOS service checks are curr
 
 Services are expected to run unless you turn off **Warn when stopped**. Optional services remain visible; inactive or uninstalled optional services are neutral, while an actual failed service still needs attention. Settings stores these preferences in each host's `optional_services` list.
 
-System updates can overwrite local application repairs. The update dialog explains this; its terminal leaves package selection, authentication and final confirmation to you. No system update runs during monitoring or installation.
+System updates can overwrite local application repairs. Confirmed terminal updates leave package selection, authentication and final confirmation to you. Unattended Linux package updates only run from **Update all Linux packages** or from Settings automatic updates, using existing passwordless sudo.
 
 History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, capped at 2,048 samples / 24 hours and 100 events. It contains computer IDs, metrics and state changes. Diagnostics copied to the clipboard include computer names and should be reviewed before sharing.
 
@@ -101,6 +107,8 @@ History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, capped a
 **Update all Codex CLI** and **Update all ChatGPT** show the number of eligible fleet updates. Each button opens a review with the computers and versions to update, plus skipped computers (current, offline, protected or unchecked). Batches run sequentially, stop on failure, and offer **Stop after current update** to cancel remaining work without interrupting an installer. The queue is saved alongside the active job and resumes after a controller restart.
 
 **Update all Linux packages** refreshes package metadata and upgrades eligible Omarchy, Arch, APT and DNF computers using existing passwordless sudo. On Omarchy this is the full `omarchy update -y` path, including AUR packages. Services may restart, but computers are never automatically rebooted by an update batch. When system updates are pending, locally modified ChatGPT packages protect the host from the batch; review those system upgrades manually.
+
+**Automatically install all available updates** in Settings turns on unattended Codex CLI, ChatGPT and Linux package installs after the usual release checks. It stays off until you enable it. Keep Fleetlight open (start at login is useful). Automatic updates run one at a time, skip a computer that fails, and do not retry that same update until you restart Fleetlight or the available packages change. Restarts are never automatic.
 
 **Restart required computers** reviews computers with an OS reboot flag, a replaced running Arch kernel, a `needs-restarting` request, or a core-package restart recommendation recorded by Fleetlight. Each confirmed restart is scheduled with a one-minute delay; the local controller goes last. Scheduling is not reported as a verified reboot: Fleetlight waits for the computer to return with a different Linux boot ID. Open Fleetlight again after restarting its own computer (or enable start at login) to see the verification. These checks cannot identify every third-party application's restart requirement.
 

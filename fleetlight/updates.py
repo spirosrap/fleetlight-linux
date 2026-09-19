@@ -185,6 +185,30 @@ def job_status(host, ident):
     return job_request(host, {"operation": "status", "id": ident})
 
 
+AUTO_UPDATE_KINDS = ("cli", "desktop", "system")
+
+
+def auto_target_key(host, kind, checked):
+    ident = host["id"] if isinstance(host, dict) else host
+    checked = checked if isinstance(checked, dict) else {}
+    if kind == "system":
+        packages = checked.get("packages") or []
+        token = ",".join(packages) if isinstance(packages, list) else str(packages)
+        return (ident, kind, token or str(checked.get("detail") or "system"))
+    return (ident, kind, str(checked.get("latest") or ""), str(checked.get("build") or ""))
+
+
+def next_auto_batch(hosts, snapshots, checks, attempted=(), now=None):
+    """Next unattended Codex, ChatGPT or Linux-package batch; never automatic restarts."""
+    skipped = set(tuple(item) for item in attempted)
+    for kind in AUTO_UPDATE_KINDS:
+        pending, _ = batch_candidates(hosts, snapshots, checks, kind, now=now)
+        pending = [item for item in pending if auto_target_key(item["host"], kind, item["checked"]) not in skipped]
+        if pending:
+            return kind, pending
+    return None, []
+
+
 def batch_candidates(hosts, snapshots, checks, kind, now=None):
     """Freeze only online, supported, fresh, available releases for review."""
     if kind not in ("cli", "desktop", "system", "restart"):

@@ -18,7 +18,8 @@ AGENTS = ("codex", "cursor")
 
 
 def default_config():
-    return {"version": 1, "refresh_seconds": 60, "agents": {"codex": True, "cursor": True}, "hosts": [
+    return {"version": 1, "refresh_seconds": 60, "auto_updates": False,
+            "agents": {"codex": True, "cursor": True}, "hosts": [
         {"id": "local", "name": "This Computer", "local": True, "services": []}
     ]}
 
@@ -30,12 +31,18 @@ def enabled_agents(configuration):
     return {name: bool(value.get(name, True)) for name in AGENTS}
 
 
+def auto_updates_enabled(configuration):
+    return isinstance(configuration, dict) and configuration.get("auto_updates") is True
+
+
 def validate(config):
     if not isinstance(config, dict) or config.get("version") != 1:
         raise ValueError("Expected configuration version 1")
     interval = config.get("refresh_seconds", 60)
     if type(interval) is not int or not 15 <= interval <= 3600:
         raise ValueError("Refresh interval must be between 15 and 3600 seconds")
+    if "auto_updates" in config and type(config["auto_updates"]) is not bool:
+        raise ValueError("auto_updates must be true or false")
     if "agents" in config:
         agents = config["agents"]
         if not isinstance(agents, dict) or any(name not in AGENTS or type(enabled) is not bool for name, enabled in agents.items()):

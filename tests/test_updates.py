@@ -29,6 +29,35 @@ class UpdateTests(unittest.TestCase):
         checks["0"]["cli"]["latest"] = "9.0.0"
         self.assertEqual(pending[0]["checked"]["latest"], "1.1.0")
 
+    def test_next_auto_batch_installs_apps_then_packages_never_restarts(self):
+        hosts = [{"id": "a", "name": "A", "local": True}, {"id": "b", "name": "B", "local": True}]
+        snapshots = {host["id"]: {"status": "online", "boot_id": "boot"} for host in hosts}
+        now = 200
+        available = dict(updates.plan("1.0.0", "1.1.0", "standalone"), checked_at=now)
+        checks = {
+            "a": {
+                "cli": dict(available),
+                "desktop": dict(updates.plan("1.0.0", "1.1.0", "macos-appcast"), checked_at=now),
+                "system": {"state": "available", "latest": "0.0.0", "checked_at": now, "packages": ["linux"]},
+                "restart": {"state": "available", "latest": "0.0.0", "checked_at": now, "detail": "kernel"},
+            },
+            "b": {"system": {"state": "available", "latest": "0.0.0", "checked_at": now, "packages": ["glibc"]}},
+        }
+        kind, pending = updates.next_auto_batch(hosts, snapshots, checks, now=now)
+        self.assertEqual(kind, "cli")
+        self.assertEqual([item["host"]["id"] for item in pending], ["a"])
+        attempted = {updates.auto_target_key(pending[0]["host"], "cli", pending[0]["checked"])}
+        kind, pending = updates.next_auto_batch(hosts, snapshots, checks, attempted, now=now)
+        self.assertEqual(kind, "desktop")
+        attempted.add(updates.auto_target_key(pending[0]["host"], "desktop", pending[0]["checked"]))
+        kind, pending = updates.next_auto_batch(hosts, snapshots, checks, attempted, now=now)
+        self.assertEqual(kind, "system")
+        self.assertEqual([item["host"]["id"] for item in pending], ["a", "b"])
+        attempted.update(updates.auto_target_key(item["host"], "system", item["checked"]) for item in pending)
+        kind, pending = updates.next_auto_batch(hosts, snapshots, checks, attempted, now=now)
+        self.assertIsNone(kind)
+        self.assertEqual(pending, [])
+
     def test_receipts_require_marker_version_and_verification(self):
         good = ['FLEETLIGHT_CODEX_UPDATE', 'ACTIVE_VERSION:1.2.3', 'VERIFY:ok']
         self.assertEqual(update_job.parse_result('cli', '1.2.3', '', 0, good)[0], 'succeeded')

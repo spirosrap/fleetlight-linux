@@ -58,6 +58,16 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 config.validate(configuration)
 
+    def test_auto_updates_default_off(self):
+        self.assertFalse(config.auto_updates_enabled(config.default_config()))
+        self.assertFalse(config.auto_updates_enabled({"version": 1, "hosts": []}))
+        value = config.default_config()
+        value["auto_updates"] = True
+        self.assertTrue(config.auto_updates_enabled(config.validate(value)))
+        value["auto_updates"] = "yes"
+        with self.assertRaises(ValueError):
+            config.validate(value)
+
 
 class CollectorTests(unittest.TestCase):
     def test_actual_local_receipt(self):

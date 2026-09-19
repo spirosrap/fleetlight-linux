@@ -103,6 +103,8 @@ class Fleetlight(Adw.Application):
         self.pending_restarts = {}
         self.agent_usage = {}
         self.agent_checks_running = False
+        self.auto_attempted = set()
+        self.auto_holdoff_until = 0
         self.journal_path = config.state_path().with_name("update-controller.json")
         if not demo:
             try:
@@ -702,6 +704,7 @@ class Fleetlight(Adw.Application):
             config.atomic_json(config.state_path().with_name("application-checks.json"), self.app_updates)
         except OSError:
             self.toast("Checks completed, but the local receipt could not be saved")
+        self.maybe_auto_update()
         return GLib.SOURCE_REMOVE
 
     def render_batch(self):
@@ -719,7 +722,7 @@ class Fleetlight(Adw.Application):
         if self.batch:
             done = len(self.batch.get("results", []))
             total = self.batch.get("total", 0)
-            text = ACTION_NAMES[self.batch["kind"]] + " fleet updates: " + str(done) + "/" + str(total) + " completed"
+            text = ("Automatic " if self.batch.get("automatic") else "") + ACTION_NAMES[self.batch["kind"]] + " fleet updates: " + str(done) + "/" + str(total) + " completed"
             if running and self.active_job:
                 text += " · " + self.active_job["host"]["name"] + " · " + self.active_job.get("phase", "Updating")
             elif self.batch.get("stopped"):
@@ -727,6 +730,8 @@ class Fleetlight(Adw.Application):
             if self.pending_restarts:
                 text += " · Awaiting restart verification: " + ", ".join(item["name"] for item in self.pending_restarts.values())
             self.batch_label.set_text(text)
+        elif config.auto_updates_enabled(self.configuration):
+            self.batch_label.set_text("Automatic updates are on · Codex CLI, ChatGPT and Linux packages install when checks find them. Computers are not restarted.")
         else:
             self.batch_label.set_text("Fleet-wide updates · only computers with available releases are included")
 
@@ -761,23 +766,42 @@ class Fleetlight(Adw.Application):
         dialog.connect("response", lambda _, response: self.begin_batch(kind, pending) if response == "update" else None)
         dialog.present()
 
-    def begin_batch(self, kind, pending):
+    def begin_batch(self, kind, pending, automatic=False):
         if self.active_job or self.busy or self.update_checks_running:
             return
         # Recheck eligibility after the review dialog; use only the reviewed hosts.
         fresh, _ = updates.batch_candidates([item["host"] for item in pending], self.snapshots,
                     {item["host"]["id"]: {kind: item["checked"]} for item in pending}, kind)
-        if len(fresh) != len(pending):
+        if not automatic and len(fresh) != len(pending):
             self.toast("The release checks expired. Check again before starting.")
             return
-        self.batch = {"kind": kind, "pending": fresh, "results": [], "total": len(fresh), "running": True}
+        if not fresh:
+            return
+        self.batch = {"kind": kind, "pending": fresh, "results": [], "total": len(fresh),
+                      "running": True, "automatic": bool(automatic)}
         try:
             self.persist_jobs()
         except OSError:
             self.batch = None
             self.toast("Could not save the batch; no updates started")
             return
+        if automatic:
+            self.toast("Automatic " + ACTION_NAMES[kind] + " updates started on " + str(len(fresh)) + " computers")
         self.advance_batch()
+
+    def maybe_auto_update(self):
+        if self.demo or not config.auto_updates_enabled(self.configuration):
+            return
+        if self.busy or self.update_checks_running or self.active_job:
+            return
+        if self.batch and self.batch.get("running"):
+            return
+        if time.time() < self.auto_holdoff_until:
+            return
+        kind, pending = updates.next_auto_batch(
+            self.configuration["hosts"], self.snapshots, self.app_updates, self.auto_attempted)
+        if pending:
+            self.begin_batch(kind, pending, automatic=True)
 
     def advance_batch(self):
         if self.active_job or not self.batch:
@@ -811,6 +835,10 @@ class Fleetlight(Adw.Application):
                 self.batch["pending"] = previous
                 self.batch.pop("stopped", None)
                 self.toast("Could not save cancellation; remaining updates are still queued")
+                self.render_batch()
+                return
+            if config.auto_updates_enabled(self.configuration):
+                self.auto_holdoff_until = time.time() + 900
             self.render_batch()
 
     def request_update(self, host, kind, checked):
@@ -903,7 +931,8 @@ class Fleetlight(Adw.Application):
         ident = uuid.uuid4().hex
         self.active_job = {"id": ident, "host": dict(host), "kind": kind, "target": checked["latest"],
                            "boot_id": self.snapshots.get(host["id"], {}).get("boot_id"),
-                           "state": "queued", "phase": "Starting " + ACTION_NAMES[kind]}
+                           "state": "queued", "phase": "Starting " + ACTION_NAMES[kind],
+                           "auto_key": list(updates.auto_target_key(host, kind, checked))}
         try:
             self.persist_jobs()
         except OSError:
@@ -945,11 +974,18 @@ class Fleetlight(Adw.Application):
                 self.pending_restarts[host["id"]] = {"name": host["name"], "boot_id": self.active_job.get("boot_id"), "scheduled_at": time.time()}
                 if host["id"] in self.app_updates:
                     self.app_updates[host["id"]]["restart"] = {"state": "scheduled", "detail": "Waiting for new boot"}
+            if state != "succeeded":
+                key = self.active_job.get("auto_key")
+                if isinstance(key, list) and len(key) >= 2:
+                    self.auto_attempted.add(tuple(key))
             if self.batch and self.batch.get("running"):
                 self.batch.setdefault("results", []).append({"host": self.active_job["host"]["name"], "state": state})
                 if state != "succeeded":
-                    self.batch["pending"] = []
-                    self.batch["stopped"] = "Stopped after " + self.active_job["host"]["name"] + ": " + receipt.get("phase", state)
+                    if self.batch.get("automatic"):
+                        self.batch["stopped"] = "Continuing after " + self.active_job["host"]["name"] + ": " + receipt.get("phase", state)
+                    else:
+                        self.batch["pending"] = []
+                        self.batch["stopped"] = "Stopped after " + self.active_job["host"]["name"] + ": " + receipt.get("phase", state)
             self.last_jobs[self.active_job["host"]["id"]] = dict(self.active_job)
             self.toast(receipt.get("phase", "Update completed"))
             self.active_job = None
@@ -1066,6 +1102,13 @@ class Fleetlight(Adw.Application):
             toggle.set_active(enabled[name])
             agent_toggles[name] = toggle
             body.append(toggle)
+        body.append(label("Automatic updates", "section-title"))
+        auto_note = label("When enabled, Fleetlight installs Codex CLI, ChatGPT and Linux package updates as soon as checks find them. Computers are not restarted. Keep Fleetlight open. A failed computer is skipped; the same update is not retried until you restart Fleetlight or a different set of packages appears.", "muted")
+        auto_note.set_wrap(True)
+        body.append(auto_note)
+        auto_toggle = Gtk.CheckButton(label="Automatically install all available updates")
+        auto_toggle.set_active(config.auto_updates_enabled(self.configuration))
+        body.append(auto_toggle)
         editor = Gtk.TextView(monospace=True, wrap_mode=Gtk.WrapMode.NONE)
         editor.get_buffer().set_text(json.dumps(self.configuration, indent=2))
         scroll = Gtk.ScrolledWindow(vexpand=True)
@@ -1087,6 +1130,7 @@ class Fleetlight(Adw.Application):
             try:
                 candidate = config.validate(json.loads(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)))
                 candidate["agents"] = {name: toggle.get_active() for name, toggle in agent_toggles.items()}
+                candidate["auto_updates"] = auto_toggle.get_active()
                 candidate = config.validate(candidate)
                 config.atomic_json(self.config_file or config.config_path(), candidate)
                 if start.get_active() != actions.autostart_path().exists():
@@ -1094,7 +1138,11 @@ class Fleetlight(Adw.Application):
             except (ValueError, OSError, RuntimeError) as problem:
                 error.set_text(str(problem))
                 return
+            enabling = config.auto_updates_enabled(candidate) and not config.auto_updates_enabled(self.configuration)
             self.configuration = candidate
+            if enabling:
+                self.auto_attempted.clear()
+                self.auto_holdoff_until = 0
             self.snapshots = {k:v for k,v in self.snapshots.items() if k in {h["id"] for h in candidate["hosts"]}}
             if self.timer:
                 GLib.source_remove(self.timer)

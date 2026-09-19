@@ -93,10 +93,10 @@ class SystemTests(unittest.TestCase):
         self.assertTrue(env['PATH'].startswith('/usr/share/omarchy/bin:'))
 
     def test_omarchy_env_keeps_existing_checkout_path(self):
-        with patch.dict(system_ops.os.environ, {'OMARCHY_PATH': '/home/dev/omarchy', 'PATH': '/usr/bin'}, clear=True):
+        with patch.dict(system_ops.os.environ, {'OMARCHY_PATH': '/home/user/omarchy', 'PATH': '/usr/bin'}, clear=True):
             env = system_ops.omarchy_env()
-        self.assertEqual(env['OMARCHY_PATH'], '/home/dev/omarchy')
-        self.assertTrue(env['PATH'].startswith('/home/dev/omarchy/bin:'))
+        self.assertEqual(env['OMARCHY_PATH'], '/home/user/omarchy')
+        self.assertTrue(env['PATH'].startswith('/home/user/omarchy/bin:'))
 
     def test_omarchy_check_includes_aur_packages(self):
         def which(name):
