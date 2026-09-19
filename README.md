@@ -6,6 +6,10 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
+## Version 0.3.5
+
+- Show remaining Codex and Cursor quota from this computer’s signed-in sessions. Settings can show or hide each agent.
+
 ## Version 0.3.2
 
 - Show CPU temperature in Celsius for Linux hosts with readable Intel/AMD CPU sensors or supported CPU thermal zones. Local readings update every two seconds; remote readings arrive with normal SSH checks. Missing sensors and macOS currently show “CPU sensor unavailable”; no privileged sensor commands are run.
@@ -16,6 +20,7 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 ### Existing features
 
 - A Wayland-native desktop application with a searchable fleet sidebar, attention filter and automatic checks.
+- Show remaining Codex and Cursor quota from this computer's signed-in sessions, with Settings toggles for each agent.
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
 - Root disk, memory, uptime, load, configured systemd services, Codex CLI and ChatGPT package versions.
 - Installed/latest application versions and in-app Codex CLI and ChatGPT update buttons, including remote Apple Silicon Macs.
@@ -126,7 +131,7 @@ The native smoke test needs Xvfb and a session D-Bus (`xvfb` and `dbus-x11` on U
 
 ## Privacy and security
 
-No analytics, cloud accounts, API keys or bundled private fleet. Host connections go only to the computers you configure. Application checks also contact the official npm registry, OpenAI appcast and configured package repositories. SSH handles keys; Fleetlight does not read private-key contents. Probes use a fixed read-only collector and validate a per-request receipt. Host aliases and service names are validated, and update operations use a fixed allowlist of commands. Remote output is rendered as text, never executed as an action or treated as markup.
+No analytics, cloud accounts, API keys or bundled private fleet. Host connections go only to the computers you configure. Application checks also contact the official npm registry, OpenAI appcast and configured package repositories. Codex remaining quota is read through the local Codex app-server; Cursor remaining quota uses this computer’s existing Cursor session against Cursor’s usage API. Fleetlight does not store those session tokens. SSH handles keys; Fleetlight does not read private-key contents. Probes use a fixed read-only collector and validate a per-request receipt. Host aliases and service names are validated, and update operations use a fixed allowlist of commands. Remote output is rendered as text, never executed as an action or treated as markup.
 
 Keep personal `fleet.json`, history, keys and screenshots out of public commits. The public privacy check scans tracked source. See [SECURITY.md](SECURITY.md) for reporting concerns.
 

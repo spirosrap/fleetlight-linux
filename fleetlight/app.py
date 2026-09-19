@@ -13,6 +13,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from . import __version__
 from . import actions, config
+from . import agents as agent_quota
 from .monitor import History, issues, refresh
 from .probe import collect_metrics
 from . import updates
@@ -100,6 +101,8 @@ class Fleetlight(Adw.Application):
         self.update_history_expanded = {}
         self.batch = None
         self.pending_restarts = {}
+        self.agent_usage = {}
+        self.agent_checks_running = False
         self.journal_path = config.state_path().with_name("update-controller.json")
         if not demo:
             try:
@@ -195,6 +198,8 @@ class Fleetlight(Adw.Application):
         self.batch_label = label("", "muted")
         self.batch_label.set_wrap(True)
         fleet_bar.append(self.batch_label)
+        self.agent_box = box(True, 8)
+        fleet_bar.append(self.agent_box)
         toolbar.add_top_bar(fleet_bar)
         self.toasts = Adw.ToastOverlay()
         layout = Adw.OverlaySplitView(min_sidebar_width=220, max_sidebar_width=260)
@@ -250,6 +255,8 @@ class Fleetlight(Adw.Application):
         if self.demo:
             self.refresh_button.set_sensitive(False)
             self.app_updates = {h["id"]: {kind: updates.plan("1.0.0", "1.1.0" if kind == "cli" else "1.0.0", "standalone" if kind == "cli" else "macos-appcast") for kind in ("cli", "desktop")} for h in self.configuration["hosts"]}
+            self.agent_usage = agent_quota.demo_usage()
+            self.render_agents()
             self.render_detail()
         elif self.active_job:
             self.watch_job()
@@ -277,17 +284,27 @@ class Fleetlight(Adw.Application):
         self.spinner.start()
         previous = dict(self.snapshots)
         hosts = list(self.configuration["hosts"])
+        wanted = [name for name, on in config.enabled_agents(self.configuration).items() if on]
         def work():
             results = {}
+            usage = {}
             def received(snapshot):
                 results[snapshot["id"]] = snapshot
                 GLib.idle_add(self.receive, snapshot)
+            if wanted:
+                quota = threading.Thread(target=lambda: usage.update(agent_quota.collect(wanted)), daemon=True)
+                quota.start()
+            else:
+                quota = None
             refresh(hosts, received)
+            if quota:
+                quota.join()
             warning = None
             try:
                 self.history.record(results, previous)
             except OSError:
                 warning = "History could not be saved; live checks are still available"
+            GLib.idle_add(self.receive_agents, usage)
             GLib.idle_add(self.finished, warning)
         threading.Thread(target=work, daemon=True).start()
 
@@ -350,11 +367,51 @@ class Fleetlight(Adw.Application):
             self.check_application_updates()
         return GLib.SOURCE_REMOVE
 
+    def receive_agents(self, usage):
+        self.agent_usage = usage if isinstance(usage, dict) else {}
+        self.render_agents()
+        return GLib.SOURCE_REMOVE
+
+    def render_agents(self):
+        if not hasattr(self, "agent_box"):
+            return
+        clear(self.agent_box)
+        enabled = config.enabled_agents(self.configuration)
+        visible = [name for name in agent_quota.NAMES if enabled.get(name)]
+        if not visible:
+            return
+        heading = label("AGENT QUOTA", "eyebrow")
+        self.agent_box.append(heading)
+        row = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                          min_children_per_line=1, max_children_per_line=2,
+                          column_spacing=8, row_spacing=8)
+        for name in visible:
+            data = self.agent_usage.get(name) or {"name": name.title(), "state": "checking",
+                                                 "detail": "Checking remaining quota…", "remaining_percent": None}
+            card = box(True, 6)
+            card.add_css_class("card")
+            title = data.get("name") or name.title()
+            plan = data.get("plan")
+            card.append(label(title + ((" · " + plan) if plan else ""), "eyebrow"))
+            remaining = data.get("remaining_percent")
+            card.append(label(f"{remaining}% left" if remaining is not None else "—", "metric"))
+            bar = Gtk.ProgressBar(fraction=max(0, min(1, (remaining or 0) / 100)))
+            if remaining is not None and remaining <= 20:
+                bar.add_css_class("warning")
+            card.append(bar)
+            note = label(data.get("detail") or ("Checking remaining quota…" if data.get("state") == "checking" else "Unavailable"),
+                         "warning" if (remaining is not None and remaining <= 20) or data.get("state") == "unavailable" else "muted")
+            note.set_wrap(True)
+            card.append(note)
+            row.append(card)
+        self.agent_box.append(row)
+
     def populate_hosts(self):
         hosts = self.configuration["hosts"]
         online = sum(self.snapshots.get(h["id"], {}).get("status") == "online" for h in hosts)
         self.summary.set_text(f"{online} of {len(hosts)} online")
         self.window_title.set_subtitle(f"Linux {__version__} · {online}/{len(hosts)} online")
+        self.render_agents()
         selected_id = self.selected
         self.host_list.unselect_all()
         clear(self.host_list)
@@ -998,6 +1055,17 @@ class Fleetlight(Adw.Application):
         description = label("Add or remove computers, rename them, and set systemd services. Saved only in your user configuration folder.", "muted")
         description.set_wrap(True)
         body.append(description)
+        body.append(label("Agent quota", "section-title"))
+        quota_note = label("Show remaining Codex and Cursor allowance from this computer’s signed-in sessions. Uncheck an agent to hide it.", "muted")
+        quota_note.set_wrap(True)
+        body.append(quota_note)
+        enabled = config.enabled_agents(self.configuration)
+        agent_toggles = {}
+        for name, title in (("codex", "Codex"), ("cursor", "Cursor")):
+            toggle = Gtk.CheckButton(label="Show " + title)
+            toggle.set_active(enabled[name])
+            agent_toggles[name] = toggle
+            body.append(toggle)
         editor = Gtk.TextView(monospace=True, wrap_mode=Gtk.WrapMode.NONE)
         editor.get_buffer().set_text(json.dumps(self.configuration, indent=2))
         scroll = Gtk.ScrolledWindow(vexpand=True)
@@ -1018,6 +1086,8 @@ class Fleetlight(Adw.Application):
             buffer = editor.get_buffer()
             try:
                 candidate = config.validate(json.loads(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)))
+                candidate["agents"] = {name: toggle.get_active() for name, toggle in agent_toggles.items()}
+                candidate = config.validate(candidate)
                 config.atomic_json(self.config_file or config.config_path(), candidate)
                 if start.get_active() != actions.autostart_path().exists():
                     actions.set_autostart(start.get_active())
