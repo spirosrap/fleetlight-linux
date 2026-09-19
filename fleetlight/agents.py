@@ -46,6 +46,18 @@ def until(timestamp):
     return f"{minutes}m"
 
 
+def reset_day(timestamp):
+    try:
+        value = float(timestamp)
+    except (TypeError, ValueError):
+        return ""
+    if value > 10_000_000_000:
+        value /= 1000
+    if value <= 0:
+        return ""
+    return time.strftime("%a %d %b %H:%M", time.localtime(value))
+
+
 def agent_path():
     home = Path.home()
     parts = [str(home / suffix) for suffix in (".local/bin", ".local/share/mise/shims", ".npm-global/bin")]
@@ -93,8 +105,18 @@ def summarize_codex(limits):
             continue
         label = window_label(window.get("windowDurationMins"))
         reset = until(window.get("resetsAt"))
-        windows.append({"label": label, "remaining_percent": remaining, "reset": reset})
+        day = reset_day(window.get("resetsAt"))
+        windows.append({"label": label, "remaining_percent": remaining, "reset": reset, "reset_day": day})
     return windows
+
+
+def format_codex_window(item):
+    text = f"{item['remaining_percent']}% {item['label']}"
+    if item.get("reset"):
+        text += f" · {item['reset']}"
+    if item.get("reset_day"):
+        text += f" · {item['reset_day']}"
+    return text
 
 
 def rpc(process, ident, method, params=None, timeout=6):
@@ -152,8 +174,7 @@ def collect_codex():
     if not windows:
         return unavailable("codex", "Codex did not report a quota window")
     tightest = min(windows, key=lambda item: item["remaining_percent"])
-    parts = [f"{item['remaining_percent']}% {item['label']}" + (f" · {item['reset']}" if item["reset"] else "")
-             for item in windows]
+    parts = [format_codex_window(item) for item in windows]
     plan = limits.get("planType") or account.get("planType") or ""
     if not isinstance(plan, str):
         plan = ""
@@ -263,7 +284,7 @@ def collect(wanted=None):
 def demo_usage():
     return {
         "codex": {"id": "codex", "name": "Codex", "state": "ok", "plan": "Pro",
-                  "remaining_percent": 64, "detail": "64% weekly · 3d 12h"},
+                  "remaining_percent": 64, "detail": "64% weekly · 3d 12h · Tue 22 Sep 15:00"},
         "cursor": {"id": "cursor", "name": "Cursor", "state": "ok",
                    "remaining_percent": 41, "detail": "41% remaining this period · 12d 4h"},
     }

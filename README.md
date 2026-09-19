@@ -6,6 +6,10 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
+## Version 0.3.8
+
+- Show the Codex quota reset weekday, date and time next to the remaining-time countdown. Cursor is unchanged.
+
 ## Version 0.3.7
 
 - Count Snap, Flatpak, mise and pending Omarchy migrations as Linux updates, matching the Android companion. Those computers now appear under **Needs attention** and **Update all Linux packages**.
