@@ -198,7 +198,8 @@ def collect(services=()):
     for line in text("/etc/os-release").splitlines():
         if line.startswith("PRETTY_NAME="):
             distro = line.split("=", 1)[1].strip('"')
-    manager = next((name for name in ("pacman", "apt", "dnf") if shutil.which(name)), None)
+    manager = ("omarchy" if shutil.which("omarchy-update") and shutil.which("pacman")
+               else next((name for name in ("pacman", "apt", "dnf") if shutil.which(name)), None))
     cli = codex_version()
     return {"schema": 1, "hostname": platform.node(), "os": system, "distribution": distro,
             "architecture": platform.machine(), "codex_installation": codex_installation(),

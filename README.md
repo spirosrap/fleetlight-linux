@@ -24,7 +24,7 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 - Per-service **Warn when stopped** preferences for optional services.
 - A local history of status and service transitions, with recent changes on each computer's page.
 - Explicit terminal, SFTP and copy-diagnostics actions.
-- System package updates in an interactive terminal after confirmation. Arch uses a full `pacman -Syu`; APT and DNF are also supported. Fleetlight never answers the package manager's confirmation prompt.
+- System package updates in an interactive terminal after confirmation. Omarchy uses `omarchy update` (system packages, AUR, keyrings, migrations and mise). Other Arch hosts use a full `pacman -Syu`. APT and DNF are also supported. Fleetlight never answers the package manager's confirmation prompt.
 - Editable private configuration, an add-computer dialog and optional start at login.
 - A read-only JSON CLI for diagnostics, plus a fictional demo mode for screenshots.
 
@@ -90,12 +90,12 @@ History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, capped a
 
 - **Codex CLI, Linux and macOS:** uses the active installation's standalone updater, npm or mise. Stable versions come from the official npm registry. Unknown installation methods require a manual update.
 - **ChatGPT on Apple Silicon macOS:** checks OpenAI's official appcast, verifies the downloaded bundle's identity, version and OpenAI signing team, and restores the previous bundle if replacement verification fails.
-- **ChatGPT on Arch:** refreshes isolated package metadata, checks package integrity and runs a full `pacman -Syu` after confirmation. Modified packages are protected from this action.
+- **ChatGPT on Arch:** refreshes isolated package metadata, checks package integrity and runs a full `omarchy update` on Omarchy, or `pacman -Syu` on other Arch hosts, after confirmation. Modified packages are protected from this action.
 - **ChatGPT on APT:** validates the supported official repository and installed package, refreshes metadata and upgrades the package. Linux installation requires existing passwordless sudo permission; Fleetlight does not collect passwords or configure sudo.
 
 **Update all Codex CLI** and **Update all ChatGPT** show the number of eligible fleet updates. Each button opens a review with the computers and versions to update, plus skipped computers (current, offline, protected or unchecked). Batches run sequentially, stop on failure, and offer **Stop after current update** to cancel remaining work without interrupting an installer. The queue is saved alongside the active job and resumes after a controller restart.
 
-**Update all Linux packages** refreshes package metadata and upgrades eligible Arch, APT and DNF computers using existing passwordless sudo. Services may restart, but computers are never automatically rebooted by an update batch. When system updates are pending, locally modified ChatGPT packages protect the host from the batch; review those system upgrades manually.
+**Update all Linux packages** refreshes package metadata and upgrades eligible Omarchy, Arch, APT and DNF computers using existing passwordless sudo. On Omarchy this is the full `omarchy update -y` path, including AUR packages. Services may restart, but computers are never automatically rebooted by an update batch. When system updates are pending, locally modified ChatGPT packages protect the host from the batch; review those system upgrades manually.
 
 **Restart required computers** reviews computers with an OS reboot flag, a replaced running Arch kernel, a `needs-restarting` request, or a core-package restart recommendation recorded by Fleetlight. Each confirmed restart is scheduled with a one-minute delay; the local controller goes last. Scheduling is not reported as a verified reboot: Fleetlight waits for the computer to return with a different Linux boot ID. Open Fleetlight again after restarting its own computer (or enable start at login) to see the verification. These checks cannot identify every third-party application's restart requirement.
 

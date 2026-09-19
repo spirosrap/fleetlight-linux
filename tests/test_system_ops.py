@@ -70,6 +70,31 @@ class SystemTests(unittest.TestCase):
         install.assert_called_once_with(
             ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'])
 
+    def test_omarchy_update_uses_full_omarchy_path(self):
+        checked = {'state': 'available', 'packages': ['omarchy', 'yay-pkg'], 'manager': 'omarchy'}
+        verified = {'state': 'current', 'packages': [], 'manager': 'omarchy', 'restart': {'required': False}}
+        with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
+                patch.object(system_ops, 'run', return_value=result()), \
+                patch.object(system_ops.subprocess, 'call', return_value=0) as install:
+            self.assertEqual(system_ops.update(), 0)
+        install.assert_called_once()
+        self.assertEqual(install.call_args.args[0], ['omarchy-update', '-y'])
+        self.assertEqual(install.call_args.kwargs['env']['OMARCHY_UPDATE_LOGGED'], '1')
+
+    def test_omarchy_check_includes_aur_packages(self):
+        def which(name):
+            return '/usr/bin/' + name if name in ('omarchy-update', 'pacman', 'checkupdates', 'yay') else None
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=which), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', side_effect=[
+                    result(0, 'linux 6.1 -> 6.2\n'), result(0), result(0),
+                    result(0, 'yay-pkg 1-1\n'), result(0, 'yay-pkg 1-1 -> 1-2\n')]):
+            checked = system_ops.check()
+        self.assertEqual(checked['manager'], 'omarchy')
+        self.assertEqual(checked['packages'], ['linux', 'yay-pkg'])
+        self.assertEqual(checked['state'], 'available')
+
     def test_no_update_when_protected(self):
         with patch.object(system_ops, 'check', return_value={'state':'protected'}), patch.object(system_ops.subprocess, 'call') as install:
             self.assertEqual(system_ops.update(), 1)

@@ -41,13 +41,31 @@ def reboot_status():
     return {'required': False, 'reason': 'No restart requirement detected'}
 
 
+def linux_manager():
+    if shutil.which('omarchy-update') and shutil.which('pacman'):
+        return 'omarchy'
+    return next((m for m in ('pacman', 'apt', 'dnf') if shutil.which(m)), None)
+
+
+def aur_updates():
+    if not shutil.which('yay'):
+        return []
+    foreign = run(['pacman', '-Qem'])
+    if foreign.returncode != 0 or not foreign.stdout.strip():
+        return []
+    completed = run(['yay', '-Qua'])
+    if completed.returncode not in (0, 1):
+        return []
+    return [line.split()[0] for line in completed.stdout.splitlines() if ' -> ' in line]
+
+
 def check():
-    manager = next((m for m in ('pacman', 'apt', 'dnf') if shutil.which(m)), None)
+    manager = linux_manager()
     result = {'manager': manager, 'packages': [], 'state': 'unknown', 'restart': reboot_status()}
     if platform.system() != 'Linux' or not manager:
         result.update(state='unsupported', detail='Unsupported operating system or package manager')
         return result
-    if manager == 'pacman':
+    if manager in ('pacman', 'omarchy'):
         if not shutil.which('checkupdates'):
             result['detail'] = 'Install pacman-contrib to check updates'
             return result
@@ -58,6 +76,8 @@ def check():
             return result
         packages = [line.split()[0] for line in completed.stdout.splitlines() if ' -> ' in line]
         protected = bool(packages) and run(['pacman', '-Q', 'openai-codex-desktop']).returncode == 0 and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
+        if manager == 'omarchy' and not protected:
+            packages += [name for name in aur_updates() if name not in packages]
     elif manager == 'apt':
         for attempt in range(3):
             # Keep this comfortably inside the controller's remote-check timeout.
@@ -124,11 +144,19 @@ def update():
         return 1
     if checked['packages']:
         print('PHASE:Installing system package updates', flush=True)
-        commands = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
-                    'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'upgrade'],
-                    'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}
         # No timeout: interrupting a package manager can leave the system broken.
-        if subprocess.call(commands[checked['manager']]) != 0:
+        # Skip omarchy-update's `script` PTY wrapper so gum cannot wait on a job with no operator.
+        if checked['manager'] == 'omarchy':
+            if run(['sudo', '-n', 'true']).returncode != 0:
+                print('UPDATE:permission-required\nVERIFY:failed')
+                return 1
+            code = subprocess.call(['omarchy-update', '-y'], env=dict(os.environ, LC_ALL='C', OMARCHY_UPDATE_LOGGED='1'))
+        else:
+            commands = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
+                        'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'upgrade'],
+                        'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}
+            code = subprocess.call(commands[checked['manager']])
+        if code != 0:
             print('UPDATE:install-failed\nVERIFY:failed')
             return 1
     core = {'glibc', 'systemd', 'dbus', 'libc6', 'linux', 'linux-lts', 'linux-zen', 'linux-hardened'}

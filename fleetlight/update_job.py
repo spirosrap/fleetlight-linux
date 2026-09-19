@@ -99,7 +99,7 @@ def worker(directory, lock_fd):
     environment = dict(os.environ)
     environment.update(FLEETLIGHT_EXPECTED_VERSION=request["target"], FLEETLIGHT_EXPECTED_BUILD=request.get("build", ""))
     paths = [str(Path.home() / p) for p in (".local/bin", ".local/share/mise/shims", ".npm-global/bin")]
-    environment["PATH"] = os.pathsep.join(paths + ["/opt/homebrew/bin", "/usr/local/bin", environment.get("PATH", "/usr/bin:/bin")])
+    environment["PATH"] = os.pathsep.join(paths + ["/usr/share/omarchy/bin", "/opt/homebrew/bin", "/usr/local/bin", environment.get("PATH", "/usr/bin:/bin")])
     lines = []
     try:
         with (directory / "output.log").open("w") as log:

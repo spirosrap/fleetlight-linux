@@ -134,6 +134,9 @@ class HistoryAndActionTests(unittest.TestCase):
         self.assertEqual(command[command.index("--") + 1], "server")
         self.assertTrue(command[-1].startswith("sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syu"))
         self.assertNotIn("--noconfirm", command[-1])
+        omarchy = terminal_command(host, "omarchy")
+        self.assertTrue(omarchy[-1].startswith("omarchy update"))
+        self.assertNotIn("-y", omarchy[-1])
         with self.assertRaises(ValueError):
             terminal_command(host, "arbitrary")
 

@@ -7,7 +7,8 @@ import subprocess
 from .config import validate
 
 
-UPDATE_COMMANDS = {"pacman": "sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syu",
+UPDATE_COMMANDS = {"omarchy": "omarchy update",
+                   "pacman": "sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syu",
                    "apt": "sudo apt update && sudo apt upgrade",
                    "dnf": "sudo dnf upgrade"}
 
