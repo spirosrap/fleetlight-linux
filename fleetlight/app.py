@@ -16,6 +16,7 @@ from . import actions, config
 from . import agents as agent_quota
 from .monitor import History, issues, linux_update_issues, refresh
 from .probe import collect_metrics
+from . import sites
 from . import updates
 
 
@@ -103,6 +104,7 @@ class Fleetlight(Adw.Application):
         self.pending_restarts = {}
         self.agent_usage = {}
         self.agent_checks_running = False
+        self.site_status = {}
         self.auto_attempted = set()
         self.auto_holdoff_until = 0
         self.journal_path = config.state_path().with_name("update-controller.json")
@@ -215,7 +217,7 @@ class Fleetlight(Adw.Application):
         self.summary.set_margin_top(0)
         self.summary.set_margin_bottom(0)
         sidebar.append(self.summary)
-        self.search = Gtk.SearchEntry(placeholder_text="Find a computer")
+        self.search = Gtk.SearchEntry(placeholder_text="Find a computer or site")
         margins(self.search, 12)
         self.search.set_margin_top(0)
         self.search.set_margin_bottom(0)
@@ -287,9 +289,11 @@ class Fleetlight(Adw.Application):
         previous = dict(self.snapshots)
         hosts = list(self.configuration["hosts"])
         wanted = [name for name, on in config.enabled_agents(self.configuration).items() if on]
+        watched = list(sites.configured(self.configuration))
         def work():
             results = {}
             usage = {}
+            site_results = {}
             def received(snapshot):
                 results[snapshot["id"]] = snapshot
                 GLib.idle_add(self.receive, snapshot)
@@ -298,15 +302,22 @@ class Fleetlight(Adw.Application):
                 quota.start()
             else:
                 quota = None
+            site_check = threading.Thread(target=lambda: site_results.update(sites.check_all(watched)),
+                                          daemon=True) if watched else None
+            if site_check:
+                site_check.start()
             refresh(hosts, received)
             if quota:
                 quota.join()
+            if site_check:
+                site_check.join()
             warning = None
             try:
                 self.history.record(results, previous)
             except OSError:
                 warning = "History could not be saved; live checks are still available"
             GLib.idle_add(self.receive_agents, usage)
+            GLib.idle_add(self.receive_sites, site_results)
             GLib.idle_add(self.finished, warning)
         threading.Thread(target=work, daemon=True).start()
 
@@ -374,6 +385,11 @@ class Fleetlight(Adw.Application):
         self.render_agents()
         return GLib.SOURCE_REMOVE
 
+    def receive_sites(self, status):
+        self.site_status = status if isinstance(status, dict) else {}
+        self.populate_hosts()
+        return GLib.SOURCE_REMOVE
+
     def render_agents(self):
         if not hasattr(self, "agent_box"):
             return
@@ -410,9 +426,20 @@ class Fleetlight(Adw.Application):
 
     def populate_hosts(self):
         hosts = self.configuration["hosts"]
+        watched = sites.configured(self.configuration)
         online = sum(self.snapshots.get(h["id"], {}).get("status") == "online" for h in hosts)
-        self.summary.set_text(f"{online} of {len(hosts)} online")
-        self.window_title.set_subtitle(f"Linux {__version__} · {online}/{len(hosts)} online")
+        site_trouble = sum(1 for site in watched if sites.issues(self.site_status.get(site["id"])))
+        summary = f"{online} of {len(hosts)} online"
+        if watched:
+            if site_trouble:
+                summary += f" · {site_trouble} site" + ("s need" if site_trouble != 1 else " needs") + " attention"
+            else:
+                summary += f" · {len(watched)} site" + ("s" if len(watched) != 1 else "") + " checked"
+        self.summary.set_text(summary)
+        subtitle = f"Linux {__version__} · {online}/{len(hosts)} online"
+        if site_trouble:
+            subtitle += f" · {site_trouble} site alert"
+        self.window_title.set_subtitle(subtitle)
         self.render_agents()
         selected_id = self.selected
         self.host_list.unselect_all()
@@ -445,6 +472,31 @@ class Fleetlight(Adw.Application):
             self.host_list.append(row)
             if host["id"] == selected_id:
                 selected_row = row
+        for site in watched:
+            if query and query not in site["name"].casefold():
+                continue
+            status = self.site_status.get(site["id"], {})
+            trouble = sites.issues(status)
+            if self.attention.get_active() and not trouble:
+                continue
+            row = Gtk.ListBoxRow()
+            row.host_id = site["id"]
+            body = box(False, 12)
+            icon = Gtk.Image.new_from_icon_name("web-browser-symbolic")
+            icon.set_pixel_size(24)
+            state = status.get("state")
+            icon.add_css_class("good" if state == "ok" else "warning" if state else "muted")
+            body.append(icon)
+            names = box(True, 3)
+            name = label(site["name"])
+            name.set_ellipsize(3)
+            names.append(name)
+            names.append(label(status.get("detail") or "Website catalogue", "muted"))
+            body.append(names)
+            row.set_child(body)
+            self.host_list.append(row)
+            if site["id"] == selected_id:
+                selected_row = row
         row = selected_row or self.host_list.get_row_at_index(0)
         if row:
             self.host_list.select_row(row)
@@ -457,8 +509,60 @@ class Fleetlight(Adw.Application):
             self.selected = row.host_id
             self.render_detail()
 
+    def render_site(self, site):
+        status = self.site_status.get(site["id"], {})
+        trouble = sites.issues(status)
+        clear(self.content)
+        hero = box(False, 12)
+        headings = box(True, 6)
+        headings.set_hexpand(True)
+        headings.append(label("WEBSITE", "eyebrow"))
+        title = label(site["name"], "hero")
+        title.set_wrap(True)
+        headings.append(title)
+        headings.append(label(site.get("url") or "", "muted"))
+        hero.append(headings)
+        state = status.get("state")
+        badge_text = "Current" if state == "ok" else "Needs attention" if trouble else "Checking" if self.busy else "Not checked yet"
+        badge = label(badge_text, "pill")
+        badge.add_css_class("good" if state == "ok" else "warning")
+        badge.set_valign(Gtk.Align.CENTER)
+        hero.append(badge)
+        self.content.append(hero)
+        if trouble:
+            alert = box(True, 5)
+            alert.add_css_class("card")
+            alert.append(label("Needs attention", "warning"))
+            for message in trouble[:8]:
+                line = label(message, "muted")
+                line.set_wrap(True)
+                alert.append(line)
+            self.content.append(alert)
+        card = self.section("Catalogue freshness", "Checked from this computer over HTTPS")
+        generated = status.get("generated_at")
+        updated = time.strftime("%a %d %b %H:%M", time.localtime(generated)) if generated else "Unknown"
+        self.detail_row(card, "Last catalogue update", updated, "view-refresh-symbolic",
+                        "warning" if trouble else "good" if state == "ok" else "muted")
+        self.detail_row(card, "Age limit", str(site.get("max_age_hours", 4)) + " hours", "alarm-symbolic")
+        if status.get("product_count") is not None:
+            self.detail_row(card, "Products", str(status["product_count"]), "view-list-symbolic")
+        if status.get("status"):
+            self.detail_row(card, "Reported status", status["status"], "dialog-information-symbolic",
+                            "warning" if trouble else "muted")
+        note = label(status.get("detail") or "Press Check now to check this website.", "muted")
+        note.set_wrap(True)
+        card.append(note)
+        footer = label("Website checks run with computer checks from this Linux app. "
+                       "They do not use SSH.", "muted")
+        footer.set_wrap(True)
+        self.content.append(footer)
+
     def render_detail(self):
         self.render_batch()
+        site = next((item for item in sites.configured(self.configuration) if item["id"] == self.selected), None)
+        if site is not None:
+            self.render_site(site)
+            return
         host = next((h for h in self.configuration["hosts"] if h["id"] == self.selected), None)
         if host is None:
             return
@@ -1089,7 +1193,7 @@ class Fleetlight(Adw.Application):
         dialog = Adw.Window(transient_for=self.window, modal=True, title="Fleetlight settings", default_width=620, default_height=600)
         body = margins(box(True, 12), 20)
         body.append(label("Your fleet configuration", "section-title"))
-        description = label("Add or remove computers, rename them, and set systemd services. Saved only in your user configuration folder.", "muted")
+        description = label("Add or remove computers, rename them, and set systemd services. Optional websites are checked from this computer for a recent HTTPS JSON update time. Saved only in your user configuration folder.", "muted")
         description.set_wrap(True)
         body.append(description)
         body.append(label("Agent quota", "section-title"))
@@ -1145,6 +1249,8 @@ class Fleetlight(Adw.Application):
                 self.auto_attempted.clear()
                 self.auto_holdoff_until = 0
             self.snapshots = {k:v for k,v in self.snapshots.items() if k in {h["id"] for h in candidate["hosts"]}}
+            self.site_status = {k:v for k,v in self.site_status.items()
+                                if k in {site["id"] for site in sites.configured(candidate)}}
             if self.timer:
                 GLib.source_remove(self.timer)
             self.timer = GLib.timeout_add_seconds(candidate.get("refresh_seconds", 60), self.auto_check)

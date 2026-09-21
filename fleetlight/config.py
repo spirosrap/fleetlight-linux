@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from urllib.parse import urlparse
 
 
 def config_path():
@@ -74,6 +75,34 @@ def validate(config):
         optional = host.get("optional_services", [])
         if not isinstance(optional, list) or any(not isinstance(s, str) or s not in services for s in optional):
             raise ValueError("optional_services must be a list of configured service names")
+    if "sites" in config:
+        sites = config["sites"]
+        if not isinstance(sites, list) or len(sites) > 16:
+            raise ValueError("Configure at most 16 websites")
+        for site in sites:
+            if not isinstance(site, dict):
+                raise ValueError("Each website must be an object")
+            ident = site.get("id", "")
+            if not isinstance(ident, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", ident) or ident in ids:
+                raise ValueError("Website IDs must be unique and use letters, numbers, dots or dashes")
+            ids.add(ident)
+            if not isinstance(site.get("name"), str) or not 1 <= len(site["name"]) <= 80:
+                raise ValueError("Website names must contain 1–80 characters")
+            url = site.get("url", "")
+            if not isinstance(url, str) or len(url) > 300:
+                raise ValueError("Website URLs must be HTTPS addresses without credentials")
+            parsed = urlparse(url)
+            if (parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname
+                    or "." not in parsed.hostname or parsed.hostname.endswith(".")
+                    or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", parsed.hostname)):
+                raise ValueError("Website URLs must be HTTPS addresses without credentials")
+            age = site.get("max_age_hours", 4)
+            if type(age) is not int or not 1 <= age <= 168:
+                raise ValueError("Website max_age_hours must be between 1 and 168")
+            key = site.get("timestamp_key")
+            if key is not None and (not isinstance(key, str) or not re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_]{0,40}(?:\.[A-Za-z][A-Za-z0-9_]{0,40}){0,4}", key)):
+                raise ValueError("timestamp_key must be a dotted JSON field name")
     return config
 
 

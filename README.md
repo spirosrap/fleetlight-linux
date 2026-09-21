@@ -6,6 +6,10 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
+## Version 0.3.9
+
+- Alert when a configured website catalogue stops updating. Add HTTPS JSON status URLs to `sites` in your private configuration; Fleetlight checks them from this computer and shows them under **Needs attention** when the update time is older than usual or the refresh reports a failure.
+
 ## Version 0.3.8
 
 - Show the Codex quota reset weekday, date and time next to the remaining-time countdown. Cursor is unchanged.
@@ -41,6 +45,7 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 - Durable update jobs with progress, verification and reconnect recovery.
 - Per-service **Warn when stopped** preferences for optional services.
 - A local history of status and service transitions, with recent changes on each computer's page.
+- Optional HTTPS website freshness checks for small JSON status documents, with **Needs attention** alerts when the catalogue is older than usual.
 - Explicit terminal, SFTP and copy-diagnostics actions.
 - System package updates in an interactive terminal after confirmation. Omarchy uses `omarchy update` (system packages, AUR, keyrings, migrations and mise). Other Arch hosts use a full `pacman -Syu`. APT and DNF are also supported. Fleetlight never answers the package manager's confirmation prompt.
 - Editable private configuration, an add-computer dialog and optional start at login.
@@ -89,6 +94,9 @@ The public app starts with **This Computer only**. It never imports or probes yo
   "hosts": [
     {"id": "local", "name": "This Computer", "local": true, "services": []},
     {"id": "server", "name": "Home Server", "alias": "home-server", "services": ["tailscaled", "docker"]}
+  ],
+  "sites": [
+    {"id": "status", "name": "Status page", "url": "https://example.com/status.json", "max_age_hours": 4}
   ]
 }
 ```
@@ -98,6 +106,8 @@ SSH aliases are resolved by OpenSSH using your normal `~/.ssh/config`. Verify a 
 Service names refer to system-level systemd units. macOS service checks are currently unsupported. A missing configured service is reported as **not installed**, not healthy. Host probes run at most eight at once, time out after 25 seconds and never require sudo. Codex version lookup follows common system, mise and nvm paths. Application release checks run separately and refresh package metadata.
 
 Services are expected to run unless you turn off **Warn when stopped**. Optional services remain visible; inactive or uninstalled optional services are neutral, while an actual failed service still needs attention. Settings stores these preferences in each host's `optional_services` list.
+
+Optional `sites` entries are checked from this computer over HTTPS. Point each one at a small JSON document with an update time such as `generated_at`. Fleetlight alerts when that time is older than `max_age_hours` (4 hours if omitted) or when the document reports a failed refresh. These checks do not use SSH.
 
 System updates can overwrite local application repairs. Confirmed terminal updates leave package selection, authentication and final confirmation to you. Unattended Linux package updates only run from **Update all Linux packages** or from Settings automatic updates, using existing passwordless sudo.
 
@@ -147,7 +157,7 @@ The native smoke test needs Xvfb and a session D-Bus (`xvfb` and `dbus-x11` on U
 
 ## Privacy and security
 
-No analytics, cloud accounts, API keys or bundled private fleet. Host connections go only to the computers you configure. Application checks also contact the official npm registry, OpenAI appcast and configured package repositories. Codex remaining quota is read through the local Codex app-server; Cursor remaining quota uses this computer’s existing Cursor session against Cursor’s usage API. Fleetlight does not store those session tokens. SSH handles keys; Fleetlight does not read private-key contents. Probes use a fixed read-only collector and validate a per-request receipt. Host aliases and service names are validated, and update operations use a fixed allowlist of commands. Remote output is rendered as text, never executed as an action or treated as markup.
+No analytics, cloud accounts, API keys or bundled private fleet. Host connections go only to the computers you configure. Application checks also contact the official npm registry, OpenAI appcast and configured package repositories. Optional website checks contact only the HTTPS status URLs you add under `sites`. Codex remaining quota is read through the local Codex app-server; Cursor remaining quota uses this computer’s existing Cursor session against Cursor’s usage API. Fleetlight does not store those session tokens. SSH handles keys; Fleetlight does not read private-key contents. Probes use a fixed read-only collector and validate a per-request receipt. Host aliases and service names are validated, and update operations use a fixed allowlist of commands. Remote output is rendered as text, never executed as an action or treated as markup.
 
 Keep personal `fleet.json`, history, keys and screenshots out of public commits. The public privacy check scans tracked source. See [SECURITY.md](SECURITY.md) for reporting concerns.
 
