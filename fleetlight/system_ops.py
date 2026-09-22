@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,20 @@ def linux_manager():
     return next((m for m in ('pacman', 'apt', 'dnf') if shutil.which(m)), None)
 
 
+def upgrade_lines(text):
+    """Real pacman/yay upgrades only. Yay errors such as '-> 1 error occurred:' are not packages."""
+    found = []
+    for raw in str(text or "").splitlines():
+        match = re.match(r"^(?:[A-Za-z0-9@._+-]+/)?([A-Za-z0-9@._+-]+)\s+(\S+)\s+->\s+(\S+)", raw.strip())
+        if not match:
+            continue
+        name, old, new = match.group(1), match.group(2), match.group(3).rstrip(",")
+        if not any(character.isdigit() for character in old + new):
+            continue
+        found.append((name, name + " " + old + " -> " + new))
+    return found
+
+
 def aur_updates():
     if not shutil.which('yay'):
         return []
@@ -58,7 +73,7 @@ def aur_updates():
     completed = run(['yay', '-Qua'])
     if completed.returncode not in (0, 1):
         return []
-    return [line.strip() for line in completed.stdout.splitlines() if ' -> ' in line]
+    return [description for _, description in upgrade_lines(completed.stdout)]
 
 
 def cursor_platform():
@@ -186,8 +201,9 @@ def check():
         if completed.returncode not in (0, 2):
             result['detail'] = 'Package metadata refresh failed'
             return result
-        changes = [line.strip() for line in completed.stdout.splitlines() if ' -> ' in line]
-        packages = [line.split()[0] for line in changes]
+        upgrades = upgrade_lines(completed.stdout)
+        changes = [description for _, description in upgrades]
+        packages = [name for name, _ in upgrades]
         protected = bool(packages) and run(['pacman', '-Q', 'openai-codex-desktop']).returncode == 0 and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
         if manager == 'omarchy' and not protected:
             for line in aur_updates():

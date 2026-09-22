@@ -119,6 +119,10 @@ class SystemTests(unittest.TestCase):
         self.assertEqual(checked['changes'], ['linux 6.1 -> 6.2', 'yay-pkg 1-1 -> 1-2'])
         self.assertEqual(checked['state'], 'available')
 
+    def test_yay_error_arrow_is_not_a_package(self):
+        self.assertEqual(system_ops.upgrade_lines(" -> 1 error occurred:\nlinux 6.1 -> 6.2\n"),
+                         [("linux", "linux 6.1 -> 6.2")])
+
     def test_omarchy_check_includes_mise_and_pending_migrations(self):
         def which(name):
             return '/usr/bin/' + name if name in (
