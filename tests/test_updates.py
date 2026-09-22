@@ -58,6 +58,95 @@ class UpdateTests(unittest.TestCase):
         self.assertIsNone(kind)
         self.assertEqual(pending, [])
 
+    def test_installation_changes_lists_packages_and_versions(self):
+        packages = update_job.installation_changes({
+            "kind": "system",
+            "changes": ["linux 6.1 -> 6.2"],
+            "log": "CHANGED:linux 6.1 -> 6.2\n",
+        })
+        self.assertEqual(packages, ["linux 6.1 → 6.2"])
+        omarchy = """
+Package (2)             Old Version  New Version  Net Change  Download Size
+
+omarchy/mise-bin        2026.9.11-1  2026.9.12-1    2.23 MiB      35.89 MiB
+extra/gd                         2.3.3-9        0.64 MiB       0.15 MiB
+
+1  aur/spotifast-bin  0.8.0-1 -> 0.9.0-1
+upgrading mise-bin...
+"""
+        self.assertEqual(update_job.package_changes(omarchy), [
+            "mise-bin 2026.9.11-1 → 2026.9.12-1",
+            "gd → 2.3.3-9",
+            "spotifast-bin 0.8.0-1 → 0.9.0-1",
+        ])
+        upgraded = update_job.installation_changes({
+            "kind": "desktop",
+            "log": "BEFORE_VERSION:26.915.31029\nAFTER_VERSION:26.915.31945\n" + omarchy,
+        })
+        self.assertEqual(upgraded[0], "ChatGPT 26.915.31029 → 26.915.31945")
+        self.assertIn("spotifast-bin 0.8.0-1 → 0.9.0-1", upgraded)
+
+    def test_history_is_kept_for_every_computer_and_macs_skip_packages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job = Path(directory) / "abc" 
+            job.mkdir()
+            (job / "state.json").write_text(json.dumps({
+                "id": "a" * 32, "kind": "system", "state": "succeeded", "phase": "System packages verified",
+                "finished_at": 100,
+            }))
+            (job / "output.log").write_text("extra/linux  6.1-1  6.2-1    1.00 MiB\nOld Version  New Version\n")
+            # Table header must precede the package row.
+            (job / "output.log").write_text("Old Version  New Version\n\nextra/linux        6.1-1  6.2-1    1.00 MiB\n")
+            desktop = Path(directory) / "desk"
+            desktop.mkdir()
+            (desktop / "state.json").write_text(json.dumps({
+                "id": "b" * 32, "kind": "desktop", "state": "succeeded", "phase": "Verified",
+                "finished_at": 200,
+            }))
+            (desktop / "output.log").write_text("BEFORE_VERSION:1.0.0\nAFTER_VERSION:1.2.0\n")
+            report = update_job.history_report(directory)
+            self.assertEqual([item["kind"] for item in report], ["desktop", "system"])
+            self.assertEqual(update_job.visible_installs(report, "Darwin"), [report[0]])
+            self.assertEqual(len(update_job.visible_installs(report, "Linux")), 2)
+        parsed = updates.parse_install_history('noise\nFLEETLIGHT_HISTORY=' + json.dumps(report))
+        self.assertEqual(parsed[0]["kind"], "desktop")
+        host = {"id": "server", "name": "Server", "alias": "server"}
+        with patch("fleetlight.updates.run_process", return_value=(0, "FLEETLIGHT_HISTORY=" + json.dumps(report), "")) as run:
+            records = updates.read_install_history(host)
+        self.assertTrue(run.call_args.args[0][-1].endswith(" history"))
+        self.assertEqual(records[1]["changes"][0], "linux 6.1-1 → 6.2-1")
+
+    def test_unrecorded_mac_install_is_listed_at_its_file_time(self):
+        report = [{
+            "kind": "desktop", "state": "succeeded", "phase": "Verified 26.911.61220",
+            "finished_at": 100, "changes": ["ChatGPT 26.908.70816 → 26.911.61220"],
+        }, {
+            "kind": "cli", "state": "succeeded", "phase": "Verified 0.153.4",
+            "finished_at": 90, "changes": ["Codex CLI 0.153.4"],
+        }]
+        merged = update_job.merge_current_installs(report, [
+            {"kind": "desktop", "version": "26.915.31945", "finished_at": 300},
+            {"kind": "cli", "version": "0.155.1", "finished_at": 400},
+            {"kind": "cli", "version": "0.153.4", "finished_at": 50},
+        ])
+        self.assertEqual(merged[0]["changes"], ["Codex CLI 0.153.4 → 0.155.1"])
+        self.assertEqual(merged[1]["changes"], ["ChatGPT 26.911.61220 → 26.915.31945"])
+        self.assertEqual(merged[0]["finished_at"], 400)
+
+    def test_apt_unpacking_lines_list_old_and_new_versions(self):
+        log = """
+The following packages will be upgraded:
+  ghostscript libexpat1
+Unpacking libexpat1:amd64 (2.6.1-2ubuntu0.5) over (2.6.1-2ubuntu0.4)…
+Unpacking rsyslog (8.2312.0-3ubuntu9.4) over (8.2312.0-3ubuntu9.3)…
+Unpacking hello (1.0)…
+"""
+        self.assertEqual(update_job.package_changes(log), [
+            "libexpat1 2.6.1-2ubuntu0.4 → 2.6.1-2ubuntu0.5",
+            "rsyslog 8.2312.0-3ubuntu9.3 → 8.2312.0-3ubuntu9.4",
+            "hello → 1.0",
+        ])
+
     def test_receipts_require_marker_version_and_verification(self):
         good = ['FLEETLIGHT_CODEX_UPDATE', 'ACTIVE_VERSION:1.2.3', 'VERIFY:ok']
         self.assertEqual(update_job.parse_result('cli', '1.2.3', '', 0, good)[0], 'succeeded')

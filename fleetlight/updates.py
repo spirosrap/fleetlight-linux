@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 
 from .config import validate
 from .monitor import python_command, run_process
-from .update_job import version
+from .update_job import version, history_report, visible_installs
 
 ROOT = Path(__file__).parent
 REGISTRY = "https://registry.npmjs.org/@openai/codex/latest"
@@ -142,6 +142,63 @@ def check_all(hosts, snapshots, callback):
             except Exception:
                 value = {kind: plan(None, None, None, "Update check failed") for kind in ("cli", "desktop")}
             callback(ident, value)
+
+
+def collect_install_histories(hosts):
+    result = {}
+    wanted = [host for host in hosts if isinstance(host, dict)]
+    if not wanted:
+        return result
+    with ThreadPoolExecutor(max_workers=min(4, len(wanted))) as pool:
+        futures = {pool.submit(read_install_history, host): host["id"] for host in wanted}
+        for future in as_completed(futures):
+            try:
+                records = future.result()
+            except Exception:
+                continue
+            if isinstance(records, list):
+                result[futures[future]] = records
+    return result
+
+
+def parse_install_history(output):
+    marker = next((line.split("=", 1)[1] for line in str(output or "").splitlines() if line.startswith("FLEETLIGHT_HISTORY=")), None)
+    try:
+        data = json.loads(marker) if marker else []
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    records = []
+    for item in data[:12]:
+        if not isinstance(item, dict) or item.get("kind") not in ("cli", "desktop", "system", "restart"):
+            continue
+        changes = [change.strip()[:200] for change in item.get("changes", []) if isinstance(change, str) and change.strip()]
+        records.append({
+            "id": item.get("id") if isinstance(item.get("id"), str) else "",
+            "kind": item.get("kind"),
+            "state": item.get("state") if item.get("state") in ("succeeded", "failed") else "failed",
+            "phase": str(item.get("phase") or "")[:200],
+            "started_at": item.get("started_at") if isinstance(item.get("started_at"), (int, float)) else None,
+            "finished_at": item.get("finished_at") if isinstance(item.get("finished_at"), (int, float)) else None,
+            "changes": changes[:80],
+        })
+    return records
+
+
+def read_install_history(host):
+    """Read finished Fleetlight installs stored on that computer. New computers need no extra setting."""
+    validate({"version": 1, "hosts": [host]})
+    if host.get("local"):
+        return history_report()
+    source = (ROOT / "update_job.py").read_text()
+    try:
+        code, output, _ = run_process(connection(host, python_command(source, "history")), timeout=30)
+    except (OSError, TimeoutError):
+        return []
+    if code:
+        return None
+    return parse_install_history(output)
 
 
 def job_request(host, request):

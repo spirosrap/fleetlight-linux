@@ -6,6 +6,10 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
+## Version 0.3.10
+
+- The application update dropdown lists what each installation changed on every computer. Linux includes package upgrades. Macs list Codex CLI and ChatGPT only. A newly added computer is included automatically. The list stays open while live metrics refresh.
+
 ## Version 0.3.9
 
 - Alert when a configured website catalogue stops updating. Add HTTPS JSON status URLs to `sites` in your private configuration; Fleetlight checks them from this computer and shows them under **Needs attention** when the update time is older than usual or the refresh reports a failure.

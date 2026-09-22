@@ -8,7 +8,10 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import platform
+import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,6 +50,240 @@ def save(path, data):
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
+
+
+def package_changes(log):
+    """Package upgrades printed by pacman, Omarchy and yay. ANSI and progress lines are ignored."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", str(log or ""))
+    changes = []
+
+    def add(item):
+        item = " ".join(item.split())
+        if item and item not in changes and len(changes) < 80:
+            changes.append(item)
+
+    def versionish(value):
+        return bool(re.search(r"\d", value)) and not re.search(r"\b(?:B|KiB|MiB|GiB)\b", value)
+
+    in_table = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if "Old Version" in line and "New Version" in line:
+            in_table = True
+            continue
+        if in_table and not line:
+            continue
+        if in_table and line.startswith(("Total ", "::")):
+            in_table = False
+            continue
+        if in_table:
+            parts = re.split(r"\s{2,}", line)
+            name = parts[0].split("/")[-1] if parts else ""
+            old = parts[1] if len(parts) > 1 else ""
+            new = parts[2] if len(parts) > 2 else ""
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+-]*", name) and versionish(old):
+                if versionish(new):
+                    add(name + " " + old + " → " + new)
+                else:
+                    add(name + " → " + old)
+                continue
+            in_table = False
+        if line.startswith("->") or "Excluding packages" in line:
+            continue
+        match = re.search(r"(?:aur/)?([A-Za-z0-9][A-Za-z0-9@._+-]*)\s+(\S+)\s+->\s+(\S+)", line)
+        if match:
+            add(match.group(1) + " " + match.group(2) + " → " + match.group(3).rstrip("],"))
+            continue
+        unpacked = re.search(
+            r"Unpacking\s+([A-Za-z0-9][A-Za-z0-9+._-]*)(?::\S+)?\s+\(([^)]+)\)(?:\s+over\s+\(([^)]+)\))?",
+            line)
+        if unpacked:
+            name, new, old = unpacked.group(1), unpacked.group(2), unpacked.group(3)
+            add(name + " " + old + " → " + new if old else name + " → " + new)
+    return changes
+
+
+def installation_changes(receipt):
+    """Readable install results from explicit markers or the package-manager log."""
+    if not isinstance(receipt, dict):
+        return []
+    log = str(receipt.get("log") or "")
+    found = []
+    saved = receipt.get("changes")
+    if isinstance(saved, list):
+        found.extend(item.strip()[:200] for item in saved if isinstance(item, str) and item.strip())
+    before = after = ""
+    for line in log.splitlines():
+        if line.startswith("CHANGED:"):
+            item = line.split(":", 1)[1].strip()[:200]
+            if item and item not in found and len(found) < 80:
+                found.append(item)
+        elif line.startswith("BEFORE_VERSION:"):
+            before = line.split(":", 1)[1].strip()
+        elif line.startswith(("AFTER_VERSION:", "ACTIVE_VERSION:")):
+            after = line.split(":", 1)[1].strip()
+    packages = package_changes(log)
+    if packages:
+        found = packages
+    kind = {"cli": "Codex CLI", "desktop": "ChatGPT", "system": "Linux packages"}.get(receipt.get("kind"), "Version")
+    if before and after and before != after:
+        version_line = kind + " " + before + " → " + after
+        if version_line not in found:
+            found.insert(0, version_line)
+    elif after and not found:
+        found.append(kind + " " + after)
+    return found[:80]
+
+
+def leading_version(text):
+    match = re.search(r"(\d+\.\d+\.\d+)", str(text or ""))
+    return match.group(1) if match else ""
+
+
+def recorded_version(report, kind):
+    for item in report:
+        if item.get("kind") != kind:
+            continue
+        for change in item.get("changes") or []:
+            if "→" in change:
+                found = leading_version(change.split("→")[-1])
+                if found:
+                    return found
+        found = leading_version(item.get("phase"))
+        if found:
+            return found
+    return ""
+
+
+def file_time(path):
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return None
+    return max(stat.st_mtime, getattr(stat, "st_birthtime", stat.st_mtime))
+
+
+def codex_install():
+    candidates = [Path.home() / ".local/bin/codex", Path.home() / ".local/share/mise/shims/codex"]
+    found = shutil.which("codex")
+    if found:
+        candidates.append(Path(found))
+    for path in candidates:
+        try:
+            resolved = Path(os.path.realpath(path))
+        except OSError:
+            continue
+        if not resolved.is_file():
+            continue
+        for parent in [resolved, *resolved.parents]:
+            number = leading_version(parent.name)
+            if number and parent != resolved:
+                return {"kind": "cli", "version": number, "finished_at": file_time(parent)}
+    return None
+
+
+def chatgpt_install():
+    if platform.system() != "Darwin":
+        return None
+    plist = Path("/Applications/ChatGPT.app/Contents/Info.plist")
+    if not plist.is_file():
+        return None
+    try:
+        with plist.open("rb") as stream:
+            data = plistlib.load(stream)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return None
+    if data.get("CFBundleIdentifier") != "com.openai.codex":
+        return None
+    number = leading_version(data.get("CFBundleShortVersionString"))
+    if not number:
+        return None
+    return {"kind": "desktop", "version": number, "finished_at": file_time(plist)}
+
+
+def merge_current_installs(report, installs):
+    """Add the version currently on disk when Fleetlight did not record that install."""
+    names = {"cli": "Codex CLI", "desktop": "ChatGPT"}
+    combined = list(report)
+    for install in installs:
+        if not install or not install.get("finished_at"):
+            continue
+        current = install.get("version")
+        if not version(current):
+            continue
+        previous = recorded_version(combined, install["kind"])
+        if previous == current or (version(previous) and version(previous) >= version(current)):
+            continue
+        change = names[install["kind"]] + " " + (previous + " → " if previous else "") + current
+        combined.append({
+            "id": "installed-" + install["kind"],
+            "kind": install["kind"],
+            "state": "succeeded",
+            "phase": "Installed " + current,
+            "started_at": None,
+            "finished_at": install["finished_at"],
+            "changes": [change],
+        })
+    combined.sort(key=lambda item: item.get("finished_at") or item.get("started_at") or 0, reverse=True)
+    return combined
+
+
+def history_report(root=None, limit=12):
+    """Finished installs on one computer, with the package and version lines already extracted."""
+    directory = Path(root) if root else Path.home() / ".local/state/fleetlight/update-jobs"
+    report = []
+    for state in saved_installs(directory, limit=limit):
+        kind = state.get("kind")
+        if kind not in ("cli", "desktop", "system", "restart"):
+            continue
+        report.append({
+            "id": state.get("id") if isinstance(state.get("id"), str) else "",
+            "kind": kind,
+            "state": state.get("state"),
+            "phase": str(state.get("phase") or "")[:200],
+            "started_at": state.get("started_at") if isinstance(state.get("started_at"), (int, float)) else None,
+            "finished_at": state.get("finished_at") if isinstance(state.get("finished_at"), (int, float)) else None,
+            "changes": installation_changes(state),
+        })
+    if root is None:
+        report = merge_current_installs(report, [item for item in (codex_install(), chatgpt_install()) if item])
+    return report[:limit]
+
+
+def visible_installs(records, os_name):
+    """Linux shows package, Codex CLI and ChatGPT installs. macOS shows only Codex CLI and ChatGPT."""
+    kinds = ("cli", "desktop") if os_name == "Darwin" else ("cli", "desktop", "system")
+    return [item for item in records if isinstance(item, dict) and item.get("kind") in kinds]
+
+
+def saved_installs(root, limit=12):
+    """Finished update jobs stored on this computer, newest first."""
+    directory = Path(root)
+    if not directory.is_dir():
+        return []
+    records = []
+    for state_file in directory.glob("*/state.json"):
+        try:
+            if state_file.stat().st_size > 100_000:
+                continue
+            state = json.loads(state_file.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(state, dict) or state.get("state") not in ("succeeded", "failed"):
+            continue
+        log_file = state_file.parent / "output.log"
+        log = ""
+        try:
+            if log_file.is_file():
+                with log_file.open("rb") as stream:
+                    stream.seek(max(0, log_file.stat().st_size - 80_000))
+                    log = stream.read(80_000).decode(errors="replace")
+        except OSError:
+            log = ""
+        state["log"] = log
+        records.append(state)
+    records.sort(key=lambda item: item.get("finished_at") or item.get("started_at") or 0, reverse=True)
+    return records[:limit]
 
 
 def version(raw):
@@ -101,6 +338,7 @@ def worker(directory, lock_fd):
     paths = [str(Path.home() / p) for p in (".local/bin", ".local/share/mise/shims", ".npm-global/bin")]
     environment["PATH"] = os.pathsep.join(paths + ["/usr/share/omarchy/bin", "/opt/homebrew/bin", "/usr/local/bin", environment.get("PATH", "/usr/bin:/bin")])
     lines = []
+    changes = []
     try:
         with (directory / "output.log").open("w") as log:
             process = subprocess.Popen(["/bin/sh", str(directory / "update.sh")], env=environment,
@@ -112,14 +350,19 @@ def worker(directory, lock_fd):
                 line = raw.rstrip("\r\n")
                 log.write(raw)
                 log.flush()
-                if line.startswith(("FLEETLIGHT_", "ACTIVE_VERSION:", "AFTER_VERSION:", "AFTER_BUILD:", "VERIFY:", "UPDATE:", "RELAUNCH:", "REBOOT:")):
+                if line.startswith("CHANGED:"):
+                    item = line.split(":", 1)[1].strip()[:200]
+                    if item and item not in changes and len(changes) < 80:
+                        changes.append(item)
+                if line.startswith(("FLEETLIGHT_", "ACTIVE_VERSION:", "AFTER_VERSION:", "AFTER_BUILD:", "BEFORE_VERSION:", "VERIFY:", "UPDATE:", "RELAUNCH:", "REBOOT:", "CHANGED:")):
                     lines.append(line)
                 if line.startswith("PHASE:"):
                     state["phase"] = line[6:][:200]
                     save(state_file, state)
             code = process.wait()
         status, detail, after = parse_result(request["kind"], request["target"], request.get("build"), code, lines)
-        state.update(state=status, phase=detail, after_version=after, exit_code=code, finished_at=time.time())
+        state.update(state=status, phase=detail, after_version=after, exit_code=code, finished_at=time.time(),
+                     changes=installation_changes({"kind": request["kind"], "changes": changes, "log": "\n".join(lines)}))
     except Exception as error:
         state.update(state="failed", phase="Update worker failed: " + type(error).__name__, finished_at=time.time())
     save(state_file, state)
@@ -180,7 +423,9 @@ def handle(request):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "run":
+    if len(sys.argv) > 1 and sys.argv[1] == "history":
+        print("FLEETLIGHT_HISTORY=" + json.dumps(history_report()))
+    elif len(sys.argv) > 1 and sys.argv[1] == "run":
         worker(Path(sys.argv[2]), int(sys.argv[3]))
     else:
         try:

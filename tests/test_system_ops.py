@@ -111,10 +111,12 @@ class SystemTests(unittest.TestCase):
                 patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
                 patch.object(system_ops, 'run', side_effect=[
                     result(0, 'linux 6.1 -> 6.2\n'), result(0), result(0),
-                    result(0, 'yay-pkg 1-1\n'), result(0, 'yay-pkg 1-1 -> 1-2\n')]):
+                    result(0, 'yay-pkg 1-1\n'), result(0, 'yay-pkg 1-1 -> 1-2\n'),
+                    result(1)]):
             checked = system_ops.check()
         self.assertEqual(checked['manager'], 'omarchy')
         self.assertEqual(checked['packages'], ['linux', 'yay-pkg'])
+        self.assertEqual(checked['changes'], ['linux 6.1 -> 6.2', 'yay-pkg 1-1 -> 1-2'])
         self.assertEqual(checked['state'], 'available')
 
     def test_omarchy_check_includes_mise_and_pending_migrations(self):
@@ -127,10 +129,57 @@ class SystemTests(unittest.TestCase):
                 patch.object(system_ops, 'run', side_effect=[
                     result(2),
                     result(0, '{"node":{"current":"20.0.0","latest":"22.0.0"}}'),
-                    result(0, '1780000000.sh\n')]):
+                    result(0, '1780000000.sh\n'),
+                    result(1)]):
             checked = system_ops.check()
         self.assertEqual(checked['packages'], ['mise:node', 'omarchy:migrations'])
         self.assertEqual(checked['state'], 'available')
+
+    def test_omarchy_check_includes_official_cursor(self):
+        class CursorApi:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"version":"3.21.16"}'
+
+        def which(name):
+            return '/usr/bin/' + name if name in ('omarchy-update', 'pacman', 'checkupdates') else None
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=which), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops.urllib.request, 'urlopen', return_value=CursorApi()), \
+                patch.object(system_ops, 'run', side_effect=[
+                    result(2), result(0, 'cursor-bin 3.21.12-1\n'), result(0, '-1\n')]):
+            checked = system_ops.check()
+        self.assertEqual(checked['packages'], ['cursor:official'])
+        self.assertEqual(checked['state'], 'available')
+
+    def test_omarchy_check_ignores_current_cursor(self):
+        class CursorApi:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"version":"3.21.16"}'
+
+        def which(name):
+            return '/usr/bin/' + name if name in ('omarchy-update', 'pacman', 'checkupdates') else None
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=which), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops.urllib.request, 'urlopen', return_value=CursorApi()), \
+                patch.object(system_ops, 'run', side_effect=[
+                    result(2), result(0, 'cursor-bin 3.21.16-1\n'), result(0, '0\n')]):
+            checked = system_ops.check()
+        self.assertEqual(checked['packages'], [])
+        self.assertEqual(checked['state'], 'current')
 
     def test_apt_check_includes_flatpak_updates(self):
         def which(name):

@@ -58,7 +58,7 @@ def verify():
         app.update_history(history, local)
         expander = history.get_first_child()
         assert isinstance(expander, Gtk.Expander) and not expander.get_expanded()
-        assert expander.get_label() == "Previous ChatGPT attempt: failed"
+        assert expander.get_label() == "What changed"
         # Real local metric refreshes rebuild the detail pane every two seconds.
         def find_history(widget):
             if isinstance(widget, Gtk.Expander):
@@ -76,7 +76,10 @@ def verify():
         opened.set_expanded(True)
         app.receive_local_metrics([local], dict(metrics, metrics_checked_at=metrics["metrics_checked_at"] + 10))
         refreshed = find_history(app.content)
-        assert refreshed is not opened and refreshed.get_expanded()
+        assert refreshed is opened and refreshed.get_expanded()
+        app.metric_widgets["disk"].set_text("1%")
+        app.receive_local_metrics([local], dict(metrics, disk_percent=42, metrics_checked_at=metrics["metrics_checked_at"] + 20))
+        assert app.metric_widgets["disk"].get_text() == "42%"
         refreshed.set_expanded(False)
         app.receive_updates("local", app.app_updates["local"])
         assert not find_history(app.content).get_expanded()
@@ -90,14 +93,13 @@ def verify():
         assert find_history(app.content).get_expanded()
         app.last_jobs["local"] = dict(receipt, id="c" * 32)
         app.render_detail()
-        assert not find_history(app.content).get_expanded()
+        assert find_history(app.content).get_expanded()
         app.last_jobs["local"] = receipt
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "fleetlight"
             state.mkdir()
             app.journal_path = state / "update-controller.json"
-            dismiss = expander.get_child().get_first_child().get_next_sibling().get_next_sibling()
-            dismiss.emit("clicked")
+            app.dismiss_update_result("local")
             with patch.dict(os.environ, {"XDG_STATE_HOME": directory}):
                 restored = Fleetlight()
             assert restored.last_jobs["local"]["dismissed"] is True
@@ -105,7 +107,7 @@ def verify():
             assert restored.last_jobs["local"]["state"] == "failed"
             history = Gtk.Box()
             app.update_history(history, local)
-            assert history.get_first_child().get_label() == "Update history"
+            assert history.get_first_child().get_label() == "What changed"
             app.last_jobs["local"] = receipt
             with patch.object(app, "persist_jobs", side_effect=OSError("fixture")):
                 app.dismiss_update_result("local")

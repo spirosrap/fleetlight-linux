@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 
 def run(args, env=None):
@@ -56,11 +58,44 @@ def aur_updates():
     completed = run(['yay', '-Qua'])
     if completed.returncode not in (0, 1):
         return []
-    return [line.split()[0] for line in completed.stdout.splitlines() if ' -> ' in line]
+    return [line.strip() for line in completed.stdout.splitlines() if ' -> ' in line]
+
+
+def cursor_platform():
+    machine = platform.machine()
+    if machine in ('aarch64', 'arm64'):
+        return 'linux-arm64'
+    return 'linux-x64'
+
+
+def cursor_update():
+    """Official Cursor desktop vs installed cursor-bin. Omarchy's repo lags, so pacman will not list it."""
+    installed = run(['pacman', '-Q', 'cursor-bin'])
+    if installed.returncode != 0 or len(installed.stdout.split()) < 2:
+        return []
+    installed_ver = installed.stdout.split()[1].rsplit('-', 1)[0]
+    url = 'https://cursor.com/api/download?platform=' + cursor_platform() + '&releaseTrack=stable'
+    try:
+        request = urllib.request.Request(url, headers={'User-Agent': 'Fleetlight'})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode())
+    except (OSError, ValueError, urllib.error.URLError, TimeoutError):
+        return []
+    official = data.get('version') if isinstance(data, dict) else None
+    if not official:
+        return []
+    compared = run(['vercmp', installed_ver, official])
+    try:
+        if compared.returncode == 0 and int(compared.stdout.strip()) < 0:
+            return [('cursor:official', 'cursor:official ' + installed_ver + ' → ' + official)]
+    except ValueError:
+        return []
+    return []
 
 
 def omarchy_extra_updates():
     names = []
+    details = []
     if shutil.which('mise'):
         completed = run(['mise', 'outdated', '--json'], {'MISE_MINIMUM_RELEASE_AGE': '0'})
         if completed.returncode in (0, 1) and completed.stdout.strip().startswith('{'):
@@ -71,33 +106,57 @@ def omarchy_extra_updates():
             if isinstance(data, dict):
                 for name, value in data.items():
                     if isinstance(value, dict) and value.get('current') != value.get('latest'):
-                        names.append('mise:' + name)
+                        label = 'mise:' + name
+                        names.append(label)
+                        current = value.get('current') or ''
+                        latest = value.get('latest') or ''
+                        details.append(label + ' ' + current + ' → ' + latest if current and latest else label)
     if shutil.which('omarchy-migrate'):
         completed = run(['omarchy-migrate', '--pending'],
                         {'OMARCHY_PATH': os.environ.get('OMARCHY_PATH', '/usr/share/omarchy')})
         if completed.returncode <= 1 and completed.stdout.strip():
             names.append('omarchy:migrations')
-    return names
+            scripts = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+            details.append('Omarchy migrations: ' + ', '.join(scripts[:8]))
+    for name, detail in cursor_update():
+        if name not in names:
+            names.append(name)
+            details.append(detail)
+    return names, details
 
 
 def sidecar_updates():
     """Snap and Flatpak updates counted by the macOS/Android companion."""
     names = []
+    details = []
     if shutil.which('snap'):
         completed = run(['snap', 'refresh', '--list'])
         if completed.returncode == 0 and 'All snaps up to date' not in completed.stdout:
             lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
             if lines and lines[0].split()[0].lower() == 'name':
                 lines = lines[1:]
-            names.extend('snap:' + line.split()[0] for line in lines if line.split())
+            for line in lines:
+                parts = line.split()
+                if not parts:
+                    continue
+                name = 'snap:' + parts[0]
+                names.append(name)
+                details.append(name + ' ' + parts[1] if len(parts) > 1 else name)
     if shutil.which('flatpak'):
         for scope in ('--user', '--system'):
-            completed = run(['flatpak', 'remote-ls', '--updates', scope, '--columns=application'])
+            completed = run(['flatpak', 'remote-ls', '--updates', scope, '--columns=application,version'])
             if completed.returncode:
                 continue
-            names.extend('flatpak:' + line.strip() for line in completed.stdout.splitlines()
-                         if line.strip() and ' ' not in line.strip())
-    return names
+            for line in completed.stdout.splitlines():
+                parts = line.split()
+                if not parts or parts[0].lower() == 'application':
+                    continue
+                name = 'flatpak:' + parts[0]
+                if name in names:
+                    continue
+                names.append(name)
+                details.append(name + ' ' + parts[1] if len(parts) > 1 else name)
+    return names, details
 
 
 def install_sidecars():
@@ -127,11 +186,20 @@ def check():
         if completed.returncode not in (0, 2):
             result['detail'] = 'Package metadata refresh failed'
             return result
-        packages = [line.split()[0] for line in completed.stdout.splitlines() if ' -> ' in line]
+        changes = [line.strip() for line in completed.stdout.splitlines() if ' -> ' in line]
+        packages = [line.split()[0] for line in changes]
         protected = bool(packages) and run(['pacman', '-Q', 'openai-codex-desktop']).returncode == 0 and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
         if manager == 'omarchy' and not protected:
-            packages += [name for name in aur_updates() if name not in packages]
-            packages += [name for name in omarchy_extra_updates() if name not in packages]
+            for line in aur_updates():
+                name = line.split()[0]
+                if name not in packages:
+                    packages.append(name)
+                    changes.append(line)
+            extra, extra_changes = omarchy_extra_updates()
+            for name, detail in zip(extra, extra_changes):
+                if name not in packages:
+                    packages.append(name)
+                    changes.append(detail)
     elif manager == 'apt':
         for attempt in range(3):
             # Keep this comfortably inside the controller's remote-check timeout.
@@ -173,7 +241,21 @@ def check():
         if completed.returncode:
             result['detail'] = 'Package upgrade planning failed'
             return result
-        packages = [line.split()[1] for line in completed.stdout.splitlines() if line.startswith('Inst ')]
+        packages = []
+        changes = []
+        for line in completed.stdout.splitlines():
+            if not line.startswith('Inst '):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            packages.append(parts[1])
+            old = parts[2].strip('[]') if len(parts) > 2 and parts[2].startswith('[') else ''
+            new = line.split('(', 1)[1].split()[0] if '(' in line else ''
+            change = parts[1]
+            if old or new:
+                change += ' ' + old + ' → ' + new
+            changes.append(change.strip())
         installed = run(['dpkg-query', '-W', '-f=${Status}', 'chatgpt']) if packages else None
         verification = run(['dpkg', '--verify', 'chatgpt']) if installed is not None and installed.stdout.strip() == 'install ok installed' else None
         protected = verification is not None and (verification.returncode != 0 or bool(verification.stdout.strip()))
@@ -182,10 +264,20 @@ def check():
         if completed.returncode not in (0, 100):
             result['detail'] = 'Package metadata refresh failed'
             return result
-        packages = [line.split()[0] for line in completed.stdout.splitlines() if len(line.split()) == 3 and '.' in line.split()[0]]
+        packages = []
+        changes = []
+        for line in completed.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 3 and '.' in parts[0]:
+                packages.append(parts[0])
+                changes.append(parts[0] + ' ' + parts[1])
         protected = False
-    packages += [name for name in sidecar_updates() if name not in packages]
-    result.update(packages=packages, state='protected' if protected else 'available' if packages else 'current',
+    side_names, side_details = sidecar_updates()
+    for name, detail in zip(side_names, side_details):
+        if name not in packages:
+            packages.append(name)
+            changes.append(detail)
+    result.update(packages=packages, changes=changes, state='protected' if protected else 'available' if packages else 'current',
                   detail='ChatGPT has local modifications; review system upgrades manually' if protected else str(len(packages)) + ' package updates')
     return result
 
@@ -206,6 +298,8 @@ def update():
         return 1
     if checked['packages']:
         print('PHASE:Installing system package updates', flush=True)
+        for change in (checked.get('changes') or checked['packages'])[:80]:
+            print('CHANGED:' + str(change).replace('\n', ' ')[:180], flush=True)
         # No timeout: interrupting a package manager can leave the system broken.
         # Skip omarchy-update's `script` PTY wrapper so gum cannot wait on a job with no operator.
         distro = [package for package in checked['packages'] if not package.startswith(('snap:', 'flatpak:'))]

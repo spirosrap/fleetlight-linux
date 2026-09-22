@@ -18,6 +18,7 @@ from .monitor import History, issues, linux_update_issues, refresh
 from .probe import collect_metrics
 from . import sites
 from . import updates
+from .update_job import installation_changes, history_report
 
 
 ACTION_NAMES = {"cli": "Codex CLI", "desktop": "ChatGPT", "system": "Linux packages", "restart": "required restarts"}
@@ -105,6 +106,10 @@ class Fleetlight(Adw.Application):
         self.agent_usage = {}
         self.agent_checks_running = False
         self.site_status = {}
+        self.install_history = {}
+        self.keep_detail = False
+        self.rebuilding_detail = False
+        self.metric_widgets = None
         self.auto_attempted = set()
         self.auto_holdoff_until = 0
         self.journal_path = config.state_path().with_name("update-controller.json")
@@ -144,6 +149,8 @@ class Fleetlight(Adw.Application):
             except (ValueError, OSError, TypeError, KeyError):
                 pass
         self.history = History() if not demo else History(Path("/nonexistent/fleetlight-demo"))
+        if demo:
+            self.journal_path = Path("/nonexistent/fleetlight-demo/update-controller.json")
         self.connect("activate", self.activate_window)
 
     def activate_window(self, *_):
@@ -252,7 +259,10 @@ class Fleetlight(Adw.Application):
         toolbar.set_content(self.toasts)
         self.window.set_content(toolbar)
         self.populate_hosts()
+        self._fleet_started = False
+        self.window.connect("map", self.reveal_fleet)
         self.window.present()
+        GLib.idle_add(self.reveal_fleet)
         self.timer = GLib.timeout_add_seconds(self.configuration.get("refresh_seconds", 60), self.auto_check)
         if not self.demo:
             GLib.timeout_add_seconds(2, self.check_local_metrics)
@@ -262,14 +272,24 @@ class Fleetlight(Adw.Application):
             self.agent_usage = agent_quota.demo_usage()
             self.render_agents()
             self.render_detail()
-        elif self.active_job:
+        if load_error:
+            self.toast("Configuration was not loaded: " + load_error)
+
+    def reveal_fleet(self, *_):
+        if self.window is None:
+            return GLib.SOURCE_REMOVE
+        self.split_view.set_show_sidebar(True)
+        self.populate_hosts()
+        if self.demo or self._fleet_started:
+            return GLib.SOURCE_REMOVE
+        self._fleet_started = True
+        if self.active_job:
             self.watch_job()
         elif self.batch and self.batch.get("running") and self.batch.get("pending"):
             self.advance_batch()
         else:
             self.check()
-        if load_error:
-            self.toast("Configuration was not loaded: " + load_error)
+        return GLib.SOURCE_REMOVE
 
     def toast(self, text):
         self.toasts.add_toast(Adw.Toast(title=text, timeout=6))
@@ -294,6 +314,7 @@ class Fleetlight(Adw.Application):
             results = {}
             usage = {}
             site_results = {}
+            histories = {}
             def received(snapshot):
                 results[snapshot["id"]] = snapshot
                 GLib.idle_add(self.receive, snapshot)
@@ -306,11 +327,14 @@ class Fleetlight(Adw.Application):
                                           daemon=True) if watched else None
             if site_check:
                 site_check.start()
+            history_check = threading.Thread(target=lambda: histories.update(updates.collect_install_histories(hosts)), daemon=True)
+            history_check.start()
             refresh(hosts, received)
             if quota:
                 quota.join()
             if site_check:
                 site_check.join()
+            history_check.join()
             warning = None
             try:
                 self.history.record(results, previous)
@@ -318,6 +342,7 @@ class Fleetlight(Adw.Application):
                 warning = "History could not be saved; live checks are still available"
             GLib.idle_add(self.receive_agents, usage)
             GLib.idle_add(self.receive_sites, site_results)
+            GLib.idle_add(self.receive_install_histories, histories)
             GLib.idle_add(self.finished, warning)
         threading.Thread(target=work, daemon=True).start()
 
@@ -348,7 +373,12 @@ class Fleetlight(Adw.Application):
                 self.snapshots[host["id"]] = {**snapshot, **metrics}
                 changed = True
         if changed:
-            self.populate_hosts()
+            self.keep_detail = True
+            try:
+                self.populate_hosts()
+            finally:
+                self.keep_detail = False
+            self.update_open_metrics()
         return GLib.SOURCE_REMOVE
 
     def receive(self, snapshot):
@@ -384,6 +414,32 @@ class Fleetlight(Adw.Application):
         self.agent_usage = usage if isinstance(usage, dict) else {}
         self.render_agents()
         return GLib.SOURCE_REMOVE
+
+    def receive_install_histories(self, histories):
+        if isinstance(histories, dict):
+            for ident, records in histories.items():
+                if isinstance(records, list):
+                    self.install_history[ident] = records
+        if self.selected in self.install_history:
+            self.render_detail()
+        return GLib.SOURCE_REMOVE
+
+    def receive_install_history(self, ident, records):
+        if isinstance(records, list):
+            self.install_history[ident] = records
+            if self.selected == ident:
+                self.render_detail()
+        return GLib.SOURCE_REMOVE
+
+    def refresh_install_history(self, host):
+        def work():
+            try:
+                records = updates.read_install_history(host)
+            except Exception:
+                return
+            if isinstance(records, list):
+                GLib.idle_add(self.receive_install_history, host["id"], records)
+        threading.Thread(target=work, daemon=True).start()
 
     def receive_sites(self, status):
         self.site_status = status if isinstance(status, dict) else {}
@@ -506,10 +562,14 @@ class Fleetlight(Adw.Application):
 
     def select_host(self, _, row):
         if row:
+            same = row.host_id == self.selected and self.content.get_first_child() is not None
             self.selected = row.host_id
+            if same and self.keep_detail:
+                return
             self.render_detail()
 
     def render_site(self, site):
+        self.metric_widgets = None
         status = self.site_status.get(site["id"], {})
         trouble = sites.issues(status)
         clear(self.content)
@@ -558,6 +618,30 @@ class Fleetlight(Adw.Application):
         self.content.append(footer)
 
     def render_detail(self):
+        self.rebuilding_detail = True
+        try:
+            self._render_detail_now()
+        finally:
+            self.rebuilding_detail = False
+
+    def update_open_metrics(self):
+        widgets = self.metric_widgets or {}
+        if widgets.get("host") != self.selected:
+            return
+        data = self.snapshots.get(self.selected, {})
+        disk = data.get("disk_percent")
+        memory = data.get("memory_percent")
+        widgets["disk"].set_text(f"{disk}%" if disk is not None else "—")
+        widgets["disk_hint"].set_text(f"{data.get('disk_free', 0) / 1024**3:.1f} GiB free")
+        widgets["disk_bar"].set_fraction(max(0, min(1, (disk or 0) / 100)))
+        widgets["memory"].set_text(f"{memory}%" if memory is not None else "—")
+        widgets["memory_bar"].set_fraction(max(0, min(1, (memory or 0) / 100)))
+        widgets["uptime"].set_text(uptime(data.get("uptime")))
+        widgets["load"].set_text(f"Load {data.get('load', '—')} · {data.get('cpus', '—')} CPUs")
+        temperature = data.get("cpu_temperature")
+        widgets["temperature"].set_text(f"{temperature:.1f} °C" if temperature is not None else "—")
+
+    def _render_detail_now(self):
         self.render_batch()
         site = next((item for item in sites.configured(self.configuration) if item["id"] == self.selected), None)
         if site is not None:
@@ -600,6 +684,7 @@ class Fleetlight(Adw.Application):
         metrics = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                               min_children_per_line=1, max_children_per_line=3,
                               row_spacing=12, column_spacing=12)
+        metric_labels = {}
         for name, value, hint in (
             ("ROOT DISK", data.get("disk_percent"), f"{data.get('disk_free', 0) / 1024**3:.1f} GiB free" if online else "Waiting for a check"),
             ("MEMORY", data.get("memory_percent"), "Physical memory in use"),
@@ -609,27 +694,38 @@ class Fleetlight(Adw.Application):
             card.set_size_request(150, -1)
             card.set_hexpand(True)
             card.append(label(name, "eyebrow"))
-            card.append(label(f"{value}%" if value is not None else "—", "metric"))
+            value_label = label(f"{value}%" if value is not None else "—", "metric")
+            card.append(value_label)
             bar = Gtk.ProgressBar(fraction=max(0, min(1, (value or 0) / 100)))
             if (value or 0) >= 90:
                 bar.add_css_class("warning")
             card.append(bar)
-            card.append(label(hint, "muted"))
+            hint_label = label(hint, "muted")
+            card.append(hint_label)
             metrics.append(card)
+            key = "disk" if name == "ROOT DISK" else "memory"
+            metric_labels[key] = value_label
+            metric_labels[key + "_bar"] = bar
+            metric_labels[key + "_hint"] = hint_label
         card = box(True, 10)
         card.add_css_class("card")
         card.set_size_request(150, -1)
         card.set_hexpand(True)
         card.append(label("UPTIME", "eyebrow"))
-        card.append(label(uptime(data.get("uptime")) if online else "—", "metric"))
-        card.append(label(f"Load {data.get('load', '—')} · {data.get('cpus', '—')} CPUs", "muted"))
+        uptime_label = label(uptime(data.get("uptime")) if online else "—", "metric")
+        card.append(uptime_label)
+        load_label = label(f"Load {data.get('load', '—')} · {data.get('cpus', '—')} CPUs", "muted")
+        card.append(load_label)
         metrics.append(card)
         self.content.append(metrics)
         temperature = data.get("cpu_temperature") if online else None
         card = box(True, 10)
         card.add_css_class("card")
         card.append(label("CPU TEMPERATURE", "eyebrow"))
-        card.append(label(f"{temperature:.1f} °C" if temperature is not None else "—", "metric"))
+        temperature_label = label(f"{temperature:.1f} °C" if temperature is not None else "—", "metric")
+        card.append(temperature_label)
+        self.metric_widgets = {"host": host["id"], "uptime": uptime_label, "load": load_label,
+                               "temperature": temperature_label, **metric_labels}
         card.append(label("Hottest CPU sensor" if temperature is not None else
                           ("Waiting for a check" if not online else "CPU sensor unavailable"), "muted"))
         metrics.append(card)
@@ -967,39 +1063,73 @@ class Fleetlight(Adw.Application):
         dialog.connect("response", lambda _, response: self.begin_update(host, kind, checked) if response == "update" else None)
         dialog.present()
 
-    def update_history(self, parent, host):
-        active = self.active_job if (self.active_job or {}).get("host", {}).get("id") == host["id"] else None
-        last = self.last_jobs.get(host["id"])
-        receipt = active or last
-        if not receipt:
+    def remember_history(self, key, widget):
+        if self.rebuilding_detail or widget.get_parent() is None:
             return
-        historical = active is None
-        title = "Update log"
-        if historical:
-            title = "Update history" if receipt.get("dismissed") else "Previous " + ACTION_NAMES.get(receipt.get("kind"), "update") + " attempt: " + receipt.get("state", "unknown")
+        self.update_history_expanded[key] = widget.get_expanded()
+
+    def install_records(self, host):
+        active = self.active_job if (self.active_job or {}).get("host", {}).get("id") == host["id"] else None
+        if self.demo:
+            receipt = active or self.last_jobs.get(host["id"])
+            return [receipt] if receipt else []
+        records = list(self.install_history.get(host["id"]) or [])
+        if not records and host.get("local"):
+            records = history_report()
+        os_name = (self.snapshots.get(host["id"]) or {}).get("os")
+        records = updates.visible_installs(records, os_name)
+        if active and active.get("id") not in {item.get("id") for item in records}:
+            records = updates.visible_installs([active], os_name) + records
+        if records:
+            return records
+        last = self.last_jobs.get(host["id"])
+        return updates.visible_installs([last], os_name) if last else []
+
+    def update_history(self, parent, host):
+        records = self.install_records(host)
+        if not records:
+            return
+        listed = []
+        for record in records:
+            changes = installation_changes(record)
+            if changes or record.get("state") in ("succeeded", "failed"):
+                listed.append((record, changes))
+        if not listed:
+            return
+        total = sum(len(changes) for _, changes in listed)
+        title = "What changed · " + str(total) if total else "What changed"
         expander = Gtk.Expander(label=title)
-        # Refreshes rebuild this widget; retain the user's choice for this job only.
-        history_key = (host["id"], receipt.get("id"))
-        expander.set_expanded(self.update_history_expanded.get(history_key, False))
-        expander.connect("notify::expanded", lambda widget, _: self.update_history_expanded.__setitem__(history_key, widget.get_expanded()))
-        details = box(True, 8)
-        if historical:
-            note = label("Saved result of a previous attempt. Current status is shown above and under Linux updates.", "muted")
-            note.set_wrap(True)
-            details.append(note)
-            result = label(receipt.get("phase", ""), "good" if receipt.get("state") == "succeeded" else "warning")
-            result.set_wrap(True)
-            details.append(result)
-            if not receipt.get("dismissed"):
-                dismiss = Gtk.Button(label="Dismiss result")
-                dismiss.connect("clicked", lambda _: self.dismiss_update_result(host["id"]))
-                details.append(dismiss)
-        if receipt.get("log"):
+        history_key = (host["id"], "install-history")
+        expander.set_expanded(self.update_history_expanded.get(history_key, bool(total)))
+        expander.connect("notify::expanded", lambda widget, _: self.remember_history(history_key, widget))
+        details = box(True, 6)
+        for record, changes in listed[:12]:
+            when = record.get("finished_at") or record.get("started_at")
+            stamp = time.strftime("%a %d %b %H:%M", time.localtime(when)) if when else "Install"
+            heading = stamp + " · " + ACTION_NAMES.get(record.get("kind"), "Update")
+            if record.get("state") == "failed":
+                heading += " · failed"
+            line = label(heading, "warning" if record.get("state") == "failed" else "eyebrow")
+            line.set_wrap(True)
+            details.append(line)
+            if changes:
+                for item in changes:
+                    change = label(item)
+                    change.set_wrap(True)
+                    details.append(change)
+            else:
+                empty = label(record.get("phase") or "No package changes recorded", "muted")
+                empty.set_wrap(True)
+                details.append(empty)
+        latest = listed[0][0]
+        if latest.get("log") and not host.get("local"):
+            log_expander = Gtk.Expander(label="Installer log")
             view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-            view.get_buffer().set_text(receipt["log"][-12000:])
+            view.get_buffer().set_text(str(latest.get("log"))[-12000:])
             scroll = Gtk.ScrolledWindow(min_content_height=120, max_content_height=200)
             scroll.set_child(view)
-            details.append(scroll)
+            log_expander.set_child(scroll)
+            details.append(log_expander)
         expander.set_child(details)
         parent.append(expander)
 
@@ -1092,6 +1222,8 @@ class Fleetlight(Adw.Application):
                         self.batch["pending"] = []
                         self.batch["stopped"] = "Stopped after " + self.active_job["host"]["name"] + ": " + receipt.get("phase", state)
             self.last_jobs[self.active_job["host"]["id"]] = dict(self.active_job)
+            self.update_history_expanded[(self.active_job["host"]["id"], "install-history")] = True
+            self.refresh_install_history(self.active_job["host"])
             self.toast(receipt.get("phase", "Update completed"))
             self.active_job = None
             self.spinner.stop()
