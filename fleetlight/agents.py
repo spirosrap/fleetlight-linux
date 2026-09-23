@@ -4,12 +4,13 @@ import json
 import os
 from pathlib import Path
 import platform
-import select
+import queue
 import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -119,57 +120,123 @@ def format_codex_window(item):
     return text
 
 
-def rpc(process, ident, method, params=None, timeout=6):
-    process.stdin.write(json.dumps({"id": ident, "method": method, "params": params or {}}) + "\n")
+def rpc(process, ident, method, params=None, timeout=12):
+    process.stdin.write((json.dumps({"id": ident, "method": method, "params": params or {}}) + "\n").encode())
     process.stdin.flush()
     deadline = time.time() + timeout
     while time.time() < deadline:
-        ready, _, _ = select.select([process.stdout], [], [], 0.2)
-        if not ready:
-            continue
-        line = process.stdout.readline()
-        if not line:
+        line = read_line(process, deadline)
+        if line is None:
             break
+        if not line:
+            continue
         try:
             message = json.loads(line)
         except ValueError:
             continue
-        if message.get("id") == ident:
-            return message
+        if message.get("id") != ident:
+            continue
+        if message.get("error"):
+            raise ConnectionError(method)
+        return message
+    if process.poll() is not None:
+        raise ConnectionError(method)
     raise TimeoutError(method)
 
 
-def collect_codex():
+def read_line(process, deadline):
+    remaining = max(0, deadline - time.time())
+    try:
+        line = process._lines.get(timeout=remaining)
+    except queue.Empty:
+        return None
+    return line
+
+
+def read_codex_output(process):
+    try:
+        for raw in iter(process.stdout.readline, b""):
+            process._lines.put(raw.decode(errors="replace").rstrip("\r\n"))
+    finally:
+        process._lines.put(None)
+
+
+_codex_lock = threading.Lock()
+_codex_process = None
+_codex_request = 0
+
+
+def stop_codex(process):
+    if process is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError, AttributeError):
+        try:
+            process.terminate()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=1)
+    except Exception:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def start_codex():
     executable = which("codex")
     if not executable:
+        raise FileNotFoundError("codex")
+    process = subprocess.Popen(
+        [executable, "-s", "read-only", "-a", "on-request", "app-server"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=environment(), start_new_session=True)
+    process._lines = queue.Queue()
+    threading.Thread(target=read_codex_output, args=(process,), daemon=True).start()
+    rpc(process, 1, "initialize", {"clientInfo": {"name": "fleetlight", "version": __version__}}, timeout=15)
+    process.stdin.write((json.dumps({"method": "initialized", "params": {}}) + "\n").encode())
+    process.stdin.flush()
+    return process
+
+
+def codex_session():
+    global _codex_process
+    if _codex_process is not None and _codex_process.poll() is None:
+        return _codex_process
+    stop_codex(_codex_process)
+    _codex_process = start_codex()
+    return _codex_process
+
+
+def reset_codex():
+    global _codex_process
+    stop_codex(_codex_process)
+    _codex_process = None
+
+
+def collect_codex():
+    if not which("codex"):
         return unavailable("codex", "Codex CLI is not installed")
-    try:
-        process = subprocess.Popen(
-            [executable, "-s", "read-only", "-a", "on-request", "app-server"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, env=environment(), start_new_session=True)
-    except OSError:
-        return unavailable("codex", "Codex CLI could not be started")
-    try:
-        rpc(process, 1, "initialize", {"clientInfo": {"name": "fleetlight", "version": __version__}})
-        process.stdin.write(json.dumps({"method": "initialized", "params": {}}) + "\n")
-        process.stdin.flush()
-        account = ((rpc(process, 2, "account/read", timeout=5).get("result") or {}).get("account") or {})
-        limits = ((rpc(process, 3, "account/rateLimits/read", timeout=5).get("result") or {}).get("rateLimits") or {})
-    except (OSError, TimeoutError, ValueError, TypeError, KeyError):
-        return unavailable("codex", "Sign in with `codex login` to read remaining quota")
-    finally:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except (OSError, ProcessLookupError, AttributeError):
-            process.terminate()
-        try:
-            process.wait(timeout=1)
-        except Exception:
+    with _codex_lock:
+        for attempt in (1, 2):
             try:
-                process.kill()
-            except OSError:
-                pass
+                process = codex_session()
+                global _codex_request
+                _codex_request += 1
+                account = ((rpc(process, _codex_request, "account/read", timeout=8).get("result") or {}).get("account") or {})
+                _codex_request += 1
+                limits = ((rpc(process, _codex_request, "account/rateLimits/read", timeout=8).get("result") or {}).get("rateLimits") or {})
+                break
+            except FileNotFoundError:
+                return unavailable("codex", "Codex CLI is not installed")
+            except (OSError, ConnectionError, TimeoutError, ValueError, TypeError, KeyError):
+                reset_codex()
+                if attempt == 2:
+                    return unavailable("codex", "Codex disconnected before reporting quota")
+        else:
+            return unavailable("codex", "Codex disconnected before reporting quota")
     windows = summarize_codex(limits)
     if not windows:
         return unavailable("codex", "Codex did not report a quota window")

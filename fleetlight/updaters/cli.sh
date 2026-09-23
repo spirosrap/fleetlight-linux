@@ -35,7 +35,8 @@ case "$mode" in
     status=$?
     ;;
   standalone)
-    "$active_path" update
+    # `codex update` follows the standalone channel, which can lag the npm release Fleetlight checked.
+    curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 CODEX_RELEASE="$target_version" sh
     status=$?
     ;;
 esac
@@ -43,8 +44,7 @@ printf 'PHASE:Verifying the active Codex version\n'
 after=$("$shell_bin" -ic 'codex --version' 2>/dev/null | sed -n 's/^codex-cli //p' | tail -n 1 | tr -d '\r')
 if [ -z "$after" ]; then after=$("$active_path" --version 2>/dev/null | sed -n 's/^codex-cli //p' | tail -n 1); fi
 printf 'ACTIVE_VERSION:%s\n' "$after"
-# The standalone updater follows its official stable channel, which can advance
-# between a check and installation. Never report an older version as success.
+# The requested version is pinned for standalone installs. Never report an older version as success.
 if [ "$status" -eq 0 ] && python3 -c 'import re,sys; v=lambda x: tuple(map(int,x.split("."))); sys.exit(0 if all(re.fullmatch(r"\d+\.\d+\.\d+",x) for x in sys.argv[1:]) and v(sys.argv[1])>=v(sys.argv[2]) else 1)' "$after" "$target_version"; then
   printf 'UPDATE:ok\nVERIFY:ok\n'; exit 0
 fi

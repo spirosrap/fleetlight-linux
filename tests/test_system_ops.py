@@ -75,6 +75,14 @@ class SystemTests(unittest.TestCase):
         install.assert_called_once_with(
             ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'])
 
+    def test_apt_update_uses_full_upgrade_for_new_packages(self):
+        checked = {'state': 'available', 'packages': ['linux-generic'], 'manager': 'apt', 'changes': ['linux-generic 6.8.0-139.139 -> 6.8.0-142.142']}
+        verified = {'state': 'current', 'packages': [], 'manager': 'apt', 'restart': {'required': False}}
+        with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
+                patch.object(system_ops.subprocess, 'call', return_value=0) as install:
+            self.assertEqual(system_ops.update(), 0)
+        self.assertEqual(install.call_args.args[0][-1], 'full-upgrade')
+
     def test_omarchy_update_uses_full_omarchy_path(self):
         checked = {'state': 'available', 'packages': ['omarchy', 'yay-pkg'], 'manager': 'omarchy'}
         verified = {'state': 'current', 'packages': [], 'manager': 'omarchy', 'restart': {'required': False}}

@@ -238,6 +238,11 @@ Unpacking hello (1.0)…
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('UPDATE:current', result.stdout)
 
+    def test_standalone_update_pins_the_checked_release(self):
+        script = Path(updates.ROOT / 'updaters/cli.sh').read_text()
+        self.assertIn('CODEX_RELEASE="$target_version"', script)
+        self.assertNotIn('"$active_path" update', script)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -253,7 +253,7 @@ def check():
                 result['detail'] = 'Package metadata refresh failed; check repository or network errors'
             result['error_output'] = completed.stdout[-4000:]
             return result
-        completed = run(['apt-get', '-s', 'upgrade'])
+        completed = run(['apt-get', '-s', 'full-upgrade'])
         if completed.returncode:
             result['detail'] = 'Package upgrade planning failed'
             return result
@@ -328,7 +328,7 @@ def update():
                 code = subprocess.call(['omarchy-update', '-y'], env=omarchy_env())
             else:
                 commands = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
-                            'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'upgrade'],
+                            'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'full-upgrade'],
                             'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}
                 code = subprocess.call(commands[checked['manager']])
             if code != 0:

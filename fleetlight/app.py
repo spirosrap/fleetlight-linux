@@ -411,7 +411,14 @@ class Fleetlight(Adw.Application):
         return GLib.SOURCE_REMOVE
 
     def receive_agents(self, usage):
-        self.agent_usage = usage if isinstance(usage, dict) else {}
+        usage = usage if isinstance(usage, dict) else {}
+        merged = dict(self.agent_usage)
+        for name, item in usage.items():
+            previous = merged.get(name)
+            if isinstance(item, dict) and item.get("state") != "ok" and isinstance(previous, dict) and previous.get("state") == "ok":
+                continue
+            merged[name] = item
+        self.agent_usage = merged
         self.render_agents()
         return GLib.SOURCE_REMOVE
 
@@ -496,7 +503,6 @@ class Fleetlight(Adw.Application):
         if site_trouble:
             subtitle += f" · {site_trouble} site alert"
         self.window_title.set_subtitle(subtitle)
-        self.render_agents()
         selected_id = self.selected
         self.host_list.unselect_all()
         clear(self.host_list)
@@ -1388,6 +1394,7 @@ class Fleetlight(Adw.Application):
             self.timer = GLib.timeout_add_seconds(candidate.get("refresh_seconds", 60), self.auto_check)
             dialog.close()
             self.populate_hosts()
+            self.render_agents()
             self.check()
         save.connect("clicked", apply)
         body.append(save)
