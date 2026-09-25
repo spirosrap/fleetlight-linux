@@ -17,6 +17,7 @@ from .update_job import version, history_report, visible_installs
 
 ROOT = Path(__file__).parent
 REGISTRY = "https://registry.npmjs.org/@openai/codex/latest"
+CLAUDE_REGISTRY = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
 APPCAST = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
 
 
@@ -54,6 +55,15 @@ def releases():
         result["cli"] = {"version": data["version"]}
     except Exception:
         result["cli"] = {"error": "Could not check the official npm registry"}
+    try:
+        request = urllib.request.Request(CLAUDE_REGISTRY, headers={"User-Agent": "Fleetlight/0.2"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read(1_000_000))
+        if not version(data.get("version")):
+            raise ValueError("Invalid Claude CLI version")
+        result["claude"] = {"version": data["version"]}
+    except Exception:
+        result["claude"] = {"error": "Could not check the official Claude Code release"}
     try:
         # The official appcast rejects Python's default HTTP user agent.
         code, raw, _ = run_process(["curl", "-fsSL", "--connect-timeout", "10", "--max-time", "20", APPCAST], 25)
@@ -107,7 +117,8 @@ def check_host(host, snapshot, official):
         cli.update(state="unsupported", detail="This installation method requires a manual update")
     if snapshot.get("status") != "online":
         cli.update(state="offline", detail="Computer is offline")
-        return {"cli": cli, "desktop": {**cli, "installed": None, "latest": None}}
+        return {"cli": cli, "desktop": {**cli, "installed": None, "latest": None},
+                "claude": {**cli, "installed": snapshot.get("claude"), "latest": (official.get("claude") or {}).get("version")}}
     app = snapshot.get("chatgpt", {})
     if snapshot.get("os") == "Darwin":
         release = official.get("desktop", {})
@@ -125,7 +136,17 @@ def check_host(host, snapshot, official):
             desktop = plan(app.get("version"), None, app.get("provider"), "Repository check timed out or the SSH connection failed")
     else:
         desktop = plan(app.get("version"), None, None, "Unsupported operating system")
-    result = {"cli": cli, "desktop": desktop}
+    claude_info = snapshot.get("claude_installation") or {}
+    claude_release = official.get("claude") or {}
+    claude = plan(snapshot.get("claude"), claude_release.get("version"), claude_info.get("method") or "native",
+                  claude_release.get("error", "Official Claude Code release"))
+    if claude["state"] == "missing" and version(claude_release.get("version")):
+        claude.update(state="available", detail="Claude CLI is not installed")
+    if claude["state"] == "available" and claude_info.get("method") not in (None, "", "native", "npm", "mise"):
+        claude.update(state="unsupported", detail="This installation method requires a manual update")
+    if snapshot.get("status") != "online":
+        claude.update(state="offline", detail="Computer is offline")
+    result = {"cli": cli, "desktop": desktop, "claude": claude}
     if snapshot.get("os") == "Linux":
         result.update(check_system(host))
     return result
@@ -140,7 +161,7 @@ def check_all(hosts, snapshots, callback):
             try:
                 value = future.result()
             except Exception:
-                value = {kind: plan(None, None, None, "Update check failed") for kind in ("cli", "desktop")}
+                value = {kind: plan(None, None, None, "Update check failed") for kind in ("cli", "desktop", "claude")}
             callback(ident, value)
 
 
@@ -171,7 +192,7 @@ def parse_install_history(output):
         return []
     records = []
     for item in data[:12]:
-        if not isinstance(item, dict) or item.get("kind") not in ("cli", "desktop", "system", "restart"):
+        if not isinstance(item, dict) or item.get("kind") not in ("cli", "desktop", "claude", "system", "restart"):
             continue
         changes = [change.strip()[:200] for change in item.get("changes", []) if isinstance(change, str) and change.strip()]
         records.append({
@@ -224,7 +245,7 @@ def job_request(host, request):
 
 
 def start_job(host, kind, checked, ident=None):
-    if kind not in ("cli", "desktop", "system", "restart") or not version(checked.get("latest")):
+    if kind not in ("cli", "desktop", "claude", "system", "restart") or not version(checked.get("latest")):
         raise ValueError("A verified release check is required")
     if checked.get("state") not in ("available", "current"):
         raise ValueError("This installation is protected or unavailable")
@@ -232,7 +253,7 @@ def start_job(host, kind, checked, ident=None):
     if kind in ("system", "restart"):
         script = python_command((ROOT / "system_ops.py").read_text(), "update" if kind == "system" else "restart")
     else:
-        script = (ROOT / ("updaters/cli.sh" if kind == "cli" else "updaters/desktop.sh")).read_text()
+        script = (ROOT / {"cli": "updaters/cli.sh", "desktop": "updaters/desktop.sh", "claude": "updaters/claude.sh"}[kind]).read_text()
     return job_request(host, {"operation": "start", "id": ident, "kind": kind,
                               "target": checked["latest"], "build": checked.get("build") or "",
                               "script": script})
@@ -242,7 +263,7 @@ def job_status(host, ident):
     return job_request(host, {"operation": "status", "id": ident})
 
 
-AUTO_UPDATE_KINDS = ("cli", "desktop", "system")
+AUTO_UPDATE_KINDS = ("cli", "claude", "desktop", "system")
 
 
 def auto_target_key(host, kind, checked):
@@ -268,7 +289,7 @@ def next_auto_batch(hosts, snapshots, checks, attempted=(), now=None):
 
 def batch_candidates(hosts, snapshots, checks, kind, now=None):
     """Freeze only online, supported, fresh, available releases for review."""
-    if kind not in ("cli", "desktop", "system", "restart"):
+    if kind not in ("cli", "desktop", "claude", "system", "restart"):
         raise ValueError("Unknown application")
     now = time.time() if now is None else now
     eligible, skipped = [], []
@@ -297,7 +318,7 @@ def relevant_job(last, checks):
     checked = checks.get(last.get("kind"), {}) if isinstance(checks, dict) else {}
     if checked.get("state") == "current":
         return None
-    if last.get("kind") in ("cli", "desktop") and version(checked.get("installed")) and version(last.get("target")):
+    if last.get("kind") in ("cli", "desktop", "claude") and version(checked.get("installed")) and version(last.get("target")):
         if version(checked["installed"]) >= version(last["target"]):
             return None
     return last

@@ -15,12 +15,12 @@ def state_path():
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "fleetlight" / "history.json"
 
 
-AGENTS = ("codex", "cursor")
+AGENTS = ("codex", "cursor", "claude")
 
 
 def default_config():
     return {"version": 1, "refresh_seconds": 60, "auto_updates": False,
-            "agents": {"codex": True, "cursor": True}, "hosts": [
+            "agents": {"codex": True, "cursor": True, "claude": True}, "hosts": [
         {"id": "local", "name": "This Computer", "local": True, "services": []}
     ]}
 
@@ -47,7 +47,7 @@ def validate(config):
     if "agents" in config:
         agents = config["agents"]
         if not isinstance(agents, dict) or any(name not in AGENTS or type(enabled) is not bool for name, enabled in agents.items()):
-            raise ValueError("agents must enable or disable only Codex and Cursor")
+            raise ValueError("agents must enable or disable only Codex, Cursor and Claude")
     hosts = config.get("hosts")
     if not isinstance(hosts, list) or not 1 <= len(hosts) <= 32:
         raise ValueError("Configure between 1 and 32 computers")

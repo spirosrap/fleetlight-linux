@@ -243,6 +243,18 @@ Unpacking hello (1.0)…
         self.assertIn('CODEX_RELEASE="$target_version"', script)
         self.assertNotIn('"$active_path" update', script)
 
+    def test_claude_same_or_newer_version_never_installs(self):
+        script = Path(updates.ROOT / 'updaters/claude.sh').read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / 'claude'
+            binary.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo 1.2.4 \\(Claude Code\\); else exit 99; fi\n')
+            binary.chmod(0o700)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ['PATH'], SHELL='/bin/sh', FLEETLIGHT_EXPECTED_VERSION='1.2.3')
+            result = subprocess.run(['/bin/sh', '-c', script], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('UPDATE:current', result.stdout)
+            self.assertIn('bash -s "$target_version"', script)
+
 
 if __name__ == '__main__':
     unittest.main()

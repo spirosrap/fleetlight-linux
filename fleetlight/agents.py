@@ -1,5 +1,6 @@
-"""Local Codex and Cursor remaining-quota checks. Never persist session tokens."""
+"""Local Codex, Cursor and Claude remaining-quota checks. Never persist session tokens."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -18,8 +19,12 @@ import urllib.request
 from . import __version__
 
 
-NAMES = ("codex", "cursor")
+NAMES = ("codex", "cursor", "claude")
 CURSOR_USAGE = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
+CURSOR_PLAN = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo"
+CLAUDE_USAGE = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "weekly"),
+                  ("seven_day_opus", "weekly Opus"), ("seven_day_sonnet", "weekly Sonnet"))
 
 
 def remaining_percent(used):
@@ -310,27 +315,120 @@ def summarize_cursor(payload):
     return remaining, detail
 
 
+def cursor_plan_name(payload):
+    info = payload.get("planInfo") if isinstance(payload, dict) else None
+    name = info.get("planName") if isinstance(info, dict) else None
+    return name.strip() if isinstance(name, str) and name.strip() else None
+
+
+def cursor_request(url, token):
+    request = urllib.request.Request(
+        url, data=b"{}", method="POST",
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
+                 "Connect-Protocol-Version": "1", "User-Agent": "Fleetlight/" + __version__})
+    with urllib.request.urlopen(request, timeout=12) as response:
+        return json.loads(response.read().decode("utf-8", "replace"))
+
+
+def cursor_plan(token):
+    try:
+        return cursor_plan_name(cursor_request(CURSOR_PLAN, token))
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
+
+
 def collect_cursor():
     token = cursor_token()
     if not token:
         return unavailable("cursor", "Sign in to Cursor to read remaining quota")
-    request = urllib.request.Request(
-        CURSOR_USAGE, data=b"{}", method="POST",
-        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
-                 "Connect-Protocol-Version": "1", "User-Agent": "Fleetlight/" + __version__})
     try:
-        with urllib.request.urlopen(request, timeout=12) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
+        payload = cursor_request(CURSOR_USAGE, token)
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return unavailable("cursor", "Cursor usage could not be checked")
     summarized = summarize_cursor(payload)
     if not summarized:
         return unavailable("cursor", "Cursor did not report plan usage")
     remaining, detail = summarized
-    return {"id": "cursor", "name": "Cursor", "state": "ok", "remaining_percent": remaining, "detail": detail}
+    result = {"id": "cursor", "name": "Cursor", "state": "ok", "remaining_percent": remaining, "detail": detail}
+    plan = cursor_plan(token)
+    if plan:
+        result["plan"] = plan
+    return result
 
 
-COLLECTORS = {"codex": collect_codex, "cursor": collect_cursor}
+def claude_credentials_path():
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(base) if base else Path.home() / ".claude") / ".credentials.json"
+
+
+def claude_credentials():
+    try:
+        payload = json.loads(claude_credentials_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
+    if not isinstance(oauth, dict) or not isinstance(oauth.get("accessToken"), str) or not oauth["accessToken"]:
+        return None
+    return oauth
+
+
+def iso_timestamp(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def summarize_claude(payload):
+    windows = []
+    if not isinstance(payload, dict):
+        return windows
+    for key, label in CLAUDE_WINDOWS:
+        window = payload.get(key)
+        if not isinstance(window, dict):
+            continue
+        remaining = remaining_percent(window.get("utilization"))
+        if remaining is None:
+            continue
+        reset = iso_timestamp(window.get("resets_at"))
+        windows.append({"label": label, "remaining_percent": remaining,
+                        "reset": until(reset) if reset else "", "reset_day": reset_day(reset) if reset else ""})
+    return windows
+
+
+def collect_claude():
+    credentials = claude_credentials()
+    if not credentials:
+        return unavailable("claude", "Sign in to Claude Code to read remaining quota")
+    expires = credentials.get("expiresAt")
+    if isinstance(expires, (int, float)) and expires / 1000 < time.time():
+        return unavailable("claude", "Open Claude Code to refresh its sign-in")
+    request = urllib.request.Request(
+        CLAUDE_USAGE, method="GET",
+        headers={"Authorization": "Bearer " + credentials["accessToken"], "anthropic-beta": "oauth-2025-04-20",
+                 "User-Agent": "Fleetlight/" + __version__})
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            return unavailable("claude", "Open Claude Code to refresh its sign-in")
+        return unavailable("claude", "Claude usage could not be checked")
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return unavailable("claude", "Claude usage could not be checked")
+    windows = summarize_claude(payload)
+    if not windows:
+        return unavailable("claude", "Claude did not report a quota window")
+    tightest = min(windows, key=lambda item: item["remaining_percent"])
+    plan = credentials.get("subscriptionType")
+    return {"id": "claude", "name": "Claude", "state": "ok", "plan": plan if isinstance(plan, str) else "",
+            "remaining_percent": tightest["remaining_percent"],
+            "detail": " · ".join(format_codex_window(item) for item in windows)}
+
+
+COLLECTORS = {"codex": collect_codex, "cursor": collect_cursor, "claude": collect_claude}
 
 
 def collect(wanted=None):
@@ -352,8 +450,10 @@ def demo_usage():
     return {
         "codex": {"id": "codex", "name": "Codex", "state": "ok", "plan": "Pro",
                   "remaining_percent": 64, "detail": "64% weekly · 3d 12h · Tue 22 Sep 15:00"},
-        "cursor": {"id": "cursor", "name": "Cursor", "state": "ok",
+        "cursor": {"id": "cursor", "name": "Cursor", "state": "ok", "plan": "Pro",
                    "remaining_percent": 41, "detail": "41% remaining this period · 12d 4h"},
+        "claude": {"id": "claude", "name": "Claude", "state": "ok", "plan": "Pro",
+                   "remaining_percent": 72, "detail": "72% 5h · 2h 10m · Tue 22 Sep 17:00 · 90% weekly · 5d 1h · Sun 27 Sep 09:00"},
     }
 
 

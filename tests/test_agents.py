@@ -5,15 +5,18 @@ from fleetlight import agents, config
 
 
 class AgentQuotaTests(unittest.TestCase):
-    def test_defaults_enable_codex_and_cursor(self):
-        self.assertEqual(config.enabled_agents(config.default_config()), {"codex": True, "cursor": True})
-        self.assertEqual(config.enabled_agents({"version": 1, "hosts": []}), {"codex": True, "cursor": True})
+    def test_defaults_enable_every_agent(self):
+        everything = {"codex": True, "cursor": True, "claude": True}
+        self.assertEqual(config.enabled_agents(config.default_config()), everything)
+        self.assertEqual(config.enabled_agents({"version": 1, "hosts": []}), everything)
 
     def test_agent_toggles_are_validated(self):
         value = config.default_config()
         value["agents"] = {"codex": False, "cursor": True}
-        self.assertEqual(config.enabled_agents(config.validate(value)), {"codex": False, "cursor": True})
-        value["agents"] = {"claude": True}
+        self.assertEqual(config.enabled_agents(config.validate(value)), {"codex": False, "cursor": True, "claude": True})
+        value["agents"] = {"claude": False}
+        self.assertEqual(config.enabled_agents(config.validate(value))["claude"], False)
+        value["agents"] = {"gemini": True}
         with self.assertRaises(ValueError):
             config.validate(value)
 
@@ -56,3 +59,35 @@ class AgentQuotaTests(unittest.TestCase):
         self.assertNotIn("hidden", detail)
         remaining, _ = agents.summarize_cursor({"planUsage": {"totalPercentUsed": 41}})
         self.assertEqual(remaining, 59)
+
+    def test_claude_windows_use_utilization(self):
+        reset = time.time() + 3 * 86400 + 3600
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(reset))
+        windows = agents.summarize_claude({
+            "five_hour": {"utilization": 12.4, "resets_at": stamp},
+            "seven_day": {"utilization": 40.0, "resets_at": None},
+            "seven_day_opus": None,
+            "extra_usage": {"utilization": 99.0},
+        })
+        self.assertEqual([(item["label"], item["remaining_percent"]) for item in windows], [("5h", 88), ("weekly", 60)])
+        self.assertTrue(windows[0]["reset"].startswith("3d "))
+        self.assertEqual(windows[1]["reset"], "")
+        self.assertEqual(agents.summarize_claude({"five_hour": {"utilization": None}}), [])
+        self.assertEqual(agents.summarize_claude(None), [])
+
+    def test_claude_expired_sign_in_is_not_refreshed(self):
+        credentials = {"accessToken": "secret", "expiresAt": (time.time() - 60) * 1000, "subscriptionType": "pro"}
+        original = agents.claude_credentials
+        agents.claude_credentials = lambda: credentials
+        try:
+            result = agents.collect_claude()
+        finally:
+            agents.claude_credentials = original
+        self.assertEqual(result["state"], "unavailable")
+        self.assertNotIn("secret", str(result))
+
+    def test_cursor_plan_name(self):
+        self.assertEqual(agents.cursor_plan_name({"planInfo": {"planName": "Pro", "price": "$20/mo"}}), "Pro")
+        self.assertIsNone(agents.cursor_plan_name({"planInfo": {"planName": "  "}}))
+        self.assertIsNone(agents.cursor_plan_name({"planInfo": None}))
+        self.assertIsNone(agents.cursor_plan_name([]))

@@ -125,7 +125,7 @@ def installation_changes(receipt):
     packages = package_changes(log)
     if packages:
         found = packages
-    kind = {"cli": "Codex CLI", "desktop": "ChatGPT", "system": "Linux packages"}.get(receipt.get("kind"), "Version")
+    kind = {"cli": "Codex CLI", "claude": "Claude CLI", "desktop": "ChatGPT", "system": "Linux packages"}.get(receipt.get("kind"), "Version")
     if before and after and before != after:
         version_line = kind + " " + before + " → " + after
         if version_line not in found:
@@ -234,7 +234,7 @@ def history_report(root=None, limit=12):
     report = []
     for state in saved_installs(directory, limit=limit):
         kind = state.get("kind")
-        if kind not in ("cli", "desktop", "system", "restart"):
+        if kind not in ("cli", "desktop", "claude", "system", "restart"):
             continue
         report.append({
             "id": state.get("id") if isinstance(state.get("id"), str) else "",
@@ -252,7 +252,7 @@ def history_report(root=None, limit=12):
 
 def visible_installs(records, os_name):
     """Linux shows package, Codex CLI and ChatGPT installs. macOS shows only Codex CLI and ChatGPT."""
-    kinds = ("cli", "desktop") if os_name == "Darwin" else ("cli", "desktop", "system")
+    kinds = ("cli", "claude", "desktop") if os_name == "Darwin" else ("cli", "claude", "desktop", "system")
     return [item for item in records if isinstance(item, dict) and item.get("kind") in kinds]
 
 
@@ -307,15 +307,15 @@ def parse_result(kind, target, build, code, lines):
         if ":" in line:
             key, value = line.split(":", 1)
             values[key] = value
-    after = values.get("ACTIVE_VERSION" if kind == "cli" else "AFTER_VERSION", "")
+    after = values.get("ACTIVE_VERSION" if kind in ("cli", "claude") else "AFTER_VERSION", "")
     valid = bool(version(after)) and version(after) >= version(target)
-    if kind == "cli":
+    if kind in ("cli", "claude"):
         valid = valid and values.get("VERIFY") == "ok"
     else:
         valid = valid and values.get("VERIFY") in ("updated", "current")
         if build:
             valid = valid and values.get("AFTER_BUILD", "").isdigit() and int(values["AFTER_BUILD"]) >= int(build)
-    marker = "FLEETLIGHT_CODEX_UPDATE" if kind == "cli" else "FLEETLIGHT_CODEX_APP_UPDATE"
+    marker = {"cli": "FLEETLIGHT_CODEX_UPDATE", "claude": "FLEETLIGHT_CLAUDE_UPDATE"}.get(kind, "FLEETLIGHT_CODEX_APP_UPDATE")
     if code == 0 and marker in lines and valid:
         if values.get("RELAUNCH") == "failed":
             return "failed", "Installed " + after + ", but ChatGPT did not reopen. Open it manually.", after
@@ -394,7 +394,7 @@ def handle(request):
                 stream.seek(max(0, log.stat().st_size - 12000))
                 state["log"] = stream.read(12000).decode(errors="replace")
         return state
-    if request.get("operation") != "start" or request.get("kind") not in ("cli", "desktop", "system", "restart"):
+    if request.get("operation") != "start" or request.get("kind") not in ("cli", "desktop", "claude", "system", "restart"):
         raise ValueError("Unknown operation")
     if not version(request.get("target")) or (request.get("build") and not str(request["build"]).isdigit()):
         raise ValueError("Invalid target release")

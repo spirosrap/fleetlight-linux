@@ -21,7 +21,7 @@ from . import updates
 from .update_job import installation_changes, history_report
 
 
-ACTION_NAMES = {"cli": "Codex CLI", "desktop": "ChatGPT", "system": "Linux packages", "restart": "required restarts"}
+ACTION_NAMES = {"cli": "Codex CLI", "claude": "Claude CLI", "desktop": "ChatGPT", "system": "Linux packages", "restart": "required restarts"}
 
 CSS = b"""
 window { background: #10151d; color: #e6edf5; }
@@ -120,7 +120,7 @@ class Fleetlight(Adw.Application):
                 self.batch = journal.get("batch")
                 self.pending_restarts = journal.get("pending_restarts", {})
                 if self.batch:
-                    if self.batch["kind"] not in ("cli", "desktop", "system", "restart") or not isinstance(self.batch["pending"], list) or len(self.batch["pending"]) > 32:
+                    if self.batch["kind"] not in ("cli", "claude", "desktop", "system", "restart") or not isinstance(self.batch["pending"], list) or len(self.batch["pending"]) > 32:
                         raise ValueError("Invalid saved batch")
                     for item in self.batch["pending"]:
                         config.validate({"version": 1, "hosts": [item["host"]]})
@@ -197,7 +197,7 @@ class Fleetlight(Adw.Application):
                               min_children_per_line=1, max_children_per_line=3,
                               column_spacing=8, row_spacing=6)
         self.batch_buttons = {}
-        for kind, title in (("cli", "Update all Codex CLI"), ("desktop", "Update all ChatGPT"), ("system", "Update all Linux packages"), ("restart", "Restart required computers")):
+        for kind, title in (("cli", "Update all Codex CLI"), ("claude", "Update all Claude CLI"), ("desktop", "Update all ChatGPT"), ("system", "Update all Linux packages"), ("restart", "Restart required computers")):
             button = Gtk.Button(label=title)
             button.connect("clicked", lambda _, selected=kind: self.request_batch(selected))
             buttons.insert(button, -1)
@@ -268,7 +268,7 @@ class Fleetlight(Adw.Application):
             GLib.timeout_add_seconds(2, self.check_local_metrics)
         if self.demo:
             self.refresh_button.set_sensitive(False)
-            self.app_updates = {h["id"]: {kind: updates.plan("1.0.0", "1.1.0" if kind == "cli" else "1.0.0", "standalone" if kind == "cli" else "macos-appcast") for kind in ("cli", "desktop")} for h in self.configuration["hosts"]}
+            self.app_updates = {h["id"]: {kind: updates.plan("1.0.0", "1.1.0" if kind == "cli" else "1.0.0", "standalone" if kind == "cli" else "native" if kind == "claude" else "macos-appcast") for kind in ("cli", "claude", "desktop")} for h in self.configuration["hosts"]}
             self.agent_usage = agent_quota.demo_usage()
             self.render_agents()
             self.render_detail()
@@ -463,14 +463,13 @@ class Fleetlight(Adw.Application):
             return
         heading = label("AGENT QUOTA", "eyebrow")
         self.agent_box.append(heading)
-        row = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
-                          min_children_per_line=1, max_children_per_line=2,
-                          column_spacing=8, row_spacing=8)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, homogeneous=True)
         for name in visible:
             data = self.agent_usage.get(name) or {"name": name.title(), "state": "checking",
                                                  "detail": "Checking remaining quota…", "remaining_percent": None}
             card = box(True, 6)
             card.add_css_class("card")
+            card.set_hexpand(True)
             title = data.get("name") or name.title()
             plan = data.get("plan")
             card.append(label(title + ((" · " + plan) if plan else ""), "eyebrow"))
@@ -737,6 +736,7 @@ class Fleetlight(Adw.Application):
         metrics.append(card)
         apps = self.section("Applications", "Installed and available versions")
         self.update_row(apps, host, "cli", "Codex CLI", data.get("codex"), "utilities-terminal-symbolic")
+        self.update_row(apps, host, "claude", "Claude CLI", data.get("claude"), "utilities-terminal-symbolic")
         desktop = data.get("chatgpt", {})
         self.update_row(apps, host, "desktop", "ChatGPT", desktop.get("version"), "applications-internet-symbolic")
         if self.active_job and self.active_job["host"]["id"] == host["id"]:
@@ -938,7 +938,7 @@ class Fleetlight(Adw.Application):
                 text += " · Awaiting restart verification: " + ", ".join(item["name"] for item in self.pending_restarts.values())
             self.batch_label.set_text(text)
         elif config.auto_updates_enabled(self.configuration):
-            self.batch_label.set_text("Automatic updates are on · Codex CLI, ChatGPT and Linux packages install when checks find them. Computers are not restarted.")
+            self.batch_label.set_text("Automatic updates are on · Codex CLI, Claude CLI, ChatGPT and Linux packages install when checks find them. Computers are not restarted.")
         else:
             self.batch_label.set_text("Fleet-wide updates · only computers with available releases are included")
 
@@ -951,7 +951,7 @@ class Fleetlight(Adw.Application):
             return
         title = ACTION_NAMES[kind]
         body = "Update " + title + " sequentially on these computers:\n\n"
-        body += "\n".join(item["host"]["name"] + (" → " + item["checked"]["latest"] if kind in ("cli", "desktop") else " · " + item["checked"].get("detail", "")) for item in pending)
+        body += "\n".join(item["host"]["name"] + (" → " + item["checked"]["latest"] if kind in ("cli", "claude", "desktop") else " · " + item["checked"].get("detail", "")) for item in pending)
         if skipped:
             body += "\n\nSkipped: " + "; ".join(item["name"] + " (" + item["reason"] + ")" for item in skipped)
         if kind == "desktop":
@@ -1054,7 +1054,7 @@ class Fleetlight(Adw.Application):
         if checked.get("state") != "available" or time.time() - checked.get("checked_at", 0) > 1800:
             self.toast("Run Check now before updating")
             return
-        if kind == "cli":
+        if kind in ("cli", "claude"):
             self.begin_update(host, kind, checked)
             return
         body = "Install ChatGPT " + checked["latest"] + " on " + host["name"] + "? The app may close and reopen after verification. Finish any active work first."
@@ -1335,18 +1335,18 @@ class Fleetlight(Adw.Application):
         description.set_wrap(True)
         body.append(description)
         body.append(label("Agent quota", "section-title"))
-        quota_note = label("Show remaining Codex and Cursor allowance from this computer’s signed-in sessions. Uncheck an agent to hide it.", "muted")
+        quota_note = label("Show remaining Codex, Cursor and Claude allowance from this computer’s signed-in sessions. Uncheck an agent to hide it.", "muted")
         quota_note.set_wrap(True)
         body.append(quota_note)
         enabled = config.enabled_agents(self.configuration)
         agent_toggles = {}
-        for name, title in (("codex", "Codex"), ("cursor", "Cursor")):
+        for name, title in (("codex", "Codex"), ("cursor", "Cursor"), ("claude", "Claude")):
             toggle = Gtk.CheckButton(label="Show " + title)
             toggle.set_active(enabled[name])
             agent_toggles[name] = toggle
             body.append(toggle)
         body.append(label("Automatic updates", "section-title"))
-        auto_note = label("When enabled, Fleetlight installs Codex CLI, ChatGPT and Linux package updates as soon as checks find them. Computers are not restarted. Keep Fleetlight open. A failed computer is skipped; the same update is not retried until you restart Fleetlight or a different set of packages appears.", "muted")
+        auto_note = label("When enabled, Fleetlight installs Codex CLI, Claude CLI, ChatGPT and Linux package updates as soon as checks find them. Computers are not restarted. Keep Fleetlight open. A failed computer is skipped; the same update is not retried until you restart Fleetlight or a different set of packages appears.", "muted")
         auto_note.set_wrap(True)
         body.append(auto_note)
         auto_toggle = Gtk.CheckButton(label="Automatically install all available updates")

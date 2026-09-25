@@ -69,6 +69,38 @@ def codex_version():
     return None
 
 
+def claude_executable():
+    shell = os.environ.get("SHELL", "/bin/sh")
+    found = command([shell, "-lc", "command -v claude"], timeout=3).splitlines()
+    if found and os.path.isfile(found[-1]) and os.access(found[-1], os.X_OK):
+        return found[-1]
+    return shutil.which("claude")
+
+
+def claude_version():
+    executable = claude_executable()
+    if not executable:
+        return None
+    match = re.search(r"(\d+\.\d+\.\d+)", command([executable, "--version"], timeout=5))
+    return match[1] if match else None
+
+
+def claude_installation():
+    executable = claude_executable()
+    if not executable:
+        return {}
+    resolved = os.path.realpath(executable)
+    paths = executable + ":" + resolved
+    method = "unknown"
+    if "/.local/share/claude/" in paths or paths.endswith("/.local/bin/claude") or "/.local/bin/claude" in paths:
+        method = "native"
+    elif "/mise/" in paths:
+        method = "mise"
+    elif "/node_modules/@anthropic-ai/claude-code/" in paths:
+        method = "npm"
+    return {"method": method}
+
+
 def codex_installation():
     executable = codex_executable()
     if not executable:
@@ -201,13 +233,15 @@ def collect(services=()):
     manager = ("omarchy" if shutil.which("omarchy-update") and shutil.which("pacman")
                else next((name for name in ("pacman", "apt", "dnf") if shutil.which(name)), None))
     cli = codex_version()
+    claude = claude_version()
     return {"schema": 1, "hostname": platform.node(), "os": system, "distribution": distro,
             "architecture": platform.machine(), "codex_installation": codex_installation(),
+            "claude_installation": claude_installation(),
             "package_manager": manager,
             "boot_id": text("/proc/sys/kernel/random/boot_id").strip() if system == "Linux" else None,
             "kernel": platform.release(), "checked_at": time.time(), **metrics,
             "cpus": os.cpu_count() or 1, "services": service_states,
-            "codex": cli, "chatgpt": desktop_app(system)}
+            "codex": cli, "claude": claude, "chatgpt": desktop_app(system)}
 
 
 if __name__ == "__main__":

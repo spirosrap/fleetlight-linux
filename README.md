@@ -6,9 +6,14 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
+## Version 0.3.11
+
+- Keep Claude CLI current alongside Codex CLI and ChatGPT. A missing install is offered as an update and automatic updates install it. The official installer is pinned to the release Fleetlight checked.
+- Show remaining Claude subscription quota (5-hour and weekly windows) next to Codex and Cursor, using this computer's Claude Code sign-in. Cursor now shows its plan name too. Settings can hide Claude like the other agents.
+
 ## Version 0.3.10
 
-- The application update dropdown lists what each installation changed on every computer. Linux includes package upgrades. Macs list Codex CLI and ChatGPT only. A newly added computer is included automatically. The list stays open while live metrics refresh.
+- The application update dropdown lists what each installation changed on every computer. Linux includes package upgrades. Macs list Codex CLI, Claude CLI and ChatGPT only. A newly added computer is included automatically. The list stays open while live metrics refresh.
 
 ## Version 0.3.9
 
@@ -24,7 +29,7 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ## Version 0.3.6
 
-- Optional automatic updates from Settings: Codex CLI, ChatGPT and Linux packages install as soon as checks find them. Off by default. Computers are not restarted automatically.
+- Optional automatic updates from Settings: Codex CLI, Claude CLI, ChatGPT and Linux packages install as soon as checks find them. Off by default. Computers are not restarted automatically.
 
 ## Version 0.3.5
 
@@ -40,11 +45,11 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 ### Existing features
 
 - A Wayland-native desktop application with a searchable fleet sidebar, attention filter and automatic checks.
-- Optional automatic Codex CLI, ChatGPT and Linux package updates from Settings. Off by default; computers are not restarted automatically.
-- Show remaining Codex and Cursor quota from this computer's signed-in sessions, with Settings toggles for each agent.
+- Optional automatic Codex CLI, Claude CLI, ChatGPT and Linux package updates from Settings. Off by default; computers are not restarted automatically.
+- Show remaining Codex, Cursor and Claude quota from this computer's signed-in sessions, with Settings toggles for each agent.
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
-- Root disk, memory, uptime, load, configured systemd services, Codex CLI and ChatGPT package versions.
-- Installed/latest application versions and in-app Codex CLI and ChatGPT update buttons, including remote Apple Silicon Macs.
+- Root disk, memory, uptime, load, configured systemd services, Codex CLI, Claude CLI and ChatGPT package versions.
+- Installed/latest application versions and in-app Codex CLI, Claude CLI and ChatGPT update buttons, including remote Apple Silicon Macs.
 - Fleet-wide Linux package updates and confirmed restarts, with new-boot verification.
 - Durable update jobs with progress, verification and reconnect recovery.
 - Per-service **Warn when stopped** preferences for optional services.
@@ -122,15 +127,16 @@ History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, capped a
 **Check now** checks installed and available releases. Host monitoring runs every minute by default; automatic application release checks run every 15 minutes. Select a computer and press **Update** beside an available application release. ChatGPT asks for confirmation because it may close and reopen the app; Arch also requires a full system upgrade to avoid unsupported partial upgrades.
 
 - **Codex CLI, Linux and macOS:** uses the active installation's standalone updater, npm or mise. Stable versions come from the official npm registry. Unknown installation methods require a manual update.
+- **Claude CLI, Linux and macOS:** uses the active native installer, npm or mise. Stable versions come from the official npm registry. A missing install is installed with the official native installer pinned to that release.
 - **ChatGPT on Apple Silicon macOS:** checks OpenAI's official appcast, verifies the downloaded bundle's identity, version and OpenAI signing team, and restores the previous bundle if replacement verification fails.
 - **ChatGPT on Arch:** refreshes isolated package metadata, checks package integrity and runs a full `omarchy update` on Omarchy, or `pacman -Syu` on other Arch hosts, after confirmation. Modified packages are protected from this action.
 - **ChatGPT on APT:** validates the supported official repository and installed package, refreshes metadata and upgrades the package. Linux installation requires existing passwordless sudo permission; Fleetlight does not collect passwords or configure sudo.
 
-**Update all Codex CLI** and **Update all ChatGPT** show the number of eligible fleet updates. Each button opens a review with the computers and versions to update, plus skipped computers (current, offline, protected or unchecked). Batches run sequentially, stop on failure, and offer **Stop after current update** to cancel remaining work without interrupting an installer. The queue is saved alongside the active job and resumes after a controller restart.
+**Update all Codex CLI**, **Update all Claude CLI** and **Update all ChatGPT** show the number of eligible fleet updates. Each button opens a review with the computers and versions to update, plus skipped computers (current, offline, protected or unchecked). Batches run sequentially, stop on failure, and offer **Stop after current update** to cancel remaining work without interrupting an installer. The queue is saved alongside the active job and resumes after a controller restart.
 
 **Update all Linux packages** refreshes package metadata and upgrades eligible Omarchy, Arch, APT and DNF computers using existing passwordless sudo. APT uses `full-upgrade`, so kernel updates that install a new package are included, matching the Android companion. On Omarchy this is the full `omarchy update -y` path, including AUR packages, mise and pending migrations. Snap and Flatpak updates are included on every Linux host, matching the Android companion. Services may restart, but computers are never automatically rebooted by an update batch. When system updates are pending, locally modified ChatGPT packages protect the host from the batch; review those system upgrades manually.
 
-**Automatically install all available updates** in Settings turns on unattended Codex CLI, ChatGPT and Linux package installs after the usual release checks. It stays off until you enable it. Keep Fleetlight open (start at login is useful). Automatic updates run one at a time, skip a computer that fails, and do not retry that same update until you restart Fleetlight or the available packages change. Restarts are never automatic.
+**Automatically install all available updates** in Settings turns on unattended Codex CLI, Claude CLI, ChatGPT and Linux package installs after the usual release checks. It stays off until you enable it. Keep Fleetlight open (start at login is useful). Automatic updates run one at a time, skip a computer that fails, and do not retry that same update until you restart Fleetlight or the available packages change. Restarts are never automatic.
 
 **Restart required computers** reviews computers with an OS reboot flag, a replaced running Arch kernel, a `needs-restarting` request, or a core-package restart recommendation recorded by Fleetlight. Each confirmed restart is scheduled with a one-minute delay; the local controller goes last. Scheduling is not reported as a verified reboot: Fleetlight waits for the computer to return with a different Linux boot ID. Open Fleetlight again after restarting its own computer (or enable start at login) to see the verification. These checks cannot identify every third-party application's restart requirement.
 
@@ -161,7 +167,7 @@ The native smoke test needs Xvfb and a session D-Bus (`xvfb` and `dbus-x11` on U
 
 ## Privacy and security
 
-No analytics, cloud accounts, API keys or bundled private fleet. Host connections go only to the computers you configure. Application checks also contact the official npm registry, OpenAI appcast and configured package repositories. Optional website checks contact only the HTTPS status URLs you add under `sites`. Codex remaining quota is read through the local Codex app-server; Cursor remaining quota uses this computer’s existing Cursor session against Cursor’s usage API. Fleetlight does not store those session tokens. SSH handles keys; Fleetlight does not read private-key contents. Probes use a fixed read-only collector and validate a per-request receipt. Host aliases and service names are validated, and update operations use a fixed allowlist of commands. Remote output is rendered as text, never executed as an action or treated as markup.
+No analytics, cloud accounts, API keys or bundled private fleet. Host connections go only to the computers you configure. Application checks also contact the official npm registry, OpenAI appcast and configured package repositories. Optional website checks contact only the HTTPS status URLs you add under `sites`. Codex remaining quota is read through the local Codex app-server; Cursor remaining quota and plan use this computer’s existing Cursor session against Cursor’s usage API. Claude remaining quota reads Claude Code’s sign-in from `~/.claude/.credentials.json` (read-only; Fleetlight never refreshes it) and asks Anthropic’s usage API. Fleetlight does not store those session tokens. SSH handles keys; Fleetlight does not read private-key contents. Probes use a fixed read-only collector and validate a per-request receipt. Host aliases and service names are validated, and update operations use a fixed allowlist of commands. Remote output is rendered as text, never executed as an action or treated as markup.
 
 Keep personal `fleet.json`, history, keys and screenshots out of public commits. The public privacy check scans tracked source. See [SECURITY.md](SECURITY.md) for reporting concerns.
 
