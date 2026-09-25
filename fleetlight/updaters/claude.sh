@@ -25,17 +25,21 @@ if [ ! -x "$active_path" ]; then
   mode=native
 else
   real_path=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$active_path")
-  case "$active_path:$real_path" in
-    *'/mise/'*) mode=mise ;;
-    *'node_modules/@anthropic-ai/claude-code/'*) mode=npm ;;
-    *'/.local/share/claude/'*|*'/.local/bin/claude'*) mode=native ;;
-    *) printf 'UPDATE:unsupported-installation\nVERIFY:failed\n'; exit 2 ;;
-  esac
+  # Omarchy's ~/.local/bin/claude is a mise launcher, not the native binary.
+  if printf '%s\n' "$active_path:$real_path" | grep -q '/mise/' || grep -q 'mise ' "$active_path" 2>/dev/null; then
+    mode=mise
+  else
+    case "$active_path:$real_path" in
+      *'node_modules/@anthropic-ai/claude-code/'*) mode=npm ;;
+      *'/.local/share/claude/'*|*'/.local/bin/claude'*) mode=native ;;
+      *) printf 'UPDATE:unsupported-installation\nVERIFY:failed\n'; exit 2 ;;
+    esac
+  fi
 fi
 printf 'UPDATE_MODE:%s\nPHASE:Installing Claude CLI using %s\n' "$mode" "$mode"
 case "$mode" in
   mise)
-    "$shell_bin" -lc "mise use --global --yes npm:@anthropic-ai/claude-code@$target_version && mise reshim"
+    "$shell_bin" -ic "MISE_MINIMUM_RELEASE_AGE=0 mise use --global --yes claude@$target_version && mise reshim"
     status=$?
     ;;
   npm)

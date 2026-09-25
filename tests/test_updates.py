@@ -254,6 +254,8 @@ Unpacking hello (1.0)…
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('UPDATE:current', result.stdout)
             self.assertIn('bash -s "$target_version"', script)
+            self.assertIn('claude@$target_version', script)
+            self.assertIn("grep -q 'mise '", script)
 
 
 if __name__ == '__main__':

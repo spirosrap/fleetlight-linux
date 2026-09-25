@@ -92,10 +92,14 @@ def claude_installation():
     resolved = os.path.realpath(executable)
     paths = executable + ":" + resolved
     method = "unknown"
-    if "/.local/share/claude/" in paths or paths.endswith("/.local/bin/claude") or "/.local/bin/claude" in paths:
-        method = "native"
-    elif "/mise/" in paths:
+    try:
+        launcher = Path(executable).read_text(encoding="utf-8", errors="replace")[:500]
+    except OSError:
+        launcher = ""
+    if "/mise/" in paths or "mise " in launcher:
         method = "mise"
+    elif "/.local/share/claude/" in paths or "/.local/bin/claude" in paths:
+        method = "native"
     elif "/node_modules/@anthropic-ai/claude-code/" in paths:
         method = "npm"
     return {"method": method}
