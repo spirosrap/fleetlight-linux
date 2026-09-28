@@ -93,9 +93,12 @@ def claude_installation():
     paths = executable + ":" + resolved
     method = "unknown"
     try:
-        launcher = Path(executable).read_text(encoding="utf-8", errors="replace")[:500]
+        with open(executable, "rb") as stream:
+            head = stream.read(500)
     except OSError:
-        launcher = ""
+        head = b""
+    # Only text launcher scripts count: the native binary itself contains "mise ".
+    launcher = head.decode("utf-8", errors="replace") if head.startswith(b"#!") else ""
     if "/mise/" in paths or "mise " in launcher:
         method = "mise"
     elif "/.local/share/claude/" in paths or "/.local/bin/claude" in paths:

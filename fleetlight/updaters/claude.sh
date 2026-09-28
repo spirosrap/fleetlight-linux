@@ -25,8 +25,13 @@ if [ ! -x "$active_path" ]; then
   mode=native
 else
   real_path=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$active_path")
-  # Omarchy's ~/.local/bin/claude is a mise launcher, not the native binary.
-  if printf '%s\n' "$active_path:$real_path" | grep -q '/mise/' || grep -q 'mise ' "$active_path" 2>/dev/null; then
+  # Omarchy's ~/.local/bin/claude is a mise launcher script, not the native binary.
+  # Only sniff text scripts: the native binary itself contains the string "mise ".
+  launcher=""
+  if [ "$(head -c 2 "$active_path" 2>/dev/null)" = '#!' ]; then
+    launcher=$(head -c 500 "$active_path" 2>/dev/null)
+  fi
+  if printf '%s\n' "$active_path:$real_path" | grep -q '/mise/' || printf '%s\n' "$launcher" | grep -q 'mise '; then
     mode=mise
   else
     case "$active_path:$real_path" in

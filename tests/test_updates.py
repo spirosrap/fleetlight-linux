@@ -257,6 +257,27 @@ Unpacking hello (1.0)…
             self.assertIn('claude@$target_version', script)
             self.assertIn("grep -q 'mise '", script)
 
+    def test_claude_native_binary_mentioning_mise_is_not_a_mise_launcher(self):
+        script = Path(updates.ROOT / 'updaters/claude.sh').read_text()
+        with tempfile.TemporaryDirectory() as home:
+            local_bin = Path(home) / '.local/bin'
+            local_bin.mkdir(parents=True)
+            versions = Path(home) / '.local/share/claude/versions'
+            versions.mkdir(parents=True)
+            native = versions / '1.2.2'
+            native.write_bytes(b'\x7fELF' + b'\0' * 16 + b'run mise use' + b'\0' * 16)
+            native.chmod(0o700)
+            (local_bin / 'claude').symlink_to(native)
+            tools = Path(home) / 'tools'
+            tools.mkdir()
+            # The fake native installer succeeds without touching the network.
+            (tools / 'curl').write_text('#!/bin/sh\necho "exit 0"\n')
+            (tools / 'curl').chmod(0o700)
+            env = dict(os.environ, HOME=home, PATH=str(tools) + os.pathsep + os.environ['PATH'],
+                       SHELL='/bin/sh', FLEETLIGHT_EXPECTED_VERSION='1.2.3')
+            result = subprocess.run(['/bin/sh', '-c', script], env=env, text=True, capture_output=True)
+            self.assertIn('UPDATE_MODE:native', result.stdout, result.stdout + result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
