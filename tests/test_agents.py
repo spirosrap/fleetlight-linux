@@ -86,6 +86,29 @@ class AgentQuotaTests(unittest.TestCase):
         self.assertEqual(result["state"], "unavailable")
         self.assertNotIn("secret", str(result))
 
+    def test_claude_usage_is_checked_rarely_and_backs_off_when_rate_limited(self):
+        calls = []
+        replies = [dict(agents.unavailable("claude", "Claude usage is rate limited"), rate_limited=True)] * 4
+        replies.append({"id": "claude", "name": "Claude", "state": "ok", "remaining_percent": 80, "detail": ""})
+        original, schedule = agents.COLLECTORS["claude"], dict(agents.claude_schedule)
+        agents.COLLECTORS["claude"] = lambda: calls.append(1) or dict(replies[len(calls) - 1])
+        agents.claude_schedule.update(next=0.0, delay=agents.CLAUDE_INTERVAL)
+        try:
+            first = agents.collect(["claude"])["claude"]
+            self.assertIn("retrying in 10 min", first["detail"])
+            self.assertEqual(agents.collect(["claude"]), {})
+            delays = []
+            for _ in range(4):
+                agents.claude_schedule["next"] = 0.0
+                agents.collect(["claude"])
+                delays.append(agents.claude_schedule["delay"])
+        finally:
+            agents.COLLECTORS["claude"] = original
+            agents.claude_schedule.clear()
+            agents.claude_schedule.update(schedule)
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(delays, [1200, 1800, 1800, agents.CLAUDE_INTERVAL])
+
     def test_cursor_plan_name(self):
         self.assertEqual(agents.cursor_plan_name({"planInfo": {"planName": "Pro", "price": "$20/mo"}}), "Pro")
         self.assertIsNone(agents.cursor_plan_name({"planInfo": {"planName": "  "}}))

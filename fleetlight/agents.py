@@ -23,6 +23,11 @@ NAMES = ("codex", "cursor", "claude")
 CURSOR_USAGE = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
 CURSOR_PLAN = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo"
 CLAUDE_USAGE = "https://api.anthropic.com/api/oauth/usage"
+# The usage endpoint has a small per-account budget shared with every Claude Code
+# session, so check it rarely and back off while it is rate limited.
+CLAUDE_INTERVAL = 300
+CLAUDE_MAX_BACKOFF = 1800
+claude_schedule = {"next": 0.0, "delay": CLAUDE_INTERVAL}
 CLAUDE_WINDOWS = (("five_hour", "5h"), ("seven_day", "weekly"),
                   ("seven_day_opus", "weekly Opus"), ("seven_day_sonnet", "weekly Sonnet"))
 
@@ -416,7 +421,7 @@ def collect_claude():
         if error.code in (401, 403):
             return unavailable("claude", "Open Claude Code to refresh its sign-in")
         if error.code == 429:
-            return unavailable("claude", "Claude usage is rate limited · retrying on the next check")
+            return dict(unavailable("claude", "Claude usage is rate limited"), rate_limited=True)
         return unavailable("claude", "Claude usage could not be checked")
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return unavailable("claude", "Claude usage could not be checked")
@@ -433,8 +438,20 @@ def collect_claude():
 COLLECTORS = {"codex": collect_codex, "cursor": collect_cursor, "claude": collect_claude}
 
 
+def schedule_claude(item, now):
+    """Next Claude usage check: every CLAUDE_INTERVAL, doubling while rate limited."""
+    if isinstance(item, dict) and item.get("rate_limited"):
+        delay = min(claude_schedule["delay"] * 2, CLAUDE_MAX_BACKOFF)
+        item["detail"] += f" · retrying in {round(delay / 60)} min"
+    else:
+        delay = CLAUDE_INTERVAL
+    claude_schedule.update(next=now + delay, delay=delay)
+
+
 def collect(wanted=None):
-    names = [name for name in NAMES if name in (wanted or NAMES)]
+    now = time.time()
+    names = [name for name in NAMES if name in (wanted or NAMES)
+             and (name != "claude" or now >= claude_schedule["next"])]
     result = {}
     if not names:
         return result
@@ -445,6 +462,8 @@ def collect(wanted=None):
                 result[name] = future.result()
             except Exception:
                 result[name] = unavailable(name, "Quota check failed")
+    if "claude" in result:
+        schedule_claude(result["claude"], now)
     return result
 
 
