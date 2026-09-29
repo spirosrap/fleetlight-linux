@@ -1,5 +1,6 @@
 """GTK4/libadwaita desktop shell. Worker threads never touch GTK widgets."""
 import json
+import math
 from pathlib import Path
 import threading
 import time
@@ -14,7 +15,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 from . import __version__
 from . import actions, config
 from . import agents as agent_quota
-from .monitor import History, issues, linux_update_issues, refresh
+from .monitor import History, issues, linux_update_issues, probe_host, refresh
 from .probe import collect_metrics
 from . import sites
 from . import updates
@@ -22,36 +23,78 @@ from .update_job import installation_changes, history_report
 
 
 ACTION_NAMES = {"cli": "Codex CLI", "claude": "Claude CLI", "desktop": "ChatGPT", "system": "Linux packages", "restart": "required restarts"}
+OVERVIEW = "fleet"
+WEBSITE = "https://github.com/spirosrap/fleetlight-linux"
 
+# Colours come from libadwaita's named palette so the app follows the system theme and accent.
 CSS = b"""
-window { background: #10151d; color: #e6edf5; }
-headerbar { background: #141b25; border-bottom: 1px solid #293342; }
-.sidebar { background: #141b25; border-right: 1px solid #293342; }
-.sidebar list { background: transparent; }
-.sidebar row { border-radius: 10px; margin: 3px 10px; padding: 7px; }
-.sidebar row:selected { background: #26384a; }
-.card { background: #1b2430; border-radius: 16px; padding: 20px; border: 1px solid #303c4d; }
-.metric { font-size: 32px; font-weight: 700; }
-.hero { font-size: 30px; font-weight: 700; }
-.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 1.4px; color: #94a9bf; }
-.muted { color: #93a6bb; }
-.good { color: #6cd5b0; }
-.warning { color: #f6c76e; }
-.bad { color: #f1949c; }
-.pill { padding: 5px 12px; border-radius: 20px; background: #233b36; font-weight: 600; }
+.metric { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; }
+.tile .metric { font-size: 26px; }
+.hero { font-size: 28px; font-weight: 800; letter-spacing: -0.02em; }
+.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.09em; opacity: 0.72; }
+.muted { opacity: 0.68; }
+.good { color: @success_color; }
+.warning { color: @warning_color; }
+.bad { color: @error_color; }
+.card { padding: 18px; border-radius: 14px; }
+.tile { padding: 14px 16px; }
+.pill { padding: 3px 11px; border-radius: 999px; font-weight: 700; font-size: 12px; background: alpha(currentColor, 0.14); }
+.badge { padding: 1px 8px; border-radius: 999px; font-weight: 700; font-size: 11px; background: alpha(currentColor, 0.16); }
+.dot { min-width: 10px; min-height: 10px; border-radius: 999px; background: alpha(currentColor, 0.28); }
+.dot.good { background: @success_color; }
+.dot.warning { background: @warning_color; }
+.dot.bad { background: @error_color; }
+progressbar trough, progressbar progress { min-height: 6px; border-radius: 3px; }
+progressbar progress { background: @accent_bg_color; }
+progressbar.good progress { background: @success_bg_color; }
+progressbar.warning progress { background: @warning_bg_color; }
+progressbar.bad progress { background: @error_bg_color; }
+button.host-card { padding: 0; border-radius: 14px; }
+button.host-card > .card { min-width: 220px; }
 .section-title { font-size: 16px; font-weight: 700; }
-progressbar trough { min-height: 5px; background: #303d4d; }
-progressbar progress { background: #6cd5b0; }
-.warning progress { background: #f6c76e; }
-.suggested-action { background: #387c70; color: white; }
-button { border-radius: 9px; }
+.sparkline { min-height: 34px; }
+.row-title { font-weight: 600; }
+"""
+
+SHORTCUTS_UI = """<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <object class="GtkShortcutsWindow" id="shortcuts">
+    <property name="modal">1</property>
+    <child>
+      <object class="GtkShortcutsSection">
+        <property name="section-name">shortcuts</property>
+        <property name="max-height">12</property>
+        <child>
+          <object class="GtkShortcutsGroup">
+            <property name="title">Fleet</property>
+            <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;r F5</property><property name="title">Check all computers now</property></object></child>
+            <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;f</property><property name="title">Find a computer or website</property></object></child>
+            <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;Home</property><property name="title">Show the fleet overview</property></object></child>
+            <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;n</property><property name="title">Add a computer</property></object></child>
+          </object>
+        </child>
+        <child>
+          <object class="GtkShortcutsGroup">
+            <property name="title">Application</property>
+            <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;comma</property><property name="title">Settings</property></object></child>
+            <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;question</property><property name="title">Keyboard shortcuts</property></object></child>
+            <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;q</property><property name="title">Quit</property></object></child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+</interface>
 """
 
 
-def label(text, css=None, xalign=0):
+def label(text, css=None, xalign=0, wrap=False):
     widget = Gtk.Label(label=str(text), xalign=xalign)
     if css:
-        widget.add_css_class(css)
+        for name in css.split():
+            widget.add_css_class(name)
+    if wrap:
+        widget.set_wrap(True)
     return widget
 
 
@@ -70,6 +113,38 @@ def clear(widget):
         widget.remove(widget.get_first_child())
 
 
+def attach(parent, child):
+    """Append to a plain box or add to a libadwaita preferences group."""
+    if isinstance(parent, Adw.PreferencesGroup):
+        parent.add(child)
+    else:
+        parent.append(child)
+
+
+def status_dot(css=None):
+    holder = Gtk.Box(width_request=16, height_request=16, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+    dot = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+    dot.add_css_class("dot")
+    if css:
+        dot.add_css_class(css)
+    holder.append(dot)
+    return holder
+
+
+def usage_css(value, warn=80, bad=90):
+    if value is None:
+        return None
+    return "bad" if value >= bad else "warning" if value >= warn else None
+
+
+def system_label(data, fallback="Online"):
+    """Human system name; macOS probes report only the version number."""
+    distribution = data.get("distribution") or ""
+    if data.get("os") == "Darwin" and distribution and not distribution.lower().startswith("mac"):
+        return "macOS " + distribution
+    return distribution or data.get("os") or fallback
+
+
 def age(timestamp):
     if not timestamp:
         return "Not checked yet"
@@ -82,6 +157,48 @@ def uptime(seconds):
         return "Unavailable"
     hours = seconds // 3600
     return f"{hours // 24}d {hours % 24}h" if hours >= 24 else f"{hours}h {(seconds % 3600) // 60}m"
+
+
+def span(seconds):
+    if seconds < 3600:
+        return f"{max(1, int(seconds // 60))} min"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f} h".replace(".0 h", " h")
+    return f"{seconds / 86400:.1f} days"
+
+
+class Sparkline(Gtk.DrawingArea):
+    """Small trend line for a percentage metric; the stroke follows the widget's CSS colour."""
+
+    def __init__(self, values, tooltip=None):
+        super().__init__(hexpand=True, content_height=34)
+        self.add_css_class("sparkline")
+        self.values = [max(0, min(100, float(v))) for v in values if isinstance(v, (int, float))]
+        if tooltip:
+            self.set_tooltip_text(tooltip)
+        self.set_draw_func(self.draw)
+
+    def draw(self, _area, context, width, height):
+        points = self.values
+        if len(points) < 2 or width < 8:
+            return
+        colour = self.get_color()
+        top, bottom = 3.0, height - 2.0
+        step = (width - 2.0) / (len(points) - 1)
+        coords = [(1.0 + index * step, bottom - (bottom - top) * value / 100) for index, value in enumerate(points)]
+        context.move_to(coords[0][0], bottom)
+        for x, y in coords:
+            context.line_to(x, y)
+        context.line_to(coords[-1][0], bottom)
+        context.close_path()
+        context.set_source_rgba(colour.red, colour.green, colour.blue, 0.16)
+        context.fill()
+        context.move_to(*coords[0])
+        for x, y in coords[1:]:
+            context.line_to(x, y)
+        context.set_source_rgba(colour.red, colour.green, colour.blue, 0.9)
+        context.set_line_width(1.6)
+        context.stroke()
 
 
 class Fleetlight(Adw.Application):
@@ -110,6 +227,7 @@ class Fleetlight(Adw.Application):
         self.keep_detail = False
         self.rebuilding_detail = False
         self.metric_widgets = None
+        self.overview_widgets = {}
         self.auto_attempted = set()
         self.auto_holdoff_until = 0
         self.journal_path = config.state_path().with_name("update-controller.json")
@@ -148,6 +266,15 @@ class Fleetlight(Adw.Application):
                             pass
             except (ValueError, OSError, TypeError, KeyError):
                 pass
+        self.agent_usage_path = config.state_path().with_name("agent-usage.json")
+        if not demo:
+            try:
+                saved = json.loads(self.agent_usage_path.read_text())
+                for name, item in (saved.items() if isinstance(saved, dict) else ()):
+                    if name in agent_quota.NAMES and isinstance(item, dict) and item.get("state") == "ok":
+                        self.agent_usage[name] = dict(item, stale="Checking remaining quota…")
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         self.history = History() if not demo else History(Path("/nonexistent/fleetlight-demo"))
         if demo:
             self.journal_path = Path("/nonexistent/fleetlight-demo/update-controller.json")
@@ -166,98 +293,97 @@ class Fleetlight(Adw.Application):
         if self.demo:
             from .demo import demo_data
             self.configuration, self.snapshots = demo_data()
-        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+            self.seed_demo_history()
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_DARK)
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        self.window = Adw.ApplicationWindow(application=self, title="Fleetlight", default_width=1100, default_height=780)
+        self.install_actions()
+        self.window = Adw.ApplicationWindow(application=self, title="Fleetlight", default_width=1180, default_height=820)
         self.window.set_icon_name("io.github.fleetlight.Linux")
         self.window.connect("close-request", self.close_requested)
-        toolbar = Adw.ToolbarView()
-        header = Adw.HeaderBar()
+
+        # Sidebar: fleet list with its own header bar.
+        sidebar_view = Adw.ToolbarView()
+        sidebar_header = Adw.HeaderBar()
         self.window_title = Adw.WindowTitle(title="Fleetlight", subtitle=f"Linux · {__version__}")
-        header.set_title_widget(self.window_title)
-        settings = Gtk.Button(icon_name="emblem-system-symbolic", tooltip_text="Settings and configuration")
-        settings.connect("clicked", self.settings)
-        header.pack_start(settings)
-        self.spinner = Gtk.Spinner()
-        header.pack_end(self.spinner)
-        self.refresh_button = Gtk.Button(label="Check now", icon_name="view-refresh-symbolic")
-        self.refresh_button.set_label("Check now")
-        self.refresh_button.add_css_class("suggested-action")
-        self.refresh_button.connect("clicked", lambda *_: self.check())
-        header.pack_end(self.refresh_button)
-        add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add computer")
+        sidebar_header.set_title_widget(self.window_title)
+        add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add computer (Ctrl+N)")
         add.set_sensitive(not self.demo)
         add.connect("clicked", self.add_computer)
-        header.pack_end(add)
-        toolbar.add_top_bar(header)
-        fleet_bar = margins(box(True, 6), 10)
-        buttons = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=False,
-                              min_children_per_line=1, max_children_per_line=3,
-                              column_spacing=8, row_spacing=6)
-        self.batch_buttons = {}
-        for kind, title in (("cli", "Update all Codex CLI"), ("claude", "Update all Claude CLI"), ("desktop", "Update all ChatGPT"), ("system", "Update all Linux packages"), ("restart", "Restart required computers")):
-            button = Gtk.Button(label=title)
-            button.connect("clicked", lambda _, selected=kind: self.request_batch(selected))
-            buttons.insert(button, -1)
-            self.batch_buttons[kind] = button
-        self.stop_batch = Gtk.Button(label="Stop after current update")
-        self.stop_batch.connect("clicked", self.cancel_batch)
-        buttons.insert(self.stop_batch, -1)
-        fleet_bar.append(buttons)
-        self.batch_label = label("", "muted")
-        self.batch_label.set_wrap(True)
-        fleet_bar.append(self.batch_label)
-        self.agent_box = box(True, 8)
-        fleet_bar.append(self.agent_box)
-        toolbar.add_top_bar(fleet_bar)
-        self.toasts = Adw.ToastOverlay()
-        layout = Adw.OverlaySplitView(min_sidebar_width=220, max_sidebar_width=260)
-        sidebar = box(True, 12)
-        sidebar.set_size_request(240, -1)
-        sidebar.add_css_class("sidebar")
-        title = margins(label("YOUR FLEET", "eyebrow"), 18)
-        title.set_margin_bottom(0)
-        sidebar.append(title)
-        self.summary = margins(label("Checking computers…", "muted"), 18)
-        self.summary.set_margin_top(0)
-        self.summary.set_margin_bottom(0)
-        sidebar.append(self.summary)
-        self.search = Gtk.SearchEntry(placeholder_text="Find a computer or site")
-        margins(self.search, 12)
-        self.search.set_margin_top(0)
-        self.search.set_margin_bottom(0)
+        sidebar_header.pack_start(add)
+        menu = Gio.Menu()
+        section = Gio.Menu()
+        section.append("Check now", "app.check")
+        section.append("Fleet overview", "app.overview")
+        section.append("Settings", "app.settings")
+        menu.append_section(None, section)
+        section = Gio.Menu()
+        section.append("Keyboard shortcuts", "app.shortcuts")
+        section.append("About Fleetlight", "app.about")
+        section.append("Quit", "app.quit")
+        menu.append_section(None, section)
+        sidebar_header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Main menu", primary=True))
+        sidebar_view.add_top_bar(sidebar_header)
+        sidebar = box(True, 6)
+        filters = margins(box(False, 6), 12)
+        filters.set_margin_bottom(4)
+        self.search = Gtk.SearchEntry(placeholder_text="Find a computer or site", hexpand=True)
         self.search.connect("search-changed", lambda *_: self.populate_hosts())
-        sidebar.append(self.search)
-        self.attention = Gtk.CheckButton(label="Needs attention only")
-        margins(self.attention, 14)
-        self.attention.set_margin_top(0)
-        self.attention.set_margin_bottom(0)
+        filters.append(self.search)
+        self.attention = Gtk.ToggleButton(icon_name="dialog-warning-symbolic", tooltip_text="Show only computers and sites that need attention")
         self.attention.connect("toggled", lambda *_: self.populate_hosts())
-        sidebar.append(self.attention)
+        filters.append(self.attention)
+        sidebar.append(filters)
         self.host_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.host_list.add_css_class("navigation-sidebar")
         self.host_list.connect("row-selected", self.select_host)
+        self.host_list.connect("row-activated", lambda *_: self.split_view.set_show_content(True))
         scroller = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scroller.set_child(self.host_list)
         sidebar.append(scroller)
-        footer = margins(label("Direct SSH · Local history", "muted"), 18)
-        sidebar.append(footer)
-        layout.set_sidebar(sidebar)
+        self.summary = margins(label("Checking computers…", "muted"), 14)
+        self.summary.set_margin_top(6)
+        self.summary.set_wrap(True)
+        sidebar.append(self.summary)
+        sidebar_view.set_content(sidebar)
+        sidebar_page = Adw.NavigationPage(title="Fleetlight", child=sidebar_view, tag="sidebar")
+
+        # Content: one page per computer, website or the fleet overview.
+        self.build_fleet_widgets()
+        content_view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        self.page_title = Adw.WindowTitle(title="Fleet overview", subtitle="")
+        header.set_title_widget(self.page_title)
+        self.spinner = Gtk.Spinner()
+        header.pack_end(self.spinner)
+        self.refresh_button = Gtk.Button(label="Check now", tooltip_text="Check every computer now (Ctrl+R)")
+        self.refresh_button.add_css_class("suggested-action")
+        self.refresh_button.connect("clicked", lambda *_: self.check())
+        header.pack_end(self.refresh_button)
+        content_view.add_top_bar(header)
+        self.banner = Adw.Banner(revealed=False)
+        self.banner.connect("button-clicked", self.cancel_batch)
+        content_view.add_top_bar(self.banner)
+        # Agent quota stays visible on every page.
+        content_view.add_top_bar(Adw.Clamp(maximum_size=1180, tightening_threshold=900, child=self.agent_box))
         scroll = Gtk.ScrolledWindow(hexpand=True, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.content = margins(box(True, 18), 28)
-        scroll.set_child(self.content)
-        layout.set_content(scroll)
-        toggle = Gtk.Button(icon_name="sidebar-show-symbolic", tooltip_text="Show or hide computers")
-        toggle.connect("clicked", lambda *_: layout.set_show_sidebar(not layout.get_show_sidebar()))
-        header.pack_start(toggle)
+        self.content = margins(box(True, 18), 24)
+        scroll.set_child(Adw.Clamp(maximum_size=1180, tightening_threshold=900, child=self.content))
+        content_view.set_content(scroll)
+        content_page = Adw.NavigationPage(title="Fleet overview", child=content_view, tag="content")
+
+        layout = Adw.NavigationSplitView(min_sidebar_width=250, max_sidebar_width=330, sidebar_width_fraction=0.27)
+        layout.set_sidebar(sidebar_page)
+        layout.set_content(content_page)
         breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 900px"))
         breakpoint.add_setter(layout, "collapsed", True)
         self.window.add_breakpoint(breakpoint)
         self.split_view = layout
+        self.toasts = Adw.ToastOverlay()
         self.toasts.set_child(layout)
-        toolbar.set_content(self.toasts)
-        self.window.set_content(toolbar)
+        self.window.set_content(self.toasts)
+        self.selected = OVERVIEW
         self.populate_hosts()
         self._fleet_started = False
         self.window.connect("map", self.reveal_fleet)
@@ -275,10 +401,142 @@ class Fleetlight(Adw.Application):
         if load_error:
             self.toast("Configuration was not loaded: " + load_error)
 
+    def install_actions(self):
+        entries = (("check", lambda: self.check(), ["<Control>r", "F5"]),
+                   ("search", lambda: self.search.grab_focus(), ["<Control>f"]),
+                   ("overview", lambda: self.show_page(OVERVIEW), ["<Control>Home"]),
+                   ("settings", lambda: self.settings(), ["<Control>comma"]),
+                   ("add", lambda: self.add_computer(), ["<Control>n"]),
+                   ("shortcuts", lambda: self.show_shortcuts(), ["<Control>question"]),
+                   ("about", lambda: self.show_about(), []),
+                   ("quit", lambda: self.window.close() if self.window else None, ["<Control>q"]))
+        for name, callback, accelerators in entries:
+            if self.lookup_action(name):
+                continue
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", lambda *_, run=callback: run())
+            self.add_action(action)
+            if accelerators:
+                self.set_accels_for_action("app." + name, accelerators)
+        if not self.lookup_action("show"):
+            show = Gio.SimpleAction.new("show", GLib.VariantType.new("s"))
+            show.connect("activate", self.show_from_notification)
+            self.add_action(show)
+
+    def show_from_notification(self, _action, parameter):
+        if self.window is None:
+            return
+        self.window.present()
+        self.show_page(parameter.get_string())
+
+    def build_fleet_widgets(self):
+        """Fleet-wide controls live on the overview page but keep their state across renders."""
+        self.fleet_actions = box(True, 10)
+        buttons = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=False,
+                              min_children_per_line=1, max_children_per_line=3,
+                              column_spacing=8, row_spacing=6)
+        self.batch_buttons = {}
+        for kind, title in (("cli", "Update all Codex CLI"), ("claude", "Update all Claude CLI"), ("desktop", "Update all ChatGPT"), ("system", "Update all Linux packages"), ("restart", "Restart required computers")):
+            button = Gtk.Button(label=title)
+            button.connect("clicked", lambda _, selected=kind: self.request_batch(selected))
+            buttons.insert(button, -1)
+            self.batch_buttons[kind] = button
+        self.fleet_actions.append(buttons)
+        self.batch_label = label("", "muted", wrap=True)
+        self.fleet_actions.append(self.batch_label)
+        self.agent_box = margins(box(True, 8), 24)
+        self.agent_box.set_margin_bottom(0)
+        self.agent_box.set_visible(False)
+
+    def seed_demo_history(self):
+        """Fictional trend data for screenshots; never persisted."""
+        now = time.time()
+        for index, host in enumerate(self.configuration["hosts"]):
+            base = self.snapshots.get(host["id"], {})
+            for step in range(48):
+                self.history.samples.append({
+                    "time": now - (47 - step) * 1800, "host": host["id"], "status": "online",
+                    "disk": max(1, (base.get("disk_percent") or 30) - 4 + round(4 * step / 47)),
+                    "memory": max(1, (base.get("memory_percent") or 30) + round(12 * math.sin(step / 4 + index)))})
+        names = [h["id"] for h in self.configuration["hosts"]]
+        self.history.events = [
+            {"time": now - 5400, "host": names[2 % len(names)], "message": "tailscaled: inactive"},
+            {"time": now - 3600, "host": names[2 % len(names)], "message": "Connection and services healthy"},
+            {"time": now - 900, "host": names[0], "message": "Connection and services healthy"}]
+
+    def show_page(self, ident):
+        if self.window is None:
+            return
+        self.selected = ident
+        if self.search.get_text() or self.attention.get_active():
+            self.search.set_text("")
+            self.attention.set_active(False)
+        else:
+            self.populate_hosts()
+        if self.split_view.get_collapsed():
+            self.split_view.set_show_content(True)
+
+    def show_shortcuts(self):
+        builder = Gtk.Builder.new_from_string(SHORTCUTS_UI, -1)
+        window = builder.get_object("shortcuts")
+        window.set_transient_for(self.window)
+        window.present()
+
+    def show_about(self):
+        about = Adw.AboutWindow(transient_for=self.window, application_name="Fleetlight",
+                                application_icon="io.github.fleetlight.Linux", version=__version__,
+                                developer_name="Fleetlight contributors", license_type=Gtk.License.MIT_X11,
+                                website=WEBSITE, issue_url=WEBSITE + "/issues",
+                                comments="Your computers, services and application versions at a glance. "
+                                         "Direct SSH monitoring with a private local history.")
+        about.present()
+
+    def host_name(self, ident):
+        for host in self.configuration["hosts"]:
+            if host["id"] == ident:
+                return host["name"]
+        for site in sites.configured(self.configuration):
+            if site["id"] == ident:
+                return site["name"]
+        return ident
+
+    def history_values(self, host_id, key):
+        cutoff = time.time() - 86400
+        rows = sorted((s for s in self.history.samples if isinstance(s, dict) and s.get("host") == host_id and s.get("time", 0) > cutoff),
+                      key=lambda s: s.get("time", 0))
+        values = [s.get(key) for s in rows if isinstance(s.get(key), (int, float))]
+        covered = (rows[-1]["time"] - rows[0]["time"]) if len(rows) > 1 else 0
+        return values, covered
+
+    def notify_change(self, host_id, previous, current):
+        """Desktop notification when a computer gains a problem or recovers. First results are silent."""
+        if self.demo or not config.notifications_enabled(self.configuration):
+            return
+        if not previous or not previous.get("checked_at"):
+            return
+        before, after = issues(previous), issues(current)
+        new_problems = [item for item in after if item not in before]
+        if not new_problems and not (before and not after):
+            return
+        name = self.host_name(host_id)
+        if new_problems:
+            title = name + " needs attention"
+            body = "; ".join(after[:3])
+        else:
+            title = name + " is healthy again"
+            body = "Connection and services are back to normal"
+        notification = Gio.Notification.new(title)
+        notification.set_body(body)
+        notification.set_icon(Gio.ThemedIcon.new("io.github.fleetlight.Linux"))
+        notification.set_default_action_and_target("app.show", GLib.Variant.new_string(host_id))
+        try:
+            self.send_notification("fleetlight-" + host_id, notification)
+        except GLib.Error:
+            pass
+
     def reveal_fleet(self, *_):
         if self.window is None:
             return GLib.SOURCE_REMOVE
-        self.split_view.set_show_sidebar(True)
         self.populate_hosts()
         if self.demo or self._fleet_started:
             return GLib.SOURCE_REMOVE
@@ -395,6 +653,7 @@ class Fleetlight(Adw.Application):
                 self.persist_jobs()
             except OSError:
                 self.toast("Could not save restart verification")
+        self.notify_change(snapshot["id"], current, snapshot)
         self.snapshots[snapshot["id"]] = snapshot
         self.populate_hosts()
         return GLib.SOURCE_REMOVE
@@ -416,9 +675,21 @@ class Fleetlight(Adw.Application):
         for name, item in usage.items():
             previous = merged.get(name)
             if isinstance(item, dict) and item.get("state") != "ok" and isinstance(previous, dict) and previous.get("state") == "ok":
+                # Keep the last good reading visible and say why it is not fresh.
+                merged[name] = dict(previous, stale=item.get("detail") or "Unavailable")
                 continue
+            if isinstance(item, dict) and item.get("state") == "ok":
+                item = dict(item, checked_at=time.time())
+                item.pop("stale", None)
             merged[name] = item
         self.agent_usage = merged
+        if not self.demo:
+            try:
+                config.atomic_json(self.agent_usage_path, {name: {k: v for k, v in item.items() if k != "stale"}
+                                                           for name, item in merged.items()
+                                                           if isinstance(item, dict) and item.get("state") == "ok"})
+            except OSError:
+                pass
         self.render_agents()
         return GLib.SOURCE_REMOVE
 
@@ -459,11 +730,11 @@ class Fleetlight(Adw.Application):
         clear(self.agent_box)
         enabled = config.enabled_agents(self.configuration)
         visible = [name for name in agent_quota.NAMES if enabled.get(name)]
+        self.agent_box.set_visible(bool(visible))
         if not visible:
             return
-        heading = label("AGENT QUOTA", "eyebrow")
-        self.agent_box.append(heading)
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, homogeneous=True)
+        self.agent_box.append(label("AGENT QUOTA", "eyebrow"))
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, homogeneous=True)
         for name in visible:
             data = self.agent_usage.get(name) or {"name": name.title(), "state": "checking",
                                                  "detail": "Checking remaining quota…", "remaining_percent": None}
@@ -472,16 +743,19 @@ class Fleetlight(Adw.Application):
             card.set_hexpand(True)
             title = data.get("name") or name.title()
             plan = data.get("plan")
-            card.append(label(title + ((" · " + plan) if plan else ""), "eyebrow"))
+            card.append(label((title + ((" · " + plan) if plan else "")).upper(), "eyebrow"))
             remaining = data.get("remaining_percent")
+            low = remaining is not None and remaining <= 20
             card.append(label(f"{remaining}% left" if remaining is not None else "—", "metric"))
             bar = Gtk.ProgressBar(fraction=max(0, min(1, (remaining or 0) / 100)))
-            if remaining is not None and remaining <= 20:
-                bar.add_css_class("warning")
+            bar.add_css_class("warning" if low else "good")
             card.append(bar)
-            note = label(data.get("detail") or ("Checking remaining quota…" if data.get("state") == "checking" else "Unavailable"),
-                         "warning" if (remaining is not None and remaining <= 20) or data.get("state") == "unavailable" else "muted")
-            note.set_wrap(True)
+            detail = data.get("detail") or ("Checking remaining quota…" if data.get("state") == "checking" else "Unavailable")
+            if data.get("stale"):
+                when = time.strftime("%H:%M", time.localtime(data["checked_at"])) if data.get("checked_at") else "earlier"
+                detail = f"Last known at {when} · " + data["stale"]
+            note = label(detail, "warning" if low or data.get("state") == "unavailable" or data.get("stale") else "muted", wrap=True)
+            note.set_max_width_chars(30)
             card.append(note)
             row.append(card)
         self.agent_box.append(row)
@@ -503,70 +777,125 @@ class Fleetlight(Adw.Application):
             subtitle += f" · {site_trouble} site alert"
         self.window_title.set_subtitle(subtitle)
         selected_id = self.selected
+        query = self.search.get_text().casefold()
+        filtering = self.attention.get_active()
         self.host_list.unselect_all()
         clear(self.host_list)
         selected_row = None
-        query = self.search.get_text().casefold()
+        attention_total = 0
+        host_rows = []
         for host in sorted(hosts, key=lambda host: not host.get("local", False)):
+            snapshot = self.snapshots.get(host["id"], {})
+            checked = bool(snapshot)
+            online_host = snapshot.get("status") == "online"
+            trouble = (issues(snapshot) if checked else []) + linux_update_issues(self.app_updates.get(host["id"]))
+            attention_total += bool(trouble)
             if query and query not in host["name"].casefold():
                 continue
-            snapshot = self.snapshots.get(host["id"], {})
-            trouble = issues(snapshot) + linux_update_issues(self.app_updates.get(host["id"]))
-            if self.attention.get_active() and not trouble:
+            if filtering and not trouble:
                 continue
-            row = Gtk.ListBoxRow()
-            row.host_id = host["id"]
-            body = box(False, 12)
-            icon = Gtk.Image.new_from_icon_name("computer-symbolic" if host.get("local") else "network-server-symbolic")
-            icon.set_pixel_size(24)
-            online_host = snapshot.get("status") == "online"
-            icon.add_css_class("good" if online_host and not trouble else "warning" if online_host else "muted")
-            body.append(icon)
-            names = box(True, 3)
-            name = label(host["name"])
-            name.set_ellipsize(3)
-            names.append(name)
-            state = "Local computer" if host.get("local") else snapshot.get("os", "SSH connection")
-            names.append(label(state, "muted"))
-            body.append(names)
-            row.set_child(body)
-            self.host_list.append(row)
-            if host["id"] == selected_id:
-                selected_row = row
+            css = "good" if online_host and not trouble else "warning" if online_host else "bad" if checked else None
+            if trouble:
+                detail, detail_css = trouble[0], "warning"
+            elif online_host:
+                detail = system_label(snapshot)
+                if snapshot.get("disk_percent") is not None:
+                    detail += f" · disk {snapshot['disk_percent']}%"
+                if snapshot.get("memory_percent") is not None:
+                    detail += f" · mem {snapshot['memory_percent']}%"
+                detail_css = "muted"
+            else:
+                detail, detail_css = ("Local computer" if host.get("local") else "Waiting for first check"), "muted"
+            badge = str(len(trouble)) if online_host and trouble else None
+            host_rows.append(self.sidebar_row(host["id"], host["name"], detail, detail_css, status_dot(css), badge))
+        site_rows = []
         for site in watched:
-            if query and query not in site["name"].casefold():
-                continue
             status = self.site_status.get(site["id"], {})
             trouble = sites.issues(status)
-            if self.attention.get_active() and not trouble:
+            attention_total += bool(trouble)
+            if query and query not in site["name"].casefold():
                 continue
-            row = Gtk.ListBoxRow()
-            row.host_id = site["id"]
-            body = box(False, 12)
-            icon = Gtk.Image.new_from_icon_name("web-browser-symbolic")
-            icon.set_pixel_size(24)
+            if filtering and not trouble:
+                continue
             state = status.get("state")
-            icon.add_css_class("good" if state == "ok" else "warning" if state else "muted")
-            body.append(icon)
-            names = box(True, 3)
-            name = label(site["name"])
-            name.set_ellipsize(3)
-            names.append(name)
-            names.append(label(status.get("detail") or "Website catalogue", "muted"))
-            body.append(names)
-            row.set_child(body)
+            css = "good" if state == "ok" else "warning" if state else None
+            site_rows.append(self.sidebar_row(site["id"], site["name"], status.get("detail") or "Website catalogue",
+                                              "warning" if trouble else "muted", status_dot(css)))
+        if not query:
+            icon = Gtk.Image.new_from_icon_name("view-grid-symbolic")
+            icon.set_pixel_size(16)
+            overview = self.sidebar_row(OVERVIEW, "Fleet overview", summary, "muted", icon,
+                                        str(attention_total) if attention_total else None)
+            self.host_list.append(overview)
+            if selected_id == OVERVIEW:
+                selected_row = overview
+        if host_rows:
+            self.host_list.append(self.sidebar_header("Computers"))
+        for row in host_rows:
             self.host_list.append(row)
-            if site["id"] == selected_id:
+            if row.host_id == selected_id:
                 selected_row = row
-        row = selected_row or self.host_list.get_row_at_index(0)
+        if site_rows:
+            self.host_list.append(self.sidebar_header("Websites"))
+        for row in site_rows:
+            self.host_list.append(row)
+            if row.host_id == selected_id:
+                selected_row = row
+        row = selected_row or self.first_selectable_row()
         if row:
             self.host_list.select_row(row)
         else:
+            self.selected = None
+            self.metric_widgets = None
             clear(self.content)
+            self.page_title.set_title("Fleetlight")
+            self.page_title.set_subtitle("")
             self.content.append(Adw.StatusPage(title="No computers match", description="Change the search or attention filter.", icon_name="system-search-symbolic"))
 
+    def sidebar_row(self, ident, title, detail, detail_css, leading, badge=None):
+        row = Gtk.ListBoxRow()
+        row.host_id = ident
+        body = box(False, 10)
+        body.set_margin_top(2)
+        body.set_margin_bottom(2)
+        leading.set_valign(Gtk.Align.CENTER)
+        body.append(leading)
+        names = box(True, 2)
+        names.set_hexpand(True)
+        name = label(title, "row-title")
+        name.set_ellipsize(3)
+        names.append(name)
+        note = label(detail, detail_css)
+        note.set_ellipsize(3)
+        names.append(note)
+        body.append(names)
+        if badge:
+            count = label(badge, "badge warning")
+            count.set_valign(Gtk.Align.CENTER)
+            body.append(count)
+        row.set_child(body)
+        return row
+
+    def sidebar_header(self, title):
+        row = Gtk.ListBoxRow(selectable=False, activatable=False, can_focus=False)
+        row.host_id = None
+        heading = label(title.upper(), "eyebrow")
+        heading.set_margin_top(10)
+        heading.set_margin_bottom(2)
+        heading.set_margin_start(6)
+        row.set_child(heading)
+        return row
+
+    def first_selectable_row(self):
+        index = 0
+        while True:
+            row = self.host_list.get_row_at_index(index)
+            if row is None or row.get_selectable():
+                return row
+            index += 1
+
     def select_host(self, _, row):
-        if row:
+        if row and row.get_selectable():
             same = row.host_id == self.selected and self.content.get_first_child() is not None
             self.selected = row.host_id
             if same and self.keep_detail:
@@ -575,34 +904,27 @@ class Fleetlight(Adw.Application):
 
     def render_site(self, site):
         self.metric_widgets = None
+        self.overview_widgets = {}
         status = self.site_status.get(site["id"], {})
         trouble = sites.issues(status)
         clear(self.content)
+        self.page_title.set_title(site["name"])
+        self.page_title.set_subtitle(status.get("detail") or "Website")
         hero = box(False, 12)
-        headings = box(True, 6)
+        headings = box(True, 4)
         headings.set_hexpand(True)
         headings.append(label("WEBSITE", "eyebrow"))
-        title = label(site["name"], "hero")
-        title.set_wrap(True)
-        headings.append(title)
-        headings.append(label(site.get("url") or "", "muted"))
+        headings.append(label(site["name"], "hero", wrap=True))
+        headings.append(label(site.get("url") or "", "muted", wrap=True))
         hero.append(headings)
         state = status.get("state")
         badge_text = "Current" if state == "ok" else "Needs attention" if trouble else "Checking" if self.busy else "Not checked yet"
-        badge = label(badge_text, "pill")
-        badge.add_css_class("good" if state == "ok" else "warning")
+        badge = label(badge_text, "pill " + ("good" if state == "ok" else "warning" if trouble else "muted"))
         badge.set_valign(Gtk.Align.CENTER)
         hero.append(badge)
         self.content.append(hero)
         if trouble:
-            alert = box(True, 5)
-            alert.add_css_class("card")
-            alert.append(label("Needs attention", "warning"))
-            for message in trouble[:8]:
-                line = label(message, "muted")
-                line.set_wrap(True)
-                alert.append(line)
-            self.content.append(alert)
+            self.content.append(self.alert_card(trouble))
         card = self.section("Catalogue freshness", "Checked from this computer over HTTPS")
         generated = status.get("generated_at")
         updated = time.strftime("%a %d %b %H:%M", time.localtime(generated)) if generated else "Unknown"
@@ -614,13 +936,21 @@ class Fleetlight(Adw.Application):
         if status.get("status"):
             self.detail_row(card, "Reported status", status["status"], "dialog-information-symbolic",
                             "warning" if trouble else "muted")
-        note = label(status.get("detail") or "Press Check now to check this website.", "muted")
-        note.set_wrap(True)
-        card.append(note)
-        footer = label("Website checks run with computer checks from this Linux app. "
-                       "They do not use SSH.", "muted")
-        footer.set_wrap(True)
-        self.content.append(footer)
+        card.add(label(status.get("detail") or "Press Check now to check this website.", "muted", wrap=True))
+        self.content.append(label("Website checks run with computer checks from this Linux app. They do not use SSH.", "muted", wrap=True))
+
+    def alert_card(self, trouble):
+        alert = box(True, 6)
+        alert.add_css_class("card")
+        heading = box(False, 8)
+        icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+        icon.add_css_class("warning")
+        heading.append(icon)
+        heading.append(label("Needs attention", "section-title warning"))
+        alert.append(heading)
+        for message in trouble[:8]:
+            alert.append(label(message, None, wrap=True))
+        return alert
 
     def render_detail(self):
         self.rebuilding_detail = True
@@ -630,6 +960,16 @@ class Fleetlight(Adw.Application):
             self.rebuilding_detail = False
 
     def update_open_metrics(self):
+        if self.selected == OVERVIEW:
+            for host_id, widgets in (self.overview_widgets or {}).items():
+                data = self.snapshots.get(host_id, {})
+                for key in ("disk", "memory"):
+                    value = data.get(key + "_percent")
+                    widgets[key].set_text(f"{value}%" if value is not None else "—")
+                    widgets[key + "_bar"].set_fraction(max(0, min(1, (value or 0) / 100)))
+                if data.get("status") == "online":
+                    widgets["foot"].set_text(self.host_footnote(host_id, data))
+            return
         widgets = self.metric_widgets or {}
         if widgets.get("host") != self.selected:
             return
@@ -641,13 +981,48 @@ class Fleetlight(Adw.Application):
         widgets["disk_bar"].set_fraction(max(0, min(1, (disk or 0) / 100)))
         widgets["memory"].set_text(f"{memory}%" if memory is not None else "—")
         widgets["memory_bar"].set_fraction(max(0, min(1, (memory or 0) / 100)))
-        widgets["uptime"].set_text(uptime(data.get("uptime")))
-        widgets["load"].set_text(f"Load {data.get('load', '—')} · {data.get('cpus', '—')} CPUs")
+        widgets["summary"].set_text(self.host_summary(widgets["hostref"], data))
+        cpu_value, cpu_hint, load_fraction, load_css = self.cpu_summary(data)
+        widgets["cpu"].set_text(cpu_value)
+        widgets["load"].set_text(cpu_hint)
+        widgets["load_bar"].set_fraction(load_fraction)
+        for name in ("warning", "bad"):
+            widgets["load_bar"].remove_css_class(name)
+        if load_css:
+            widgets["load_bar"].add_css_class(load_css)
+
+    def host_summary(self, host, data):
+        parts = [system_label(data, "This computer" if host.get("local") else "Secure Shell")]
+        if data.get("status") == "online" and data.get("uptime") is not None:
+            parts.append("up " + uptime(data.get("uptime")))
+        parts.append(age(data.get("checked_at")))
+        return "  ·  ".join(parts)
+
+    def cpu_summary(self, data):
+        """Value, hint, load fraction and colour for the CPU card. Temperature leads when a sensor exists."""
+        load = data.get("load")
+        cpus = data.get("cpus") or 0
+        fraction = max(0.0, min(1.0, load / cpus)) if isinstance(load, (int, float)) and cpus else 0.0
+        css = "bad" if fraction >= 1 else "warning" if fraction >= 0.7 else None
         temperature = data.get("cpu_temperature")
-        widgets["temperature"].set_text(f"{temperature:.1f} °C" if temperature is not None else "—")
+        load_text = f"Load {load} · {cpus} CPUs" if load is not None else "Waiting for a check"
+        if temperature is not None:
+            return f"{temperature:.1f} °C", load_text + " · hottest sensor", fraction, css
+        if load is not None:
+            return f"{load}", f"Load average · {cpus} CPUs · no CPU sensor", fraction, css
+        return "—", load_text, fraction, css
+
+    def host_footnote(self, host_id, data):
+        trouble = issues(data) + linux_update_issues(self.app_updates.get(host_id))
+        if trouble:
+            return trouble[0]
+        return f"Healthy · load {data.get('load', '—')} · {data.get('cpus', '—')} CPUs"
 
     def _render_detail_now(self):
         self.render_batch()
+        if self.selected == OVERVIEW:
+            self.render_overview()
+            return
         site = next((item for item in sites.configured(self.configuration) if item["id"] == self.selected), None)
         if site is not None:
             self.render_site(site)
@@ -655,85 +1030,237 @@ class Fleetlight(Adw.Application):
         host = next((h for h in self.configuration["hosts"] if h["id"] == self.selected), None)
         if host is None:
             return
-        data = self.snapshots.get(host["id"], {})
+        self.render_host(host)
+
+    def render_overview(self):
+        self.metric_widgets = None
+        self.overview_widgets = {}
+        hosts = self.configuration["hosts"]
+        watched = sites.configured(self.configuration)
         clear(self.content)
-        hero = box(False, 12)
-        headings = box(True, 6)
-        headings.set_hexpand(True)
-        headings.append(label("COMPUTER OVERVIEW", "eyebrow"))
-        title = label(host["name"], "hero")
-        title.set_wrap(True)
-        headings.append(title)
-        subtitle = data.get("distribution") or data.get("os") or ("This computer" if host.get("local") else "Secure Shell")
-        subtitle_label = label(subtitle + "  ·  " + age(data.get("checked_at")), "muted")
-        subtitle_label.set_wrap(True)
-        headings.append(subtitle_label)
-        hero.append(headings)
+        trouble_by_id = {}
+        online = 0
+        checked_times = []
+        for host in hosts:
+            data = self.snapshots.get(host["id"], {})
+            online += data.get("status") == "online"
+            if data.get("checked_at"):
+                checked_times.append(data["checked_at"])
+            trouble = (issues(data) if data else []) + linux_update_issues(self.app_updates.get(host["id"]))
+            if trouble:
+                trouble_by_id[host["id"]] = (host["name"], trouble)
+        for site in watched:
+            trouble = sites.issues(self.site_status.get(site["id"]))
+            if trouble:
+                trouble_by_id[site["id"]] = (site["name"], trouble)
+        available = sum(len(updates.batch_candidates(hosts, self.snapshots, self.app_updates, kind)[0]) for kind in ("cli", "claude", "desktop", "system"))
+        restarts = len(updates.batch_candidates(hosts, self.snapshots, self.app_updates, "restart")[0])
+        self.page_title.set_title("Fleet overview")
+        self.page_title.set_subtitle(f"{online} of {len(hosts)} online")
+        hero = box(True, 4)
+        hero.append(label("YOUR FLEET", "eyebrow"))
+        if not checked_times and not self.demo:
+            headline = "Checking your computers…"
+        elif trouble_by_id:
+            count = len(trouble_by_id)
+            headline = f"{count} " + ("item needs" if count == 1 else "items need") + " attention"
+        else:
+            headline = "Everything looks healthy"
+        hero.append(label(headline, "hero", wrap=True))
+        parts = [f"{len(hosts)} computer" + ("s" if len(hosts) != 1 else "")]
+        if watched:
+            parts.append(f"{len(watched)} website" + ("s" if len(watched) != 1 else ""))
+        parts.append(age(max(checked_times)) if checked_times else "Not checked yet")
+        hero.append(label(" · ".join(parts), "muted", wrap=True))
+        self.content.append(hero)
+        tiles = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                            min_children_per_line=2, max_children_per_line=4, row_spacing=12, column_spacing=12)
+        for title, value, hint, css in (
+            ("ONLINE", f"{online}/{len(hosts)}", "computers reachable", "good" if online == len(hosts) else "warning"),
+            ("NEEDS ATTENTION", str(len(trouble_by_id)), "computers and websites", "warning" if trouble_by_id else "good"),
+            ("UPDATES AVAILABLE", str(available), "Codex, Claude, ChatGPT, packages", "warning" if available else None),
+            ("RESTARTS PENDING", str(restarts), "after package upgrades", "warning" if restarts else None),
+        ):
+            tile = box(True, 4)
+            tile.add_css_class("card")
+            tile.add_css_class("tile")
+            tile.append(label(title, "eyebrow"))
+            tile.append(label(value, ("metric " + css) if css else "metric"))
+            tile.append(label(hint, "muted"))
+            tiles.append(tile)
+        self.content.append(tiles)
+        if trouble_by_id:
+            group = self.section("Needs attention", "Select an item to open it")
+            for ident, (name, trouble) in trouble_by_id.items():
+                row = Adw.ActionRow(title=name, subtitle="; ".join(trouble[:3]), activatable=True)
+                row.set_subtitle_lines(2)
+                icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+                icon.add_css_class("warning")
+                row.add_prefix(icon)
+                row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+                row.connect("activated", lambda _, target=ident: self.show_page(target))
+                group.add(row)
+        heading = box(True, 2)
+        heading.append(label("Computers", "section-title"))
+        heading.append(label("Select a computer for details, history and actions", "muted"))
+        self.content.append(heading)
+        grid = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                           min_children_per_line=1, max_children_per_line=3, row_spacing=12, column_spacing=12)
+        for host in sorted(hosts, key=lambda host: not host.get("local", False)):
+            grid.append(self.host_card(host))
+        self.content.append(grid)
+        fleet = box(True, 4)
+        fleet.append(label("Fleet updates", "section-title"))
+        fleet.append(label("Only computers with available releases are included", "muted", wrap=True))
+        if self.fleet_actions.get_parent() is not None:
+            self.fleet_actions.get_parent().remove(self.fleet_actions)
+        fleet.append(self.fleet_actions)
+        self.content.append(fleet)
+        recent = [e for e in self.history.events if isinstance(e, dict)][-8:]
+        if recent:
+            activity = self.section("Recent activity", "Status and service changes saved on this computer")
+            for event in reversed(recent):
+                row = Adw.ActionRow(title=self.host_name(event.get("host")), subtitle=event.get("message", ""))
+                row.set_subtitle_lines(2)
+                stamp = label(time.strftime("%a %H:%M", time.localtime(event.get("time", 0))), "muted")
+                stamp.set_valign(Gtk.Align.CENTER)
+                row.add_suffix(stamp)
+                activity.add(row)
+        self.content.append(label(f"Full checks every {self.configuration.get('refresh_seconds', 60)} seconds · Application release checks every 15 minutes", "muted", wrap=True))
+
+    def host_card(self, host):
+        data = self.snapshots.get(host["id"], {})
+        checked = bool(data)
         online = data.get("status") == "online"
-        status = "Online" if online else "Checking" if self.busy else "Unavailable"
-        badge = label(status, "pill")
-        badge.add_css_class("good" if online else "warning")
+        trouble = (issues(data) if checked else []) + linux_update_issues(self.app_updates.get(host["id"]))
+        card = box(True, 8)
+        card.add_css_class("card")
+        top = box(False, 8)
+        top.append(status_dot("good" if online and not trouble else "warning" if online else "bad" if checked else None))
+        name = label(host["name"], "section-title")
+        name.set_ellipsize(3)
+        name.set_hexpand(True)
+        top.append(name)
+        icon = Gtk.Image.new_from_icon_name("computer-symbolic" if host.get("local") else "network-server-symbolic")
+        icon.add_css_class("muted")
+        top.append(icon)
+        card.append(top)
+        if online:
+            subtitle = system_label(data) + " · up " + uptime(data.get("uptime"))
+        elif checked:
+            subtitle = data.get("error") or "Unavailable"
+        else:
+            subtitle = "Waiting for first check"
+        note = label(subtitle, "muted")
+        note.set_ellipsize(3)
+        card.append(note)
+        widgets = {}
+        for key, title, warn, bad in (("disk", "Disk", 80, 90), ("memory", "Memory", 80, 95)):
+            value = data.get(key + "_percent") if online else None
+            line = box(False, 8)
+            caption = label(title, "muted")
+            caption.set_size_request(58, -1)
+            line.append(caption)
+            bar = Gtk.ProgressBar(fraction=max(0, min(1, (value or 0) / 100)), hexpand=True, valign=Gtk.Align.CENTER)
+            css = usage_css(value, warn, bad)
+            if css:
+                bar.add_css_class(css)
+            line.append(bar)
+            amount = label(f"{value}%" if value is not None else "—", "muted", xalign=1)
+            amount.set_width_chars(4)
+            line.append(amount)
+            card.append(line)
+            widgets[key] = amount
+            widgets[key + "_bar"] = bar
+        foot = label(self.host_footnote(host["id"], data) if online else (trouble[0] if trouble else "—"),
+                     "warning" if trouble else "muted")
+        foot.set_ellipsize(3)
+        card.append(foot)
+        widgets["foot"] = foot
+        self.overview_widgets[host["id"]] = widgets
+        button = Gtk.Button(child=card, tooltip_text="Open " + host["name"])
+        button.add_css_class("host-card")
+        button.add_css_class("flat")
+        button.connect("clicked", lambda *_: self.show_page(host["id"]))
+        return button
+
+    def metric_card(self, title, value_text, hint, bar_value=None, bar_css=None, sparkline=None):
+        card = box(True, 8)
+        card.add_css_class("card")
+        card.set_hexpand(True)
+        card.append(label(title, "eyebrow"))
+        value = label(value_text, "metric")
+        card.append(value)
+        bar = None
+        if bar_value is not None:
+            bar = Gtk.ProgressBar(fraction=max(0, min(1, bar_value)))
+            if bar_css:
+                bar.add_css_class(bar_css)
+            card.append(bar)
+        if sparkline is not None:
+            card.append(sparkline)
+        note = label(hint, "muted", wrap=True)
+        note.set_max_width_chars(24)
+        card.append(note)
+        return card, value, bar, note
+
+    def render_host(self, host):
+        self.overview_widgets = {}
+        data = self.snapshots.get(host["id"], {})
+        checked = bool(data)
+        online = data.get("status") == "online"
+        clear(self.content)
+        system_name = system_label(data, "This computer" if host.get("local") else "Secure Shell")
+        self.page_title.set_title(host["name"])
+        self.page_title.set_subtitle(system_name + " · " + age(data.get("checked_at")))
+        hero = box(False, 12)
+        headings = box(True, 4)
+        headings.set_hexpand(True)
+        headings.append(label("LOCAL COMPUTER" if host.get("local") else "SSH COMPUTER", "eyebrow"))
+        headings.append(label(host["name"], "hero", wrap=True))
+        summary_label = label(self.host_summary(host, data), "muted", wrap=True)
+        headings.append(summary_label)
+        facts = [data.get("hostname"), (("Linux " if data.get("os") == "Linux" else "") + data["kernel"]) if data.get("kernel") else None,
+                 data.get("architecture")]
+        if online and any(facts):
+            headings.append(label("  ·  ".join(str(item) for item in facts if item), "muted", wrap=True))
+        hero.append(headings)
+        status = "Online" if online else "Checking" if self.busy else "Unavailable" if checked else "Not checked yet"
+        badge = label(status, "pill " + ("good" if online else "bad" if checked and not self.busy else "warning"))
         badge.set_valign(Gtk.Align.CENTER)
         hero.append(badge)
         self.content.append(hero)
-        trouble = (issues(data) if data else []) + linux_update_issues(self.app_updates.get(host["id"]))
+        trouble = (issues(data) if checked else []) + linux_update_issues(self.app_updates.get(host["id"]))
         if trouble:
-            alert = box(True, 5)
-            alert.add_css_class("card")
-            alert.append(label("Needs attention", "warning"))
-            for message in trouble[:8]:
-                line = label(message, "muted")
-                line.set_wrap(True)
-                alert.append(line)
-            self.content.append(alert)
+            self.content.append(self.alert_card(trouble))
         metrics = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
-                              min_children_per_line=1, max_children_per_line=3,
-                              row_spacing=12, column_spacing=12)
-        metric_labels = {}
-        for name, value, hint in (
-            ("ROOT DISK", data.get("disk_percent"), f"{data.get('disk_free', 0) / 1024**3:.1f} GiB free" if online else "Waiting for a check"),
-            ("MEMORY", data.get("memory_percent"), "Physical memory in use"),
-        ):
-            card = box(True, 10)
-            card.add_css_class("card")
-            card.set_size_request(150, -1)
-            card.set_hexpand(True)
-            card.append(label(name, "eyebrow"))
-            value_label = label(f"{value}%" if value is not None else "—", "metric")
-            card.append(value_label)
-            bar = Gtk.ProgressBar(fraction=max(0, min(1, (value or 0) / 100)))
-            if (value or 0) >= 90:
-                bar.add_css_class("warning")
-            card.append(bar)
-            hint_label = label(hint, "muted")
-            card.append(hint_label)
-            metrics.append(card)
-            key = "disk" if name == "ROOT DISK" else "memory"
-            metric_labels[key] = value_label
-            metric_labels[key + "_bar"] = bar
-            metric_labels[key + "_hint"] = hint_label
-        card = box(True, 10)
-        card.add_css_class("card")
-        card.set_size_request(150, -1)
-        card.set_hexpand(True)
-        card.append(label("UPTIME", "eyebrow"))
-        uptime_label = label(uptime(data.get("uptime")) if online else "—", "metric")
-        card.append(uptime_label)
-        load_label = label(f"Load {data.get('load', '—')} · {data.get('cpus', '—')} CPUs", "muted")
-        card.append(load_label)
+                              min_children_per_line=1, max_children_per_line=3, row_spacing=12, column_spacing=12)
+        widgets = {"host": host["id"], "summary": summary_label, "hostref": host}
+        disk = data.get("disk_percent") if online else None
+        values, covered = self.history_values(host["id"], "disk")
+        spark = Sparkline(values, f"Root disk over the last {span(covered)} · {len(values)} checks") if len(values) > 1 else None
+        if spark is not None:
+            spark.add_css_class(usage_css(disk, 80, 90) or "good")
+        card, widgets["disk"], widgets["disk_bar"], widgets["disk_hint"] = self.metric_card(
+            "ROOT DISK", f"{disk}%" if disk is not None else "—",
+            f"{data.get('disk_free', 0) / 1024**3:.1f} GiB free" if online else "Waiting for a check",
+            (disk or 0) / 100, usage_css(disk, 80, 90), spark)
+        metrics.append(card)
+        memory = data.get("memory_percent") if online else None
+        values, covered = self.history_values(host["id"], "memory")
+        spark = Sparkline(values, f"Memory over the last {span(covered)} · {len(values)} checks") if len(values) > 1 else None
+        if spark is not None:
+            spark.add_css_class(usage_css(memory, 80, 95) or "good")
+        card, widgets["memory"], widgets["memory_bar"], _ = self.metric_card(
+            "MEMORY", f"{memory}%" if memory is not None else "—", "Physical memory in use",
+            (memory or 0) / 100, usage_css(memory, 80, 95), spark)
+        metrics.append(card)
+        cpu_value, cpu_hint, load_fraction, load_css = self.cpu_summary(data if online else {})
+        card, widgets["cpu"], widgets["load_bar"], widgets["load"] = self.metric_card(
+            "CPU", cpu_value, cpu_hint, load_fraction, load_css)
         metrics.append(card)
         self.content.append(metrics)
-        temperature = data.get("cpu_temperature") if online else None
-        card = box(True, 10)
-        card.add_css_class("card")
-        card.append(label("CPU TEMPERATURE", "eyebrow"))
-        temperature_label = label(f"{temperature:.1f} °C" if temperature is not None else "—", "metric")
-        card.append(temperature_label)
-        self.metric_widgets = {"host": host["id"], "uptime": uptime_label, "load": load_label,
-                               "temperature": temperature_label, **metric_labels}
-        card.append(label("Hottest CPU sensor" if temperature is not None else
-                          ("Waiting for a check" if not online else "CPU sensor unavailable"), "muted"))
-        metrics.append(card)
+        self.metric_widgets = widgets
         apps = self.section("Applications", "Installed and available versions")
         self.update_row(apps, host, "cli", "Codex CLI", data.get("codex"), "utilities-terminal-symbolic")
         self.update_row(apps, host, "claude", "Claude CLI", data.get("claude"), "utilities-terminal-symbolic")
@@ -742,16 +1269,14 @@ class Fleetlight(Adw.Application):
         if self.active_job and self.active_job["host"]["id"] == host["id"]:
             progress = Gtk.ProgressBar()
             progress.pulse()
-            apps.append(progress)
-            phase = label(self.active_job.get("phase", "Preparing update"), "good")
-            phase.set_wrap(True)
-            apps.append(phase)
+            apps.add(progress)
+            apps.add(label(self.active_job.get("phase", "Preparing update"), "good", wrap=True))
         self.update_history(apps, host)
         if data.get("os") == "Linux":
             system_card = self.section("Linux updates", "Distribution packages and restart status")
-            checked = self.app_updates.get(host["id"], {})
+            checked_updates = self.app_updates.get(host["id"], {})
             for kind, title in (("system", "System packages"), ("restart", "Restart")):
-                status = checked.get(kind, {})
+                status = checked_updates.get(kind, {})
                 self.detail_row(system_card, title, status.get("detail", "Checking…"), "system-software-update-symbolic",
                                 "warning" if status.get("state") in ("available", "protected", "unknown") else "muted")
         services = self.section("Services", "Configured system services")
@@ -760,20 +1285,23 @@ class Fleetlight(Adw.Application):
             state = states.get(name, "not checked")
             optional = name in host.get("optional_services", [])
             neutral = state == "unsupported" or (optional and state in ("inactive", "not installed"))
-            self.detail_row(services, name + (" · optional" if optional else ""), state, "emblem-system-symbolic", "good" if state == "active" else "muted" if neutral else "warning")
+            row = Adw.ActionRow(title=name, subtitle="Optional" if optional else "Expected to run")
+            row.add_prefix(Gtk.Image.new_from_icon_name("emblem-system-symbolic"))
+            state_label = label(state, "good" if state == "active" else "muted" if neutral else "warning")
+            state_label.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(state_label)
             required = Gtk.CheckButton(label="Warn when stopped")
+            required.set_valign(Gtk.Align.CENTER)
             required.set_active(not optional)
             required.set_sensitive(not self.demo and not self.busy and not self.update_checks_running and not self.active_job)
             required.connect("toggled", lambda button, service=name: self.service_preference(host, service, button.get_active()))
-            services.append(required)
+            row.add_suffix(required)
+            services.add(row)
         if not host.get("services"):
-            note = label("No services configured. Add systemd unit names in Settings.", "muted")
-            note.set_wrap(True)
-            services.append(note)
+            services.add(label("No services configured. Add systemd unit names in Settings.", "muted", wrap=True))
         controls = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, min_children_per_line=1,
                                max_children_per_line=4, row_spacing=8, column_spacing=8)
-        terminal = Gtk.Button(label="Open terminal", icon_name="utilities-terminal-symbolic")
-        terminal.set_label("Open terminal")
+        terminal = Gtk.Button(label="Open terminal")
         terminal.connect("clicked", lambda *_: self.terminal(host))
         controls.append(terminal)
         files = Gtk.Button(label="Browse files")
@@ -794,64 +1322,57 @@ class Fleetlight(Adw.Application):
         if recent:
             activity = self.section("Recent changes", "Saved on this computer")
             for event in reversed(recent):
-                line = label(time.strftime("%H:%M", time.localtime(event["time"])) + "  ·  " + event["message"], "muted")
-                line.set_wrap(True)
-                activity.append(line)
-        footer = label(("Local metrics every 2 seconds · " if host.get("local") else "") +
-                       f"Full checks every {self.configuration.get('refresh_seconds', 60)} seconds · " +
-                       (f"Last check took {data['check_ms'] / 1000:.1f}s" if data.get("check_ms") else "No verified receipt yet"), "muted")
-        footer.set_wrap(True)
-        self.content.append(footer)
+                row = Adw.ActionRow(title=event["message"], subtitle=time.strftime("%a %d %b %H:%M", time.localtime(event["time"])))
+                row.set_title_lines(2)
+                activity.add(row)
+        self.content.append(label(("Local metrics every 2 seconds · " if host.get("local") else "") +
+                                  f"Full checks every {self.configuration.get('refresh_seconds', 60)} seconds · " +
+                                  (f"Last check took {data['check_ms'] / 1000:.1f}s" if data.get("check_ms") else "No verified receipt yet"), "muted", wrap=True))
 
     def section(self, title, subtitle):
-        section = box(True, 12)
-        section.add_css_class("card")
-        section.append(label(title, "section-title"))
-        section.append(label(subtitle, "muted"))
-        self.content.append(section)
-        return section
+        group = Adw.PreferencesGroup(title=title, description=subtitle)
+        self.content.append(group)
+        return group
 
     def detail_row(self, parent, name, value, icon, css=None):
-        row = box(False, 10)
-        row.append(Gtk.Image.new_from_icon_name(icon))
-        title = label(name)
-        title.set_hexpand(True)
-        row.append(title)
-        value_label = label(value, css or "muted")
-        value_label.set_wrap(True)
-        row.append(value_label)
-        parent.append(row)
+        row = Adw.ActionRow(title=name)
+        row.add_prefix(Gtk.Image.new_from_icon_name(icon))
+        value_label = label(value, css or "muted", xalign=1, wrap=True)
+        value_label.set_max_width_chars(40)
+        value_label.set_justify(Gtk.Justification.RIGHT)
+        value_label.set_valign(Gtk.Align.CENTER)
+        row.add_suffix(value_label)
+        attach(parent, row)
 
     def update_row(self, parent, host, kind, name, installed, icon):
-        row = box(False, 10)
-        row.append(Gtk.Image.new_from_icon_name(icon))
-        description = box(True, 4)
-        description.set_hexpand(True)
-        description.append(label(name))
         checked = self.app_updates.get(host["id"], {}).get(kind, {})
         state = checked.get("state", "checking" if self.update_checks_running else "unknown")
         latest = checked.get("latest")
         versions = (installed or checked.get("installed") or "Not detected") + (" → " + latest if state == "available" else "")
-        description.append(label(versions, "muted"))
         detail = checked.get("detail", "Checking for updates…" if self.update_checks_running else "Press Check now to check releases")
         if state == "current":
             detail = "Up to date" + (" · " + checked["provider"] if checked.get("provider") else "")
         if state == "protected":
             detail = "Protected · " + detail
-        note = label(detail, "warning" if state in ("protected", "unknown", "unsupported") else "muted")
-        note.set_wrap(True)
-        description.append(note)
-        row.append(description)
+        row = Adw.ActionRow(title=name, subtitle=versions + "\n" + detail)
+        row.set_subtitle_lines(3)
+        row.add_prefix(Gtk.Image.new_from_icon_name(icon))
         if state == "available":
             button = Gtk.Button(label="Update")
             button.add_css_class("suggested-action")
             button.set_valign(Gtk.Align.CENTER)
             button.set_sensitive(not self.demo and not self.busy and not self.update_checks_running and not self.active_job)
             button.connect("clicked", lambda *_: self.request_update(host, kind, checked))
-            row.append(button)
+            row.add_suffix(button)
         elif state == "current":
-            row.append(label("Current", "good"))
-        parent.append(row)
+            current = label("Current", "good")
+            current.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(current)
+        elif state in ("protected", "unknown", "unsupported"):
+            flag = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+            flag.add_css_class("warning")
+            row.add_suffix(flag)
+        attach(parent, row)
 
     def service_preference(self, host, name, required):
         candidate = json.loads(json.dumps(self.configuration))
@@ -925,7 +1446,7 @@ class Fleetlight(Adw.Application):
             button.set_sensitive(not blocked and bool(candidates))
             button.set_tooltip_text("Run Check now to refresh available releases" if not candidates else "Review computers and start sequential updates")
         running = bool(self.batch and self.batch.get("running"))
-        self.stop_batch.set_visible(running and bool(self.batch.get("pending")))
+        text = ""
         if self.batch:
             done = len(self.batch.get("results", []))
             total = self.batch.get("total", 0)
@@ -941,6 +1462,17 @@ class Fleetlight(Adw.Application):
             self.batch_label.set_text("Automatic updates are on · Codex CLI, Claude CLI, ChatGPT and Linux packages install when checks find them. Computers are not restarted.")
         else:
             self.batch_label.set_text("Fleet-wide updates · only computers with available releases are included")
+        if running and self.active_job:
+            self.banner.set_title(text)
+            self.banner.set_button_label("Stop after current update" if self.batch.get("pending") else None)
+            self.banner.set_revealed(True)
+        elif self.active_job:
+            job = self.active_job
+            self.banner.set_title("Updating " + ACTION_NAMES.get(job.get("kind"), "software") + " on " + job["host"]["name"] + " · " + job.get("phase", "Working"))
+            self.banner.set_button_label(None)
+            self.banner.set_revealed(True)
+        else:
+            self.banner.set_revealed(False)
 
     def request_batch(self, kind):
         if self.demo or self.busy or self.update_checks_running or self.active_job:
@@ -1137,7 +1669,7 @@ class Fleetlight(Adw.Application):
             log_expander.set_child(scroll)
             details.append(log_expander)
         expander.set_child(details)
-        parent.append(expander)
+        attach(parent, expander)
 
     def dismiss_resolved_jobs(self, checks_by_host):
         changed = False
@@ -1285,37 +1817,81 @@ class Fleetlight(Adw.Application):
         dialog.present()
 
     def add_computer(self, *_):
-        dialog = Adw.Window(transient_for=self.window, modal=True, title="Add computer", default_width=430)
-        body = margins(box(True, 14), 24)
-        body.append(label("Add an SSH computer", "section-title"))
-        entries = {}
-        for key, title, hint in (("name", "Display name", "Home server"), ("alias", "SSH alias", "home-server"),
-                                 ("services", "Services (comma-separated)", "tailscaled, docker")):
-            body.append(label(title, "muted"))
-            entries[key] = Gtk.Entry(placeholder_text=hint)
-            body.append(entries[key])
-        note = label("Uses your existing SSH keys and known hosts. Verify the connection in a terminal first.", "muted")
-        note.set_wrap(True)
-        body.append(note)
-        error = label("", "warning")
-        error.set_wrap(True)
-        body.append(error)
-        save = Gtk.Button(label="Add computer")
+        dialog = Adw.Window(transient_for=self.window, modal=True, title="Add computer", default_width=500, default_height=520)
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=False)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: dialog.close())
+        header.pack_start(cancel)
+        save = Gtk.Button(label="Add")
         save.add_css_class("suggested-action")
         save.set_sensitive(not self.demo)
-        def add(*_):
-            if self.busy or self.update_checks_running or self.active_job:
-                error.set_text("Wait for the current check to finish")
-                return
-            import uuid
-            host = {"id": "host-" + uuid.uuid4().hex[:8], "name": entries["name"].get_text().strip(),
+        header.pack_end(save)
+        view.add_top_bar(header)
+        page = Adw.PreferencesPage()
+        group = Adw.PreferencesGroup(title="SSH computer", description="Uses your existing SSH keys and known hosts. Verify the connection in a terminal first; Fleetlight never accepts unknown host keys.")
+        entries = {}
+        for key, title in (("name", "Display name"), ("alias", "SSH alias or user@host"), ("services", "Services, comma-separated")):
+            entries[key] = Adw.EntryRow(title=title)
+            group.add(entries[key])
+        page.add(group)
+        check_group = Adw.PreferencesGroup(title="Connection test", description="Runs a read-only check over SSH without saving anything.")
+        test_line = box(False, 10)
+        test = Gtk.Button(label="Test connection", halign=Gtk.Align.START)
+        test.set_sensitive(not self.demo)
+        test_line.append(test)
+        result = label("", "muted", wrap=True)
+        result.set_valign(Gtk.Align.CENTER)
+        test_line.append(result)
+        check_group.add(test_line)
+        page.add(check_group)
+        view.set_content(page)
+        dialog.set_content(view)
+
+        def host_from_form():
+            return {"id": "host-" + uuid.uuid4().hex[:8], "name": entries["name"].get_text().strip(),
                     "alias": entries["alias"].get_text().strip(),
                     "services": [s.strip() for s in entries["services"].get_text().split(",") if s.strip()]}
+
+        def show_result(text, css):
+            for name in ("good", "warning", "muted"):
+                result.remove_css_class(name)
+            result.add_css_class(css)
+            result.set_text(text)
+            test.set_sensitive(True)
+            return GLib.SOURCE_REMOVE
+
+        def run_test(*_):
+            host = host_from_form()
+            try:
+                config.validate({"version": 1, "hosts": [host]})
+            except ValueError as problem:
+                show_result(str(problem), "warning")
+                return
+            test.set_sensitive(False)
+            show_result("Connecting…", "muted")
+            test.set_sensitive(False)
+
+            def work():
+                snapshot = probe_host(host)
+                if snapshot.get("status") == "online":
+                    text = "Connected · " + system_label(snapshot, "online") + f" · {snapshot.get('check_ms', 0) / 1000:.1f}s"
+                    GLib.idle_add(show_result, text, "good")
+                else:
+                    GLib.idle_add(show_result, snapshot.get("error") or "Connection failed", "warning")
+            threading.Thread(target=work, daemon=True).start()
+        test.connect("clicked", run_test)
+
+        def add(*_):
+            if self.busy or self.update_checks_running or self.active_job:
+                show_result("Wait for the current check to finish", "warning")
+                return
+            host = host_from_form()
             candidate = {**self.configuration, "hosts": self.configuration["hosts"] + [host]}
             try:
                 config.atomic_json(self.config_file or config.config_path(), config.validate(candidate))
             except (ValueError, OSError) as problem:
-                error.set_text(str(problem))
+                show_result(str(problem), "warning")
                 return
             self.configuration = candidate
             self.selected = host["id"]
@@ -1323,57 +1899,129 @@ class Fleetlight(Adw.Application):
             self.populate_hosts()
             self.check()
         save.connect("clicked", add)
-        body.append(save)
-        dialog.set_content(body)
+        for entry in entries.values():
+            entry.connect("entry-activated", add)
         dialog.present()
 
     def settings(self, *_):
-        dialog = Adw.Window(transient_for=self.window, modal=True, title="Fleetlight settings", default_width=620, default_height=600)
-        body = margins(box(True, 12), 20)
-        body.append(label("Your fleet configuration", "section-title"))
-        description = label("Add or remove computers, rename them, and set systemd services. Optional websites are checked from this computer for a recent HTTPS JSON update time. Saved only in your user configuration folder.", "muted")
-        description.set_wrap(True)
-        body.append(description)
-        body.append(label("Agent quota", "section-title"))
-        quota_note = label("Show remaining Codex, Cursor and Claude allowance from this computer’s signed-in sessions. Uncheck an agent to hide it.", "muted")
-        quota_note.set_wrap(True)
-        body.append(quota_note)
-        enabled = config.enabled_agents(self.configuration)
+        dialog = Adw.Window(transient_for=self.window, modal=True, title="Fleetlight settings", default_width=680, default_height=760)
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=False)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: dialog.close())
+        header.pack_start(cancel)
+        save = Gtk.Button(label="Save")
+        save.add_css_class("suggested-action")
+        header.pack_end(save)
+        view.add_top_bar(header)
+        page = Adw.PreferencesPage()
+        working = json.loads(json.dumps(self.configuration))
+        initial = {"refresh_seconds": self.configuration.get("refresh_seconds", 60),
+                   "notifications": config.notifications_enabled(self.configuration),
+                   "auto_updates": config.auto_updates_enabled(self.configuration),
+                   "agents": config.enabled_agents(self.configuration)}
+
+        monitoring = Adw.PreferencesGroup(title="Monitoring", description="Full checks run for every computer on this interval. The local computer also refreshes live metrics every two seconds.")
+        interval = Adw.SpinRow.new_with_range(15, 3600, 15)
+        interval.set_title("Check interval")
+        interval.set_subtitle("Seconds between full checks")
+        interval.set_value(initial["refresh_seconds"])
+        monitoring.add(interval)
+        notify = Adw.SwitchRow(title="Desktop notifications", subtitle="Notify when a computer goes offline, a service stops, or the problem clears")
+        notify.set_active(initial["notifications"])
+        monitoring.add(notify)
+        start = Adw.SwitchRow(title="Open Fleetlight when I log in", subtitle="Adds a user autostart entry; useful with automatic updates")
+        start.set_active(actions.autostart_path().exists())
+        monitoring.add(start)
+        page.add(monitoring)
+
+        automatic = Adw.PreferencesGroup(title="Automatic updates", description="A failed computer is skipped and the same update is not retried until you restart Fleetlight or a different set of packages appears. Keep Fleetlight open.")
+        auto_toggle = Adw.SwitchRow(title="Automatically install all available updates", subtitle="Codex CLI, Claude CLI, ChatGPT and Linux packages. Computers are never restarted automatically.")
+        auto_toggle.set_active(initial["auto_updates"])
+        automatic.add(auto_toggle)
+        page.add(automatic)
+
+        agents_group = Adw.PreferencesGroup(title="Agent quota", description="Show remaining allowance from this computer’s signed-in sessions at the top of every page.")
         agent_toggles = {}
         for name, title in (("codex", "Codex"), ("cursor", "Cursor"), ("claude", "Claude")):
-            toggle = Gtk.CheckButton(label="Show " + title)
-            toggle.set_active(enabled[name])
+            toggle = Adw.SwitchRow(title="Show " + title)
+            toggle.set_active(initial["agents"][name])
             agent_toggles[name] = toggle
-            body.append(toggle)
-        body.append(label("Automatic updates", "section-title"))
-        auto_note = label("When enabled, Fleetlight installs Codex CLI, Claude CLI, ChatGPT and Linux package updates as soon as checks find them. Computers are not restarted. Keep Fleetlight open. A failed computer is skipped; the same update is not retried until you restart Fleetlight or a different set of packages appears.", "muted")
-        auto_note.set_wrap(True)
-        body.append(auto_note)
-        auto_toggle = Gtk.CheckButton(label="Automatically install all available updates")
-        auto_toggle.set_active(config.auto_updates_enabled(self.configuration))
-        body.append(auto_toggle)
+            agents_group.add(toggle)
+        page.add(agents_group)
+
+        computers = Adw.PreferencesGroup(title="Computers", description="Remove a computer here or add one with the + button. Names and services can be edited in the configuration file below.")
+        computer_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        computer_list.add_css_class("boxed-list")
+        computers.add(computer_list)
+        page.add(computers)
+        websites = Adw.PreferencesGroup(title="Websites", description="HTTPS JSON status documents checked from this computer.")
+        website_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        website_list.add_css_class("boxed-list")
+        websites.add(website_list)
+        page.add(websites)
+
+        def fill_lists():
+            clear(computer_list)
+            for host in working["hosts"]:
+                services = ", ".join(host.get("services", []))
+                subtitle = ("This computer" if host.get("local") else host.get("alias", "")) + ((" · " + services) if services else "")
+                row = Adw.ActionRow(title=host["name"], subtitle=subtitle)
+                row.add_prefix(Gtk.Image.new_from_icon_name("computer-symbolic" if host.get("local") else "network-server-symbolic"))
+                if not host.get("local"):
+                    remove = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Remove " + host["name"], valign=Gtk.Align.CENTER)
+                    remove.add_css_class("flat")
+                    remove.connect("clicked", lambda _, target=host: (working["hosts"].remove(target), fill_lists()))
+                    row.add_suffix(remove)
+                computer_list.append(row)
+            clear(website_list)
+            for site in working.get("sites", []):
+                row = Adw.ActionRow(title=site["name"], subtitle=site.get("url", ""))
+                row.add_prefix(Gtk.Image.new_from_icon_name("web-browser-symbolic"))
+                remove = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Remove " + site["name"], valign=Gtk.Align.CENTER)
+                remove.add_css_class("flat")
+                remove.connect("clicked", lambda _, target=site: (working["sites"].remove(target), fill_lists()))
+                row.add_suffix(remove)
+                website_list.append(row)
+            websites.set_visible(bool(working.get("sites")))
+        fill_lists()
+
+        advanced = Adw.PreferencesGroup(title="Configuration file", description="The full private configuration as JSON. When edited, it replaces the lists above on save.")
+        expander = Adw.ExpanderRow(title="Edit fleet.json", subtitle=str(self.config_file or config.config_path()))
         editor = Gtk.TextView(monospace=True, wrap_mode=Gtk.WrapMode.NONE)
+        margins(editor, 8)
         editor.get_buffer().set_text(json.dumps(self.configuration, indent=2))
-        scroll = Gtk.ScrolledWindow(vexpand=True)
+        json_edited = [False]
+        editor.get_buffer().connect("changed", lambda *_: json_edited.__setitem__(0, True))
+        scroll = Gtk.ScrolledWindow(min_content_height=300, vexpand=True)
         scroll.set_child(editor)
-        body.append(scroll)
-        start = Gtk.CheckButton(label="Open Fleetlight when I log in")
-        start.set_active(actions.autostart_path().exists())
-        body.append(start)
-        error = label("", "warning")
-        error.set_wrap(True)
-        body.append(error)
-        save = Gtk.Button(label="Save settings")
-        save.add_css_class("suggested-action")
+        expander.add_row(scroll)
+        advanced.add(expander)
+        error = label("", "warning", wrap=True)
+        advanced.add(error)
+        page.add(advanced)
+        view.set_content(page)
+        dialog.set_content(view)
+
         def apply(*_):
             if self.busy or self.update_checks_running or self.active_job:
                 error.set_text("Wait for the current check to finish")
                 return
-            buffer = editor.get_buffer()
             try:
-                candidate = config.validate(json.loads(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)))
-                candidate["agents"] = {name: toggle.get_active() for name, toggle in agent_toggles.items()}
-                candidate["auto_updates"] = auto_toggle.get_active()
+                if json_edited[0]:
+                    buffer = editor.get_buffer()
+                    candidate = json.loads(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True))
+                    if not isinstance(candidate, dict):
+                        raise ValueError("Configuration must be a JSON object")
+                else:
+                    candidate = working
+                chosen = {"refresh_seconds": int(interval.get_value()), "notifications": notify.get_active(),
+                          "auto_updates": auto_toggle.get_active(),
+                          "agents": {name: toggle.get_active() for name, toggle in agent_toggles.items()}}
+                for key, value in chosen.items():
+                    # A JSON edit wins unless the matching control was changed in this dialog.
+                    if not json_edited[0] or value != initial[key]:
+                        candidate[key] = value
                 candidate = config.validate(candidate)
                 config.atomic_json(self.config_file or config.config_path(), candidate)
                 if start.get_active() != actions.autostart_path().exists():
@@ -1393,12 +2041,12 @@ class Fleetlight(Adw.Application):
                 GLib.source_remove(self.timer)
             self.timer = GLib.timeout_add_seconds(candidate.get("refresh_seconds", 60), self.auto_check)
             dialog.close()
+            if self.selected not in {h["id"] for h in candidate["hosts"]} | {s["id"] for s in sites.configured(candidate)} | {OVERVIEW}:
+                self.selected = OVERVIEW
             self.populate_hosts()
             self.render_agents()
             self.check()
         save.connect("clicked", apply)
-        body.append(save)
         if self.demo:
             save.set_sensitive(False)
-        dialog.set_content(body)
         dialog.present()

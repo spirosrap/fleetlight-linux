@@ -9,12 +9,42 @@ app = Fleetlight(demo=True)
 failures = []
 
 
+def find_widget(widget, predicate):
+    if predicate(widget):
+        return widget
+    child = widget.get_first_child()
+    while child:
+        found = find_widget(child, predicate)
+        if found is not None:
+            return found
+        child = child.get_next_sibling()
+    return None
+
+
+def host_rows():
+    rows, index = [], 0
+    while True:
+        row = app.host_list.get_row_at_index(index)
+        if row is None:
+            return rows
+        if row.get_selectable() and row.host_id != "fleet":
+            rows.append(row.host_id)
+        index += 1
+
+
 def verify():
     try:
         assert app.window is not None
         assert app.summary.get_text() == "4 of 4 online"
         assert "4/4 online" in app.window_title.get_subtitle()
+        # The fleet overview is the landing page and lists every computer as a card.
+        assert app.selected == "fleet"
+        assert app.page_title.get_title() == "Fleet overview"
+        assert set(app.overview_widgets) == {h["id"] for h in app.configuration["hosts"]}
+        assert host_rows() == ["local", "studio", "server", "lab"]
+        app.show_page("local")
         assert app.selected == "local"
+        assert app.page_title.get_title() == "This Computer"
         # Live metrics preserve full receipts and leave remote hosts alone.
         local = app.configuration["hosts"][0]
         from fleetlight.probe import collect_metrics
@@ -35,13 +65,14 @@ def verify():
         app.search.set_text("")
         app.populate_hosts()
         app.attention.set_active(True)
-        assert app.host_list.get_row_at_index(0) is None
+        assert host_rows() == []
+        assert app.selected == "fleet"
         app.attention.set_active(False)
-        assert app.host_list.get_row_at_index(0) is not None
+        assert host_rows()
         parent = Gtk.Box()
         app.update_row(parent, app.configuration["hosts"][0], "cli", "Codex CLI", "1.0.0", "utilities-terminal-symbolic")
-        button = parent.get_first_child().get_last_child()
-        assert isinstance(button, Gtk.Button) and button.get_label() == "Update"
+        button = find_widget(parent, lambda w: isinstance(w, Gtk.Button) and w.get_label() == "Update")
+        assert button is not None
         assert not button.get_sensitive()
         assert app.app_updates["local"]["cli"]["state"] == "available"
         assert "Update all Codex CLI" in app.batch_buttons["cli"].get_label()
@@ -61,15 +92,7 @@ def verify():
         assert expander.get_label() == "What changed"
         # Real local metric refreshes rebuild the detail pane every two seconds.
         def find_history(widget):
-            if isinstance(widget, Gtk.Expander):
-                return widget
-            child = widget.get_first_child()
-            while child:
-                found = find_history(child)
-                if found is not None:
-                    return found
-                child = child.get_next_sibling()
-            return None
+            return find_widget(widget, lambda w: isinstance(w, Gtk.Expander))
         app.selected = "local"
         app.render_detail()
         opened = find_history(app.content)
@@ -167,10 +190,22 @@ def verify():
         app.receive(dict(snapshot, boot_id="new-boot"))
         assert host_id not in app.pending_restarts
         assert app.app_updates[host_id]["restart"]["detail"].startswith("Restart verified")
+        # Live local metrics also update the overview cards in place.
+        app.show_page("fleet")
+        assert app.selected == "fleet"
+        app.receive_local_metrics([local], dict(metrics, disk_percent=57, metrics_checked_at=metrics["metrics_checked_at"] + 30))
+        assert app.overview_widgets["local"]["disk"].get_text() == "57%"
+        # A failed quota refresh keeps the last good reading and explains why it is stale.
+        app.receive_agents({"claude": {"id": "claude", "name": "Claude", "state": "ok", "remaining_percent": 88, "detail": "88% weekly"}})
+        assert app.agent_usage["claude"]["remaining_percent"] == 88 and "stale" not in app.agent_usage["claude"]
+        app.receive_agents({"claude": {"id": "claude", "name": "Claude", "state": "unavailable", "detail": "rate limited"}})
+        assert app.agent_usage["claude"]["remaining_percent"] == 88 and app.agent_usage["claude"]["stale"] == "rate limited"
         app.settings()
         app.add_computer()
+        app.show_shortcuts()
+        app.show_about()
         assert len(app.get_windows()) >= 1
-        print("GTK smoke test passed: UI, batch sequencing, failure stop, cancellation and recovery")
+        print("GTK smoke test passed: overview, UI, batch sequencing, failure stop, cancellation and recovery")
     except Exception:
         failures.append(traceback.format_exc())
     finally:

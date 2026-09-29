@@ -19,7 +19,7 @@ AGENTS = ("codex", "cursor", "claude")
 
 
 def default_config():
-    return {"version": 1, "refresh_seconds": 60, "auto_updates": False,
+    return {"version": 1, "refresh_seconds": 60, "auto_updates": False, "notifications": True,
             "agents": {"codex": True, "cursor": True, "claude": True}, "hosts": [
         {"id": "local", "name": "This Computer", "local": True, "services": []}
     ]}
@@ -36,6 +36,11 @@ def auto_updates_enabled(configuration):
     return isinstance(configuration, dict) and configuration.get("auto_updates") is True
 
 
+def notifications_enabled(configuration):
+    """Desktop notifications for status changes are on unless explicitly disabled."""
+    return isinstance(configuration, dict) and configuration.get("notifications", True) is True
+
+
 def validate(config):
     if not isinstance(config, dict) or config.get("version") != 1:
         raise ValueError("Expected configuration version 1")
@@ -44,6 +49,8 @@ def validate(config):
         raise ValueError("Refresh interval must be between 15 and 3600 seconds")
     if "auto_updates" in config and type(config["auto_updates"]) is not bool:
         raise ValueError("auto_updates must be true or false")
+    if "notifications" in config and type(config["notifications"]) is not bool:
+        raise ValueError("notifications must be true or false")
     if "agents" in config:
         agents = config["agents"]
         if not isinstance(agents, dict) or any(name not in AGENTS or type(enabled) is not bool for name, enabled in agents.items()):

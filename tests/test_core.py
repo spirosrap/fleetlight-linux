@@ -58,6 +58,16 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 config.validate(configuration)
 
+    def test_notifications_default_on(self):
+        self.assertTrue(config.notifications_enabled(config.default_config()))
+        self.assertTrue(config.notifications_enabled({"version": 1, "hosts": []}))
+        value = config.default_config()
+        value["notifications"] = False
+        self.assertFalse(config.notifications_enabled(config.validate(value)))
+        value["notifications"] = "no"
+        with self.assertRaises(ValueError):
+            config.validate(value)
+
     def test_auto_updates_default_off(self):
         self.assertFalse(config.auto_updates_enabled(config.default_config()))
         self.assertFalse(config.auto_updates_enabled({"version": 1, "hosts": []}))

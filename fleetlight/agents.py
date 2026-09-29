@@ -415,6 +415,8 @@ def collect_claude():
     except urllib.error.HTTPError as error:
         if error.code in (401, 403):
             return unavailable("claude", "Open Claude Code to refresh its sign-in")
+        if error.code == 429:
+            return unavailable("claude", "Claude usage is rate limited · retrying on the next check")
         return unavailable("claude", "Claude usage could not be checked")
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return unavailable("claude", "Claude usage could not be checked")

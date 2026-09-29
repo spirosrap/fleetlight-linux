@@ -6,6 +6,16 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleetlight with fictional demo data](docs/screenshot.png)
 
+## Version 0.4.0
+
+- Redesigned as a native libadwaita application: a navigation split view with proper header bars, boxed-list rows, and colours taken from the system theme and accent instead of a fixed palette. Dark mode is preferred but light themes now work.
+- New **Fleet overview** landing page with status tiles (online, needs attention, updates available, restarts pending), a clickable card for every computer showing disk, memory and load, a **Needs attention** list, fleet-wide recent activity and the fleet update buttons. Agent quota stays at the top of every page; per-computer pages get the rest of the window back.
+- Sidebar rows show a status dot, live disk and memory, the first problem in colour and an issue count. The attention filter is a toggle beside the search field.
+- Computer pages show disk and memory trend sparklines from the local history, a CPU card with load per core and temperature, and uptime, hostname, kernel and architecture in the header.
+- Desktop notifications when a computer goes offline, a service stops or the problem clears. On by default; **Settings › Desktop notifications** turns them off. Clicking a notification opens that computer.
+- Settings is now a preferences page: check interval, notifications, start at login, automatic updates, agent toggles, remove buttons for computers and websites, and the JSON editor under **Configuration file**. **Add computer** gained a **Test connection** button that runs a read-only SSH check before saving.
+- Main menu with keyboard shortcuts (Ctrl+R check, Ctrl+F find, Ctrl+Home overview, Ctrl+N add, Ctrl+, settings, Ctrl+? shortcuts, Ctrl+Q quit) and an About window. A banner shows running fleet updates on every page, with **Stop after current update**.
+
 ## Version 0.3.11
 
 - Keep Claude CLI current alongside Codex CLI and ChatGPT. A missing install is offered as an update and automatic updates install it. The official installer is pinned to the release Fleetlight checked.
@@ -44,7 +54,9 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ### Existing features
 
-- A Wayland-native desktop application with a searchable fleet sidebar, attention filter and automatic checks.
+- A Wayland-native libadwaita application with a fleet overview page, a searchable fleet sidebar, attention filter, keyboard shortcuts and automatic checks.
+- Desktop notifications for computers that go offline or recover, and for services that stop; optional and on by default.
+- Disk and memory trend sparklines and a CPU load and temperature card on each computer's page.
 - Optional automatic Codex CLI, Claude CLI, ChatGPT and Linux package updates from Settings. Off by default; computers are not restarted automatically.
 - Show remaining Codex, Cursor and Claude quota from this computer's signed-in sessions, with Settings toggles for each agent.
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
@@ -100,6 +112,7 @@ The public app starts with **This Computer only**. It never imports or probes yo
   "version": 1,
   "refresh_seconds": 60,
   "auto_updates": false,
+  "notifications": true,
   "hosts": [
     {"id": "local", "name": "This Computer", "local": true, "services": []},
     {"id": "server", "name": "Home Server", "alias": "home-server", "services": ["tailscaled", "docker"]}
@@ -119,6 +132,8 @@ Services are expected to run unless you turn off **Warn when stopped**. Optional
 Optional `sites` entries are checked from this computer over HTTPS. Point each one at a small JSON document with an update time such as `generated_at`. Fleetlight alerts when that time is older than `max_age_hours` (4 hours if omitted) or when the document reports a failed refresh. These checks do not use SSH.
 
 System updates can overwrite local application repairs. Confirmed terminal updates leave package selection, authentication and final confirmation to you. Unattended Linux package updates only run from **Update all Linux packages** or from Settings automatic updates, using existing passwordless sudo.
+
+`notifications` controls desktop notifications for status changes (default `true`). They use the desktop's notification service and never leave this computer.
 
 History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, capped at 2,048 samples / 24 hours and 100 events. It contains computer IDs, metrics and state changes. Diagnostics copied to the clipboard include computer names and should be reviewed before sharing.
 
