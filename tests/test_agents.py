@@ -110,7 +110,30 @@ class AgentQuotaTests(unittest.TestCase):
         self.assertEqual(delays, [1200, 1800, 1800, agents.CLAUDE_INTERVAL])
 
     def test_cursor_plan_name(self):
-        self.assertEqual(agents.cursor_plan_name({"planInfo": {"planName": "Pro", "price": "$20/mo"}}), "Pro")
+        self.assertEqual(agents.cursor_plan_name({"planInfo": {"planName": "Pro", "price": "$20/mo"}}), "Pro $20")
+        self.assertEqual(agents.cursor_plan_name({"planInfo": {"planName": "Ultra"}}), "Ultra")
         self.assertIsNone(agents.cursor_plan_name({"planInfo": {"planName": "  "}}))
         self.assertIsNone(agents.cursor_plan_name({"planInfo": None}))
         self.assertIsNone(agents.cursor_plan_name([]))
+
+    def test_claude_plan_name_includes_tier(self):
+        self.assertEqual(agents.claude_plan_name("pro", "default_claude_ai"), "Pro $20")
+        self.assertEqual(agents.claude_plan_name("max", "default_claude_max_5x"), "Max 5x $100")
+        self.assertEqual(agents.claude_plan_name("max", "default_claude_max_20x"), "Max 20x $200")
+        self.assertEqual(agents.claude_plan_name("team", None), "Team")
+        self.assertEqual(agents.claude_plan_name(None, None), "")
+
+    def test_claude_profile_plan_reflects_upgrades(self):
+        payload = {"account": {"email": "hidden"},
+                   "organization": {"organization_type": "claude_max", "rate_limit_tier": "default_claude_max_5x"}}
+        self.assertEqual(agents.claude_profile_plan(payload), "Max 5x $100")
+        self.assertEqual(agents.claude_profile_plan({"organization": {"organization_type": "claude_pro"}}), "Pro $20")
+        self.assertIsNone(agents.claude_profile_plan({"organization": None}))
+        self.assertIsNone(agents.claude_profile_plan([]))
+
+    def test_codex_product_name(self):
+        self.assertEqual(agents.codex_product_name({"entitlement": {"subscription_plan": "chatgptprolite"}}), "Pro $100")
+        self.assertEqual(agents.codex_product_name({"entitlement": {"subscription_plan": "chatgptpro"}}), "Pro $200")
+        self.assertIsNone(agents.codex_product_name({"entitlement": {"subscription_plan": "unknown"}}))
+        self.assertIsNone(agents.codex_product_name({"entitlement": None}))
+        self.assertIsNone(agents.codex_product_name([]))

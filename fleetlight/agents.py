@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import __version__
@@ -23,6 +24,16 @@ NAMES = ("codex", "cursor", "claude")
 CURSOR_USAGE = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
 CURSOR_PLAN = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo"
 CLAUDE_USAGE = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_PROFILE = "https://api.anthropic.com/api/oauth/profile"
+# The credentials file keeps the tier from sign-in, so upgrades only show up in the live profile.
+CLAUDE_PROFILE_INTERVAL = 3600
+claude_profile = {"at": 0.0, "plan": None}
+CODEX_SUBSCRIPTION = "https://chatgpt.com/backend-api/subscriptions?account_id="
+# Codex reports every Pro tier as planType "pro"; the ChatGPT subscription product tells them apart.
+CODEX_PRODUCTS = {"chatgptgoplan": "Go", "chatgptplusplan": "Plus $20", "chatgptprolite": "Pro $100",
+                  "chatgptpro": "Pro $200", "chatgptpromax": "Pro Max"}
+CODEX_PRODUCT_INTERVAL = 3600
+codex_product = {"at": 0.0, "name": None}
 # The usage endpoint has a small per-account budget shared with every Claude Code
 # session, so check it rarely and back off while it is rate limited.
 CLAUDE_INTERVAL = 300
@@ -252,12 +263,55 @@ def collect_codex():
         return unavailable("codex", "Codex did not report a quota window")
     tightest = min(windows, key=lambda item: item["remaining_percent"])
     parts = [format_codex_window(item) for item in windows]
-    plan = limits.get("planType") or account.get("planType") or ""
+    plan = codex_plan() or limits.get("planType") or account.get("planType") or ""
     if not isinstance(plan, str):
         plan = ""
     return {"id": "codex", "name": "Codex", "state": "ok", "plan": plan,
             "remaining_percent": tightest["remaining_percent"],
             "detail": " · ".join(parts)}
+
+
+def codex_auth():
+    base = os.environ.get("CODEX_HOME")
+    try:
+        payload = json.loads(((Path(base) if base else Path.home() / ".codex") / "auth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    tokens = payload.get("tokens") if isinstance(payload, dict) else None
+    if not isinstance(tokens, dict):
+        return None
+    token, account = tokens.get("access_token"), tokens.get("account_id")
+    if not isinstance(token, str) or not token or not isinstance(account, str) or not account:
+        return None
+    return token, account
+
+
+def codex_product_name(payload):
+    entitlement = payload.get("entitlement") if isinstance(payload, dict) else None
+    product = entitlement.get("subscription_plan") if isinstance(entitlement, dict) else None
+    return CODEX_PRODUCTS.get(product) if isinstance(product, str) else None
+
+
+def codex_plan():
+    """ChatGPT product name such as "Pro $100", looked up at most hourly."""
+    now = time.time()
+    if now - codex_product["at"] < CODEX_PRODUCT_INTERVAL:
+        return codex_product["name"]
+    auth = codex_auth()
+    name = None
+    if auth:
+        token, account = auth
+        request = urllib.request.Request(
+            CODEX_SUBSCRIPTION + urllib.parse.quote(account), method="GET",
+            headers={"Authorization": "Bearer " + token, "ChatGPT-Account-Id": account,
+                     "User-Agent": "Fleetlight/" + __version__})
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                name = codex_product_name(json.loads(response.read().decode("utf-8", "replace")))
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+            name = None
+    codex_product.update(at=now, name=name)
+    return name
 
 
 def cursor_state_db():
@@ -323,7 +377,11 @@ def summarize_cursor(payload):
 def cursor_plan_name(payload):
     info = payload.get("planInfo") if isinstance(payload, dict) else None
     name = info.get("planName") if isinstance(info, dict) else None
-    return name.strip() if isinstance(name, str) and name.strip() else None
+    if not isinstance(name, str) or not name.strip():
+        return None
+    price = info.get("price")
+    price = price.split("/")[0].strip() if isinstance(price, str) else ""
+    return name.strip() + (" " + price if price else "")
 
 
 def cursor_request(url, token):
@@ -375,6 +433,43 @@ def claude_credentials():
     if not isinstance(oauth, dict) or not isinstance(oauth.get("accessToken"), str) or not oauth["accessToken"]:
         return None
     return oauth
+
+
+def claude_plan_name(subscription, tier):
+    """Claude subscription as "Pro $20", "Max 5x $100" or "Max 20x $200"."""
+    subscription = subscription.lower().removeprefix("claude_") if isinstance(subscription, str) else ""
+    tier = tier.lower() if isinstance(tier, str) else ""
+    if "max_20x" in tier:
+        return "Max 20x $200"
+    if "max_5x" in tier:
+        return "Max 5x $100"
+    if subscription == "pro":
+        return "Pro $20"
+    return subscription.title()
+
+
+def claude_profile_plan(payload):
+    organization = payload.get("organization") if isinstance(payload, dict) else None
+    if not isinstance(organization, dict):
+        return None
+    return claude_plan_name(organization.get("organization_type"), organization.get("rate_limit_tier")) or None
+
+
+def claude_plan(credentials):
+    """Live plan from the OAuth profile at most hourly, else the stored sign-in tier."""
+    now = time.time()
+    if now - claude_profile["at"] >= CLAUDE_PROFILE_INTERVAL:
+        request = urllib.request.Request(
+            CLAUDE_PROFILE, method="GET",
+            headers={"Authorization": "Bearer " + credentials["accessToken"], "anthropic-beta": "oauth-2025-04-20",
+                     "User-Agent": "Fleetlight/" + __version__})
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                plan = claude_profile_plan(json.loads(response.read().decode("utf-8", "replace")))
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+            plan = None
+        claude_profile.update(at=now, plan=plan)
+    return claude_profile["plan"] or claude_plan_name(credentials.get("subscriptionType"), credentials.get("rateLimitTier"))
 
 
 def iso_timestamp(value):
@@ -429,8 +524,7 @@ def collect_claude():
     if not windows:
         return unavailable("claude", "Claude did not report a quota window")
     tightest = min(windows, key=lambda item: item["remaining_percent"])
-    plan = credentials.get("subscriptionType")
-    return {"id": "claude", "name": "Claude", "state": "ok", "plan": plan if isinstance(plan, str) else "",
+    return {"id": "claude", "name": "Claude", "state": "ok", "plan": claude_plan(credentials),
             "remaining_percent": tightest["remaining_percent"],
             "detail": " · ".join(format_codex_window(item) for item in windows)}
 
@@ -469,11 +563,11 @@ def collect(wanted=None):
 
 def demo_usage():
     return {
-        "codex": {"id": "codex", "name": "Codex", "state": "ok", "plan": "Pro",
+        "codex": {"id": "codex", "name": "Codex", "state": "ok", "plan": "Pro $200",
                   "remaining_percent": 64, "detail": "64% weekly · 3d 12h · Tue 22 Sep 15:00"},
-        "cursor": {"id": "cursor", "name": "Cursor", "state": "ok", "plan": "Pro",
+        "cursor": {"id": "cursor", "name": "Cursor", "state": "ok", "plan": "Pro $20",
                    "remaining_percent": 41, "detail": "41% remaining this period · 12d 4h"},
-        "claude": {"id": "claude", "name": "Claude", "state": "ok", "plan": "Pro",
+        "claude": {"id": "claude", "name": "Claude", "state": "ok", "plan": "Max 5x $100",
                    "remaining_percent": 72, "detail": "72% 5h · 2h 10m · Tue 22 Sep 17:00 · 90% weekly · 5d 1h · Sun 27 Sep 09:00"},
     }
 
