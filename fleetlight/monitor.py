@@ -122,27 +122,113 @@ def linux_update_issues(checks):
 
 
 class History:
+    """Status events and per-computer samples saved on this computer.
+
+    Every check is kept for two hours; older samples are averaged into 5-minute steps for a day
+    and 15-minute steps for a week, so a large fleet still fits in a small file.
+    """
+    FIELDS = ("time", "up", "disk", "memory", "cpu", "load", "temperature", "ms")
+    RAW, DAY, WEEK = 2 * 3600, 86400, 7 * 86400
+    SAVE_INTERVAL = 240
+
     def __init__(self, path=None):
         self.path = Path(path or state_path())
+        self.series, self.events = {}, []
+        self.saved_at = 0
         try:
             data = json.loads(self.path.read_text()) if self.path.stat().st_size <= 4_000_000 else {}
-            self.samples = data.get("samples", [])[-2048:]
-            self.events = data.get("events", [])[-100:]
-            if not isinstance(self.samples, list) or not isinstance(self.events, list):
+            events = data.get("events", [])[-100:]
+            if not isinstance(events, list):
                 raise ValueError("Invalid history")
+            self.events = events
+            width = len(self.FIELDS)
+            if isinstance(data.get("series"), dict):
+                for ident, rows in data["series"].items():
+                    if isinstance(ident, str) and isinstance(rows, list):
+                        self.series[ident] = [(row + [None] * width)[:width] for row in rows
+                                              if isinstance(row, list) and row and isinstance(row[0], (int, float))]
+            else:
+                # Version 1 kept one object per check with disk and memory only.
+                for sample in data.get("samples", []):
+                    if isinstance(sample, dict) and isinstance(sample.get("host"), str) and isinstance(sample.get("time"), (int, float)):
+                        self.series.setdefault(sample["host"], []).append(
+                            [sample["time"], 1 if sample.get("status") == "online" else 0,
+                             sample.get("disk"), sample.get("memory"), None, None, None, None])
         except (OSError, ValueError, TypeError, AttributeError):
-            self.samples, self.events = [], []
+            self.series, self.events = {}, []
+
+    @classmethod
+    def compact(cls, rows, now):
+        """Average samples older than two hours into coarser steps; drop anything older than a week."""
+        kept, key, bucket = [], None, []
+
+        def close():
+            if len(bucket) == 1:
+                kept.append(bucket[0])
+            elif bucket:
+                merged = []
+                for column in zip(*bucket):
+                    values = [value for value in column if isinstance(value, (int, float))]
+                    merged.append(round(sum(values) / len(values), 2) if values else None)
+                kept.append(merged)
+            bucket.clear()
+
+        for row in sorted(rows, key=lambda item: item[0]):
+            age = now - row[0]
+            if age > cls.WEEK:
+                continue
+            step = 0 if age <= cls.RAW else 300 if age <= cls.DAY else 900
+            current = (step, int(row[0] // step)) if step else None
+            if current != key or current is None:
+                close()
+                key = current
+            bucket.append(row)
+        close()
+        return kept
+
+    def sample(self, ident, current, now):
+        online = current.get("status") == "online"
+        cpu = current.get("cpu_percent")
+        if cpu is None and isinstance(current.get("load"), (int, float)) and current.get("cpus"):
+            cpu = min(100, round(100 * current["load"] / current["cpus"]))
+        self.series.setdefault(ident, []).append(
+            [now, 1 if online else 0, current.get("disk_percent"), current.get("memory_percent"),
+             cpu if online else None, current.get("load"), current.get("cpu_temperature"), current.get("check_ms")])
 
     def record(self, snapshots, previous):
         now = time.time()
+        changed = False
         for ident, current in snapshots.items():
             old = previous.get(ident)
             current_issues = issues(current)
             if old and (old.get("status") != current.get("status") or issues(old) != current_issues):
                 self.events.append({"time": now, "host": ident,
                                     "message": "; ".join(current_issues) or "Connection and services healthy"})
-            self.samples.append({"time": now, "host": ident, "status": current.get("status"),
-                                 "disk": current.get("disk_percent"), "memory": current.get("memory_percent")})
-        self.samples = [s for s in self.samples if isinstance(s, dict) and s.get("time", 0) > now - 86400][-2048:]
+                changed = True
+            self.sample(ident, current, now)
+        self.series = {ident: self.compact(rows, now) for ident, rows in self.series.items()}
+        self.series = {ident: rows for ident, rows in self.series.items() if rows}
         self.events = self.events[-100:]
-        atomic_json(self.path, {"samples": self.samples, "events": self.events})
+        if changed or now - self.saved_at >= self.SAVE_INTERVAL:
+            self.save()
+
+    def save(self):
+        atomic_json(self.path, {"version": 2, "fields": list(self.FIELDS), "series": self.series,
+                                "events": self.events, "samples": []}, indent=None)
+        self.saved_at = time.time()
+
+    def points(self, ident, field, since=0):
+        """(time, value) pairs for one computer; value is None where nothing was measured."""
+        column = self.FIELDS.index(field)
+        return [(row[0], row[column]) for row in self.series.get(ident, []) if row[0] >= since]
+
+    def availability(self, ident, start, end, segments):
+        """Share of checks that reached the computer in each equal slice of time; None without checks."""
+        totals = [[0, 0] for _ in range(segments)]
+        width = (end - start) / segments
+        for moment, up in self.points(ident, "up", start):
+            if moment < end and isinstance(up, (int, float)):
+                slot = totals[min(segments - 1, int((moment - start) / width))]
+                slot[0] += up
+                slot[1] += 1
+        return [total / count if count else None for total, count in totals]

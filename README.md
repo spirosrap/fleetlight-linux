@@ -4,7 +4,22 @@ A native GTK4/libadwaita dashboard for your computers. Monitor Linux and macOS h
 
 Hosts marked `"local": true` refresh memory, load, disk space and uptime every two seconds. On Linux this lightweight refresh reads kernel files directly without launching commands. Full host checks, services and installed software retain the configured `refresh_seconds` interval (60 seconds by default); release checks and history writes keep their existing schedules. This applies to the current computer on every Linux installation configured with a local host.
 
-![Fleetlight with fictional demo data](docs/screenshot.png)
+![Fleet overview with fictional demo data](docs/screenshot.png)
+
+![A computer's page with gauges and history, fictional demo data](docs/screenshot-computer.png)
+
+## Version 0.5.0
+
+- A new look built from ring gauges: every computer shows CPU, memory and disk as gauges on its overview card and its own page, the fleet banner has a health ring split into healthy, attention and unreachable computers, and gauges sweep to their reading when a page opens or a check finishes. Banners turn amber or red with the state of the fleet or computer.
+- **History chart** on each computer's page for CPU, memory, root disk, temperature and check time over 1 hour, 6 hours, 24 hours or 7 days, with a readout under the pointer and gaps where the computer was unreachable. The local computer also has a **Live** view fed by the two-second readings.
+- **Reachability strip**, status-page style, on every overview card and computer page, with the share of checks answered in the last 24 hours.
+- Measured **CPU use** instead of load alone, memory and swap in GiB, battery charge, the network adapter, every mounted local filesystem under **Storage**, the busiest and largest programs under **Top CPU** and **Top memory**, and failed systemd units under **Services**. Failed units are shown, not counted as problems.
+- **Wake-on-LAN** for an unreachable computer, using the hardware address remembered from its last successful check. The computer's page also keeps its **Last seen online** facts.
+- Agent quota cards are more compact and show one bar per quota window with a live countdown and reset day. A desktop notification warns once when an agent's tightest window drops to 10%.
+- Fleetlight opens with the last known readings (marked **Last seen**) instead of an empty window while the first check runs.
+- History now covers a week: every check for two hours, then 5-minute and 15-minute averages. The previous format kept under four hours for a nine-computer fleet.
+- **Settings › Appearance** chooses dark unless the desktop prefers light, always dark or always light. **Alt+1…9** opens a computer by its sidebar position.
+- The sidebar updates in place instead of being rebuilt every two seconds, a burst of check results rebuilds the open page once, and rebuilding a computer's page no longer leaks about 10 KB each time. The header no longer spins while a check runs; the button says what is happening instead.
 
 ## Version 0.4.0
 
@@ -56,11 +71,12 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 - A Wayland-native libadwaita application with a fleet overview page, a searchable fleet sidebar, attention filter, keyboard shortcuts and automatic checks.
 - Desktop notifications for computers that go offline or recover, and for services that stop; optional and on by default.
-- Disk and memory trend sparklines and a CPU load and temperature card on each computer's page.
+- CPU, memory, disk and temperature gauges, a history chart up to a week long and a 24-hour reachability strip on each computer's page.
+- Storage, busiest programs, battery and failed systemd units for each computer, and Wake-on-LAN for computers that are unreachable.
 - Optional automatic Codex CLI, Claude CLI, ChatGPT and Linux package updates from Settings. Off by default; computers are not restarted automatically.
 - Show remaining Codex, Cursor and Claude quota from this computer's signed-in sessions, with Settings toggles for each agent.
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
-- Root disk, memory, uptime, load, configured systemd services, Codex CLI, Claude CLI and ChatGPT package versions.
+- CPU, memory, swap, disks, uptime, load, temperature, configured systemd services, Codex CLI, Claude CLI and ChatGPT package versions.
 - Installed/latest application versions and in-app Codex CLI, Claude CLI and ChatGPT update buttons, including remote Apple Silicon Macs.
 - Fleet-wide Linux package updates and confirmed restarts, with new-boot verification.
 - Durable update jobs with progress, verification and reconnect recovery.
@@ -72,7 +88,7 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 - Editable private configuration, an add-computer dialog and optional start at login.
 - A read-only JSON CLI for diagnostics, plus a fictional demo mode for screenshots.
 
-The Linux edition does not yet provide tray integration, Android controller pairing or wake-on-LAN. The Linux app monitors hosts directly and does not depend on a Mac controller.
+The Linux edition does not yet provide tray integration or Android controller pairing. The Linux app monitors hosts directly and does not depend on a Mac controller.
 
 ## Install
 
@@ -81,13 +97,13 @@ Requires Python 3.10+, GTK4, libadwaita 1.4+ and OpenSSH. Remote computers requi
 Arch / Omarchy:
 
 ```sh
-sudo pacman -S --needed python python-gobject gtk4 libadwaita openssh
+sudo pacman -S --needed python python-gobject python-cairo gtk4 libadwaita openssh
 ```
 
 Ubuntu 24.04+ / Debian with libadwaita 1.4+:
 
 ```sh
-sudo apt install python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 openssh-client
+sudo apt install python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 openssh-client
 ```
 
 Then:
@@ -113,6 +129,7 @@ The public app starts with **This Computer only**. It never imports or probes yo
   "refresh_seconds": 60,
   "auto_updates": false,
   "notifications": true,
+  "appearance": "auto",
   "hosts": [
     {"id": "local", "name": "This Computer", "local": true, "services": []},
     {"id": "server", "name": "Home Server", "alias": "home-server", "services": ["tailscaled", "docker"]}
@@ -133,9 +150,13 @@ Optional `sites` entries are checked from this computer over HTTPS. Point each o
 
 System updates can overwrite local application repairs. Confirmed terminal updates leave package selection, authentication and final confirmation to you. Unattended Linux package updates only run from **Update all Linux packages** or from Settings automatic updates, using existing passwordless sudo.
 
-`notifications` controls desktop notifications for status changes (default `true`). They use the desktop's notification service and never leave this computer.
+`notifications` controls desktop notifications for status changes and low agent quota (default `true`). They use the desktop's notification service and never leave this computer. `appearance` is `auto` (dark unless the desktop prefers light), `dark` or `light`.
 
-History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, capped at 2,048 samples / 24 hours and 100 events. It contains computer IDs, metrics and state changes. Diagnostics copied to the clipboard include computer names and should be reviewed before sharing.
+History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`: every check for two hours, 5-minute averages for a day, 15-minute averages for a week, and the last 100 events. It contains computer IDs, metrics and state changes, and is written every few minutes and when Fleetlight closes. `last-seen.json` beside it holds each computer's last successful check, including its network adapter's hardware address for Wake-on-LAN. Diagnostics copied to the clipboard include computer names, program names and that hardware address, and should be reviewed before sharing.
+
+**Wake-on-LAN** sends the standard wake packet to the broadcast address of this computer's network and of the network the sleeping computer was last on. It only works when the computer allows network wake-up in its firmware and operating system, is wired or otherwise still listening, and shares a local network with this one; it cannot wake a computer across a VPN.
+
+CPU use is measured over half a second at the start of each check on Linux, and continuously for the local computer. On macOS it is the sum of process CPU shares. **Top CPU** is each program's share of one core during that half second, so short bursts can be missed.
 
 ## Application updates
 
@@ -178,11 +199,11 @@ python3 scripts/privacy_check.py
 dbus-run-session -- xvfb-run -a python3 tests/gtk_smoke.py
 ```
 
-The native smoke test needs Xvfb and a session D-Bus (`xvfb` and `dbus-x11` on Ubuntu). It exercises window construction, filtering, selection and configuration dialogs. The tests use isolated fake installers to exercise job locking, reconnect recovery and receipt verification; they do not install application updates.
+The native smoke test needs Xvfb and a session D-Bus (`xvfb` and `dbus-x11` on Ubuntu). It exercises window construction, gauges, the history chart, filtering, selection and configuration dialogs. The tests use isolated fake installers to exercise job locking, reconnect recovery and receipt verification; they do not install application updates.
 
 ## Privacy and security
 
-No analytics, cloud accounts, API keys or bundled private fleet. Host connections go only to the computers you configure. Application checks also contact the official npm registry, OpenAI appcast and configured package repositories. Optional website checks contact only the HTTPS status URLs you add under `sites`. Codex remaining quota is read through the local Codex app-server; Cursor remaining quota and plan use this computer’s existing Cursor session against Cursor’s usage API. Claude remaining quota reads Claude Code’s sign-in from `~/.claude/.credentials.json` (read-only; Fleetlight never refreshes it) and asks Anthropic’s usage API. Fleetlight does not store those session tokens. SSH handles keys; Fleetlight does not read private-key contents. Probes use a fixed read-only collector and validate a per-request receipt. Host aliases and service names are validated, and update operations use a fixed allowlist of commands. Remote output is rendered as text, never executed as an action or treated as markup.
+No analytics, cloud accounts, API keys or bundled private fleet. Host connections go only to the computers you configure. Application checks also contact the official npm registry, OpenAI appcast and configured package repositories. Optional website checks contact only the HTTPS status URLs you add under `sites`. Codex remaining quota is read through the local Codex app-server; Cursor remaining quota and plan use this computer’s existing Cursor session against Cursor’s usage API. Claude remaining quota reads Claude Code’s sign-in from `~/.claude/.credentials.json` (read-only; Fleetlight never refreshes it) and asks Anthropic’s usage API. Fleetlight does not store those session tokens. SSH handles keys; Fleetlight does not read private-key contents. Probes use a fixed read-only collector and validate a per-request receipt. The collector reports program names with their CPU and memory use, never command lines or arguments. Host aliases and service names are validated, and update operations use a fixed allowlist of commands. Remote output is rendered as text, never executed as an action or treated as markup.
 
 Keep personal `fleet.json`, history, keys and screenshots out of public commits. The public privacy check scans tracked source. See [SECURITY.md](SECURITY.md) for reporting concerns.
 

@@ -1,4 +1,5 @@
 """GTK4/libadwaita desktop shell. Worker threads never touch GTK widgets."""
+from collections import deque
 import json
 import math
 from pathlib import Path
@@ -20,40 +21,67 @@ from .probe import collect_metrics
 from . import sites
 from . import updates
 from .update_job import installation_changes, history_report
+from .widgets import AvailabilityStrip, FleetRing, MiniBars, Ring, TrendChart
 
 
 ACTION_NAMES = {"cli": "Codex CLI", "claude": "Claude CLI", "desktop": "ChatGPT", "system": "Linux packages", "restart": "required restarts"}
 OVERVIEW = "fleet"
 WEBSITE = "https://github.com/spirosrap/fleetlight-linux"
+# History chart choices: field in the saved history, title, unit and axis limit (None scales to the data).
+CHART_METRICS = (("cpu", "CPU", "%", 100), ("memory", "Memory", "%", 100), ("disk", "Root disk", "%", 100),
+                 ("temperature", "Temperature", "°C", None), ("ms", "Check time", "ms", None))
+CHART_RANGES = (("live", "Live", 300), ("1h", "1 h", 3600), ("6h", "6 h", 6 * 3600),
+                ("24h", "24 h", 86400), ("7d", "7 d", 7 * 86400))
+SCHEMES = {"auto": Adw.ColorScheme.PREFER_DARK, "dark": Adw.ColorScheme.FORCE_DARK, "light": Adw.ColorScheme.FORCE_LIGHT}
+LOW_QUOTA = 10
 
 # Colours come from libadwaita's named palette so the app follows the system theme and accent.
 CSS = b"""
-.metric { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; }
-.tile .metric { font-size: 26px; }
-.hero { font-size: 28px; font-weight: 800; letter-spacing: -0.02em; }
-.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.09em; opacity: 0.72; }
-.muted { opacity: 0.68; }
+.metric { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; font-feature-settings: "tnum"; }
+.stat-value { font-size: 20px; font-weight: 800; letter-spacing: -0.01em; font-feature-settings: "tnum"; }
+.hero { font-size: 27px; font-weight: 800; letter-spacing: -0.02em; }
+.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.09em; opacity: 0.66; }
+.muted { opacity: 0.66; }
+.small { font-size: 12px; }
+.numeric { font-feature-settings: "tnum"; }
 .good { color: @success_color; }
 .warning { color: @warning_color; }
 .bad { color: @error_color; }
-.card { padding: 18px; border-radius: 14px; }
-.tile { padding: 14px 16px; }
+.accent-text { color: @accent_color; }
+.card { padding: 16px; border-radius: 16px; }
+.hero-card { padding: 20px 22px; border-radius: 20px; border: 1px solid alpha(@accent_bg_color, 0.30);
+  background-image: linear-gradient(115deg, alpha(@accent_bg_color, 0.30), alpha(@accent_bg_color, 0.09) 55%, alpha(@accent_bg_color, 0.03)); }
+.hero-card.attention { border-color: alpha(@warning_bg_color, 0.36);
+  background-image: linear-gradient(115deg, alpha(@warning_bg_color, 0.26), alpha(@warning_bg_color, 0.07) 55%, alpha(@warning_bg_color, 0.02)); }
+.hero-card.offline { border-color: alpha(@error_bg_color, 0.38);
+  background-image: linear-gradient(115deg, alpha(@error_bg_color, 0.28), alpha(@error_bg_color, 0.07) 55%, alpha(@error_bg_color, 0.02)); }
+.hero-card.quiet { border-color: alpha(currentColor, 0.12);
+  background-image: linear-gradient(115deg, alpha(currentColor, 0.09), alpha(currentColor, 0.03)); }
+.stat { padding: 10px 12px; border-radius: 14px; background: alpha(currentColor, 0.06); }
+.icon-tile { min-width: 38px; min-height: 38px; border-radius: 12px; background: alpha(currentColor, 0.13); }
+.icon-tile.large { min-width: 56px; min-height: 56px; border-radius: 17px; }
+.icon-tile.accent { color: @accent_color; }
 .pill { padding: 3px 11px; border-radius: 999px; font-weight: 700; font-size: 12px; background: alpha(currentColor, 0.14); }
+.chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: alpha(currentColor, 0.08); }
 .badge { padding: 1px 8px; border-radius: 999px; font-weight: 700; font-size: 11px; background: alpha(currentColor, 0.16); }
 .dot { min-width: 10px; min-height: 10px; border-radius: 999px; background: alpha(currentColor, 0.28); }
 .dot.good { background: @success_color; }
 .dot.warning { background: @warning_color; }
 .dot.bad { background: @error_color; }
 progressbar trough, progressbar progress { min-height: 6px; border-radius: 3px; }
+progressbar.thin trough, progressbar.thin progress { min-height: 4px; border-radius: 2px; }
+progressbar.thin trough { min-width: 40px; }
 progressbar progress { background: @accent_bg_color; }
 progressbar.good progress { background: @success_bg_color; }
 progressbar.warning progress { background: @warning_bg_color; }
 progressbar.bad progress { background: @error_bg_color; }
-button.host-card { padding: 0; border-radius: 14px; }
-button.host-card > .card { min-width: 220px; }
+button.host-card { padding: 0; border-radius: 16px; }
+button.host-card > .card { transition: box-shadow 160ms ease-out, background-color 160ms ease-out; }
+button.host-card:hover > .card { background-color: mix(@card_bg_color, @accent_bg_color, 0.10);
+  box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.55), 0 8px 22px alpha(black, 0.20); }
 .section-title { font-size: 16px; font-weight: 700; }
-.sparkline { min-height: 34px; }
 .row-title { font-weight: 600; }
+.timeline-dot { min-width: 8px; min-height: 8px; border-radius: 999px; background: currentColor; }
 """
 
 SHORTCUTS_UI = """<?xml version="1.0" encoding="UTF-8"?>
@@ -70,6 +98,7 @@ SHORTCUTS_UI = """<?xml version="1.0" encoding="UTF-8"?>
             <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;r F5</property><property name="title">Check all computers now</property></object></child>
             <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;f</property><property name="title">Find a computer or website</property></object></child>
             <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;Home</property><property name="title">Show the fleet overview</property></object></child>
+            <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Alt&gt;1...9</property><property name="title">Open a computer by its position in the sidebar</property></object></child>
             <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;n</property><property name="title">Add a computer</property></object></child>
           </object>
         </child>
@@ -121,6 +150,15 @@ def attach(parent, child):
         parent.append(child)
 
 
+def set_tone(widget, css, choices=("good", "warning", "bad", "muted")):
+    """Swap a widget's status colour class without touching its other classes."""
+    for name in choices:
+        if name != css:
+            widget.remove_css_class(name)
+    if css:
+        widget.add_css_class(css)
+
+
 def status_dot(css=None):
     holder = Gtk.Box(width_request=16, height_request=16, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
     dot = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
@@ -128,13 +166,68 @@ def status_dot(css=None):
     if css:
         dot.add_css_class(css)
     holder.append(dot)
+    holder.dot = dot
     return holder
+
+
+def icon_tile(icon_name, css=None, large=False):
+    """Rounded square holding a symbolic icon; the tint follows the tile's status colour."""
+    tile = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+    tile.add_css_class("icon-tile")
+    if large:
+        tile.add_css_class("large")
+    if css:
+        tile.add_css_class(css)
+    image = Gtk.Image.new_from_icon_name(icon_name)
+    image.set_pixel_size(26 if large else 18)
+    image.set_hexpand(True)
+    image.set_halign(Gtk.Align.CENTER)
+    tile.append(image)
+    # The image expands to centre itself; stop that from making the tile claim spare width.
+    tile.set_hexpand(False)
+    return tile
+
+
+def chip(text, icon_name=None, css=None):
+    holder = box(False, 6)
+    holder.add_css_class("chip")
+    if css:
+        holder.add_css_class(css)
+    if icon_name:
+        image = Gtk.Image.new_from_icon_name(icon_name)
+        image.set_pixel_size(13)
+        holder.append(image)
+    holder.append(label(text))
+    return holder
+
+
+def icon_button(text, icon_name):
+    button = Gtk.Button()
+    button.set_child(Adw.ButtonContent(label=text, icon_name=icon_name))
+    return button
 
 
 def usage_css(value, warn=80, bad=90):
     if value is None:
         return None
     return "bad" if value >= bad else "warning" if value >= warn else None
+
+
+def cpu_share(data):
+    """CPU use in percent: measured where the probe reports it, otherwise load per core."""
+    value = data.get("cpu_percent")
+    if isinstance(value, (int, float)):
+        return max(0, min(100, round(value)))
+    load, cpus = data.get("load"), data.get("cpus")
+    if isinstance(load, (int, float)) and cpus:
+        return max(0, min(100, round(100 * load / cpus)))
+    return None
+
+
+def host_icon(host, data):
+    if data.get("battery"):
+        return "computer-symbolic"
+    return "computer-symbolic" if host.get("local") or data.get("os") == "Darwin" else "network-server-symbolic"
 
 
 def system_label(data, fallback="Online"):
@@ -145,11 +238,21 @@ def system_label(data, fallback="Online"):
     return distribution or data.get("os") or fallback
 
 
+def ago(timestamp):
+    elapsed = max(0, int(time.time() - timestamp))
+    if elapsed < 60:
+        return f"{elapsed}s ago"
+    if elapsed < 3600:
+        return f"{elapsed // 60}m ago"
+    if elapsed < 2 * 86400:
+        return f"{elapsed // 3600}h ago"
+    return f"{elapsed // 86400}d ago"
+
+
 def age(timestamp):
     if not timestamp:
         return "Not checked yet"
-    elapsed = max(0, int(time.time() - timestamp))
-    return "Just checked" if elapsed < 10 else (f"Checked {elapsed}s ago" if elapsed < 60 else f"Checked {elapsed // 60}m ago")
+    return "Just checked" if time.time() - timestamp < 10 else "Checked " + ago(timestamp)
 
 
 def uptime(seconds):
@@ -159,46 +262,15 @@ def uptime(seconds):
     return f"{hours // 24}d {hours % 24}h" if hours >= 24 else f"{hours}h {(seconds % 3600) // 60}m"
 
 
-def span(seconds):
-    if seconds < 3600:
-        return f"{max(1, int(seconds // 60))} min"
-    if seconds < 86400:
-        return f"{seconds / 3600:.1f} h".replace(".0 h", " h")
-    return f"{seconds / 86400:.1f} days"
-
-
-class Sparkline(Gtk.DrawingArea):
-    """Small trend line for a percentage metric; the stroke follows the widget's CSS colour."""
-
-    def __init__(self, values, tooltip=None):
-        super().__init__(hexpand=True, content_height=34)
-        self.add_css_class("sparkline")
-        self.values = [max(0, min(100, float(v))) for v in values if isinstance(v, (int, float))]
-        if tooltip:
-            self.set_tooltip_text(tooltip)
-        self.set_draw_func(self.draw)
-
-    def draw(self, _area, context, width, height):
-        points = self.values
-        if len(points) < 2 or width < 8:
-            return
-        colour = self.get_color()
-        top, bottom = 3.0, height - 2.0
-        step = (width - 2.0) / (len(points) - 1)
-        coords = [(1.0 + index * step, bottom - (bottom - top) * value / 100) for index, value in enumerate(points)]
-        context.move_to(coords[0][0], bottom)
-        for x, y in coords:
-            context.line_to(x, y)
-        context.line_to(coords[-1][0], bottom)
-        context.close_path()
-        context.set_source_rgba(colour.red, colour.green, colour.blue, 0.16)
-        context.fill()
-        context.move_to(*coords[0])
-        for x, y in coords[1:]:
-            context.line_to(x, y)
-        context.set_source_rgba(colour.red, colour.green, colour.blue, 0.9)
-        context.set_line_width(1.6)
-        context.stroke()
+def size_text(amount):
+    """Bytes as a short binary size."""
+    if not isinstance(amount, (int, float)):
+        return "—"
+    for unit, scale in (("TiB", 1024**4), ("GiB", 1024**3), ("MiB", 1024**2)):
+        if amount >= scale:
+            value = amount / scale
+            return (f"{value:.0f} " if value >= 100 else f"{value:.1f} ") + unit
+    return f"{amount / 1024:.0f} KiB"
 
 
 class Fleetlight(Adw.Application):
@@ -230,6 +302,19 @@ class Fleetlight(Adw.Application):
         self.overview_widgets = {}
         self.auto_attempted = set()
         self.auto_holdoff_until = 0
+        self.last_seen = {}
+        self.live = {}
+        self.chart = None
+        self.chart_metric = None
+        self.chart_range = None
+        self.gauges = {}
+        self.rendered_page = None
+        self.fade = None
+        self.sidebar_rows = {}
+        self.sidebar_structure = None
+        self.selecting = False
+        self.render_pending = 0
+        self.quota_warned = set()
         self.journal_path = config.state_path().with_name("update-controller.json")
         if not demo:
             try:
@@ -275,10 +360,31 @@ class Fleetlight(Adw.Application):
                         self.agent_usage[name] = dict(item, stale="Checking remaining quota…")
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
+        # The last online result of every computer: shown until the first check finishes, and the
+        # source of "last seen" facts and the Wake-on-LAN address once a computer is unreachable.
+        self.last_seen_path = config.state_path().with_name("last-seen.json")
+        if not demo:
+            try:
+                saved = json.loads(self.last_seen_path.read_text())
+                self.last_seen = {ident: item for ident, item in (saved.items() if isinstance(saved, dict) else ())
+                                  if isinstance(item, dict) and item.get("status") == "online"}
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         self.history = History() if not demo else History(Path("/nonexistent/fleetlight-demo"))
         if demo:
             self.journal_path = Path("/nonexistent/fleetlight-demo/update-controller.json")
         self.connect("activate", self.activate_window)
+        self.connect("shutdown", self.save_state)
+
+    def save_state(self, *_):
+        """History is written every few minutes while running; write the rest on the way out."""
+        if self.demo:
+            return
+        try:
+            self.history.save()
+            config.atomic_json(self.last_seen_path, self.last_seen, indent=None)
+        except OSError:
+            pass
 
     def activate_window(self, *_):
         if self.window:
@@ -294,7 +400,7 @@ class Fleetlight(Adw.Application):
             from .demo import demo_data
             self.configuration, self.snapshots = demo_data()
             self.seed_demo_history()
-        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_DARK)
+        Adw.StyleManager.get_default().set_color_scheme(SCHEMES[config.appearance(self.configuration)])
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -355,8 +461,9 @@ class Fleetlight(Adw.Application):
         header = Adw.HeaderBar()
         self.page_title = Adw.WindowTitle(title="Fleet overview", subtitle="")
         header.set_title_widget(self.page_title)
+        # Kept off screen: a spinning indicator redraws the whole window on every frame for as long
+        # as a check runs. The button's label says what is happening instead.
         self.spinner = Gtk.Spinner()
-        header.pack_end(self.spinner)
         self.refresh_button = Gtk.Button(label="Check now", tooltip_text="Check every computer now (Ctrl+R)")
         self.refresh_button.add_css_class("suggested-action")
         self.refresh_button.connect("clicked", lambda *_: self.check())
@@ -367,16 +474,16 @@ class Fleetlight(Adw.Application):
         content_view.add_top_bar(self.banner)
         # Agent quota stays visible on every page.
         content_view.add_top_bar(Adw.Clamp(maximum_size=1180, tightening_threshold=900, child=self.agent_box))
-        scroll = Gtk.ScrolledWindow(hexpand=True, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.content = margins(box(True, 18), 24)
-        scroll.set_child(Adw.Clamp(maximum_size=1180, tightening_threshold=900, child=self.content))
-        content_view.set_content(scroll)
+        self.scroller.set_child(Adw.Clamp(maximum_size=1180, tightening_threshold=900, child=self.content))
+        content_view.set_content(self.scroller)
         content_page = Adw.NavigationPage(title="Fleet overview", child=content_view, tag="content")
 
         layout = Adw.NavigationSplitView(min_sidebar_width=250, max_sidebar_width=330, sidebar_width_fraction=0.27)
         layout.set_sidebar(sidebar_page)
         layout.set_content(content_page)
-        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 900px"))
+        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 960px"))
         breakpoint.add_setter(layout, "collapsed", True)
         self.window.add_breakpoint(breakpoint)
         self.split_view = layout
@@ -418,6 +525,13 @@ class Fleetlight(Adw.Application):
             self.add_action(action)
             if accelerators:
                 self.set_accels_for_action("app." + name, accelerators)
+        for position in range(1, 10):
+            name = "jump" + str(position)
+            if not self.lookup_action(name):
+                action = Gio.SimpleAction.new(name, None)
+                action.connect("activate", lambda *_, index=position - 1: self.jump(index))
+                self.add_action(action)
+                self.set_accels_for_action("app." + name, ["<Alt>" + str(position)])
         if not self.lookup_action("show"):
             show = Gio.SimpleAction.new("show", GLib.VariantType.new("s"))
             show.connect("activate", self.show_from_notification)
@@ -445,6 +559,7 @@ class Fleetlight(Adw.Application):
         self.batch_label = label("", "muted", wrap=True)
         self.fleet_actions.append(self.batch_label)
         self.agent_box = margins(box(True, 8), 24)
+        self.agent_box.set_margin_top(14)
         self.agent_box.set_margin_bottom(0)
         self.agent_box.set_visible(False)
 
@@ -453,16 +568,30 @@ class Fleetlight(Adw.Application):
         now = time.time()
         for index, host in enumerate(self.configuration["hosts"]):
             base = self.snapshots.get(host["id"], {})
-            for step in range(48):
-                self.history.samples.append({
-                    "time": now - (47 - step) * 1800, "host": host["id"], "status": "online",
-                    "disk": max(1, (base.get("disk_percent") or 30) - 4 + round(4 * step / 47)),
-                    "memory": max(1, (base.get("memory_percent") or 30) + round(12 * math.sin(step / 4 + index)))})
+            rows = []
+            for step in range(288):
+                moment = now - (287 - step) * 300
+                wave = math.sin(step / 9 + index * 1.7) + 0.5 * math.sin(step / 2.3 + index)
+                up = 0 if index == 2 and 150 <= step < 156 else 1
+                rows.append([moment, up,
+                             max(1, (base.get("disk_percent") or 30) - 3 + round(3 * step / 287)) if up else None,
+                             max(1, round((base.get("memory_percent") or 30) + 6 * wave)) if up else None,
+                             max(1, min(100, round((base.get("cpu_percent") or 20) * (1 + 0.55 * wave)))) if up else None,
+                             base.get("load") if up else None,
+                             round(base["cpu_temperature"] + 4 * wave, 1) if up and base.get("cpu_temperature") else None,
+                             round((base.get("check_ms") or 300) * (1 + 0.2 * wave)) if up else None])
+            self.history.series[host["id"]] = rows
+            if host.get("local"):
+                self.live[host["id"]] = deque(
+                    ((now - (149 - step) * 2, max(1, round((base.get("cpu_percent") or 20) * (1 + 0.5 * math.sin(step / 6)) + 5 * math.sin(step / 1.7))),
+                      base.get("memory_percent"), base.get("cpu_temperature"), base.get("disk_percent")) for step in range(150)),
+                    maxlen=160)
         names = [h["id"] for h in self.configuration["hosts"]]
         self.history.events = [
-            {"time": now - 5400, "host": names[2 % len(names)], "message": "tailscaled: inactive"},
-            {"time": now - 3600, "host": names[2 % len(names)], "message": "Connection and services healthy"},
-            {"time": now - 900, "host": names[0], "message": "Connection and services healthy"}]
+            {"time": now - 138 * 300, "host": names[2 % len(names)], "message": "SSH connection unavailable"},
+            {"time": now - 132 * 300, "host": names[2 % len(names)], "message": "Connection and services healthy"},
+            {"time": now - 5400, "host": names[0], "message": "docker: inactive"},
+            {"time": now - 4800, "host": names[0], "message": "Connection and services healthy"}]
 
     def show_page(self, ident):
         if self.window is None:
@@ -499,14 +628,6 @@ class Fleetlight(Adw.Application):
             if site["id"] == ident:
                 return site["name"]
         return ident
-
-    def history_values(self, host_id, key):
-        cutoff = time.time() - 86400
-        rows = sorted((s for s in self.history.samples if isinstance(s, dict) and s.get("host") == host_id and s.get("time", 0) > cutoff),
-                      key=lambda s: s.get("time", 0))
-        values = [s.get(key) for s in rows if isinstance(s.get(key), (int, float))]
-        covered = (rows[-1]["time"] - rows[0]["time"]) if len(rows) > 1 else 0
-        return values, covered
 
     def notify_change(self, host_id, previous, current):
         """Desktop notification when a computer gains a problem or recovers. First results are silent."""
@@ -563,6 +684,7 @@ class Fleetlight(Adw.Application):
         self.force_update_check = force_updates
         self.busy = True
         self.refresh_button.set_sensitive(False)
+        self.refresh_button.set_label("Checking…")
         self.spinner.start()
         previous = dict(self.snapshots)
         hosts = list(self.configuration["hosts"])
@@ -629,6 +751,9 @@ class Fleetlight(Adw.Application):
             snapshot = self.snapshots.get(host["id"], {})
             if snapshot.get("status") == "online" and metrics["metrics_checked_at"] > snapshot.get("metrics_checked_at", 0):
                 self.snapshots[host["id"]] = {**snapshot, **metrics}
+                self.live.setdefault(host["id"], deque(maxlen=160)).append(
+                    (metrics["metrics_checked_at"], metrics.get("cpu_percent"), metrics.get("memory_percent"),
+                     metrics.get("cpu_temperature"), metrics.get("disk_percent")))
                 changed = True
         if changed:
             self.keep_detail = True
@@ -643,7 +768,9 @@ class Fleetlight(Adw.Application):
         current = self.snapshots.get(snapshot["id"], {})
         if snapshot.get("status") == "online" and current.get("metrics_checked_at", 0) > snapshot.get("metrics_checked_at", 0):
             snapshot = {**snapshot, **{key: current[key] for key in (
-                "metrics_checked_at", "uptime", "disk_percent", "disk_free", "memory_percent", "load", "cpu_temperature") if key in current}}
+                "metrics_checked_at", "uptime", "disk_percent", "disk_free", "disk_total", "memory_percent",
+                "memory_total", "memory_used", "swap_total", "swap_used", "load", "cpu_percent",
+                "cpu_temperature", "battery") if key in current}}
         pending = self.pending_restarts.get(snapshot["id"])
         if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
             self.pending_restarts.pop(snapshot["id"], None)
@@ -655,13 +782,22 @@ class Fleetlight(Adw.Application):
                 self.toast("Could not save restart verification")
         self.notify_change(snapshot["id"], current, snapshot)
         self.snapshots[snapshot["id"]] = snapshot
-        self.populate_hosts()
+        if snapshot.get("status") == "online":
+            self.last_seen[snapshot["id"]] = snapshot
+        self.populate_hosts(soon=True)
         return GLib.SOURCE_REMOVE
 
     def finished(self, warning):
         self.busy = False
         self.refresh_button.set_sensitive(True)
+        self.refresh_button.set_label("Check now")
         self.spinner.stop()
+        known = {host["id"] for host in self.configuration["hosts"]}
+        self.last_seen = {ident: item for ident, item in self.last_seen.items() if ident in known}
+        try:
+            config.atomic_json(self.last_seen_path, self.last_seen, indent=None)
+        except OSError:
+            pass
         self.populate_hosts()
         if warning:
             self.toast(warning)
@@ -682,6 +818,7 @@ class Fleetlight(Adw.Application):
                 item = dict(item, checked_at=time.time())
                 item.pop("stale", None)
             merged[name] = item
+        self.notify_quota(self.agent_usage, merged)
         self.agent_usage = merged
         if not self.demo:
             try:
@@ -733,34 +870,82 @@ class Fleetlight(Adw.Application):
         self.agent_box.set_visible(bool(visible))
         if not visible:
             return
-        self.agent_box.append(label("AGENT QUOTA", "eyebrow"))
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, homogeneous=True)
         for name in visible:
             data = self.agent_usage.get(name) or {"name": name.title(), "state": "checking",
                                                  "detail": "Checking remaining quota…", "remaining_percent": None}
-            card = box(True, 6)
+            remaining = data.get("remaining_percent")
+            tone = "accent" if remaining is None else "bad" if remaining <= LOW_QUOTA else "warning" if remaining <= 20 else "good"
+            card = box(False, 12)
             card.add_css_class("card")
             card.set_hexpand(True)
-            title = data.get("name") or name.title()
-            plan = data.get("plan")
-            card.append(label((title + ((" · " + plan) if plan else "")).upper(), "eyebrow"))
-            remaining = data.get("remaining_percent")
-            low = remaining is not None and remaining <= 20
-            card.append(label(f"{remaining}% left" if remaining is not None else "—", "metric"))
-            bar = Gtk.ProgressBar(fraction=max(0, min(1, (remaining or 0) / 100)))
-            bar.add_css_class("warning" if low else "good")
-            card.append(bar)
-            detail = data.get("detail") or ("Checking remaining quota…" if data.get("state") == "checking" else "Unavailable")
+            ring = self.gauge(("agent", name), remaining, f"{remaining}%" if remaining is not None else "—", tone,
+                              size=50, thickness=5, text_size=9)
+            ring.set_tooltip_text("Tightest remaining allowance")
+            card.append(ring)
+            body = box(True, 3)
+            body.set_hexpand(True)
+            body.set_valign(Gtk.Align.CENTER)
+            heading = box(False, 8)
+            heading.append(label(data.get("name") or name.title(), "row-title"))
+            if data.get("plan"):
+                plan = label(str(data["plan"]).upper(), "eyebrow", xalign=1)
+                plan.set_hexpand(True)
+                plan.set_ellipsize(3)
+                heading.append(plan)
+            body.append(heading)
+            windows = data.get("windows") if isinstance(data.get("windows"), list) else []
+            for window in windows[:4]:
+                if not isinstance(window, dict) or not isinstance(window.get("remaining_percent"), (int, float)):
+                    continue
+                left = window["remaining_percent"]
+                line = box(False, 8)
+                line.append(label(str(window.get("label", "limit")), "small"))
+                reset_at = window.get("reset_at")
+                if isinstance(reset_at, (int, float)):
+                    # Countdowns are worked out now, not when the quota was read; the weekday is enough within a week.
+                    moment = time.localtime(reset_at)
+                    day = time.strftime("%a %H:%M" if reset_at - time.time() < 6 * 86400 else "%a %d %b", moment)
+                    parts = [agent_quota.until(reset_at), day if window.get("reset_day") else ""]
+                    full = "Resets " + time.strftime("%A %d %B at %H:%M", moment) + ", in " + agent_quota.until(reset_at)
+                else:
+                    parts = [window.get("reset") or "", window.get("reset_day") or ""]
+                    full = "Resets in " + " · ".join(part for part in parts if part)
+                reset = " · ".join(part for part in parts if part)
+                if reset:
+                    when = label(reset, "small muted numeric", xalign=1)
+                    when.set_hexpand(True)
+                    when.set_ellipsize(3)
+                    when.set_tooltip_text(full)
+                    line.append(when)
+                body.append(line)
+                meter = box(False, 8)
+                bar = Gtk.ProgressBar(fraction=max(0, min(1, left / 100)), hexpand=True, valign=Gtk.Align.CENTER)
+                bar.add_css_class("thin")
+                bar.add_css_class("bad" if left <= LOW_QUOTA else "warning" if left <= 20 else "good")
+                meter.append(bar)
+                amount = label(f"{left}%", "small numeric", xalign=1)
+                amount.set_width_chars(4)
+                meter.append(amount)
+                body.append(meter)
+            note = None
             if data.get("stale"):
                 when = time.strftime("%H:%M", time.localtime(data["checked_at"])) if data.get("checked_at") else "earlier"
-                detail = f"Last known at {when} · " + data["stale"]
-            note = label(detail, "warning" if low or data.get("state") == "unavailable" or data.get("stale") else "muted", wrap=True)
-            note.set_max_width_chars(30)
-            card.append(note)
+                note = label(f"Last known at {when} · " + data["stale"], "small warning", wrap=True)
+            elif not body.get_first_child().get_next_sibling():
+                detail = data.get("detail") or ("Checking remaining quota…" if data.get("state") == "checking" else "Unavailable")
+                note = label(detail, "small " + ("warning" if data.get("state") == "unavailable" else "muted"), wrap=True)
+            if note is not None:
+                note.set_max_width_chars(28)
+                body.append(note)
+            card.append(body)
             row.append(card)
         self.agent_box.append(row)
 
-    def populate_hosts(self):
+    def populate_hosts(self, soon=False):
+        """Refresh the sidebar in place and, unless a live refresh asked to keep it, the open page.
+
+        With soon=True the page is rebuilt a moment later, so a burst of results costs one rebuild."""
         hosts = self.configuration["hosts"]
         watched = sites.configured(self.configuration)
         online = sum(self.snapshots.get(h["id"], {}).get("status") == "online" for h in hosts)
@@ -776,39 +961,29 @@ class Fleetlight(Adw.Application):
         if site_trouble:
             subtitle += f" · {site_trouble} site alert"
         self.window_title.set_subtitle(subtitle)
-        selected_id = self.selected
         query = self.search.get_text().casefold()
         filtering = self.attention.get_active()
-        self.host_list.unselect_all()
-        clear(self.host_list)
-        selected_row = None
         attention_total = 0
-        host_rows = []
+        host_entries = []
         for host in sorted(hosts, key=lambda host: not host.get("local", False)):
-            snapshot = self.snapshots.get(host["id"], {})
-            checked = bool(snapshot)
-            online_host = snapshot.get("status") == "online"
-            trouble = (issues(snapshot) if checked else []) + linux_update_issues(self.app_updates.get(host["id"]))
+            data, checked, online_host, cached, trouble, tone = self.host_state(host)
             attention_total += bool(trouble)
             if query and query not in host["name"].casefold():
                 continue
             if filtering and not trouble:
                 continue
-            css = "good" if online_host and not trouble else "warning" if online_host else "bad" if checked else None
             if trouble:
                 detail, detail_css = trouble[0], "warning"
+            elif cached:
+                detail, detail_css = "Last seen " + ago(data.get("checked_at") or 0), "muted"
             elif online_host:
-                detail = system_label(snapshot)
-                if snapshot.get("disk_percent") is not None:
-                    detail += f" · disk {snapshot['disk_percent']}%"
-                if snapshot.get("memory_percent") is not None:
-                    detail += f" · mem {snapshot['memory_percent']}%"
-                detail_css = "muted"
+                detail, detail_css = system_label(data) + " · up " + uptime(data.get("uptime")), "muted"
             else:
                 detail, detail_css = ("Local computer" if host.get("local") else "Waiting for first check"), "muted"
-            badge = str(len(trouble)) if online_host and trouble else None
-            host_rows.append(self.sidebar_row(host["id"], host["name"], detail, detail_css, status_dot(css), badge))
-        site_rows = []
+            host_entries.append({"id": host["id"], "title": host["name"], "detail": detail, "detail_css": detail_css,
+                                 "tone": tone, "badge": str(len(trouble)) if online_host and trouble else None,
+                                 "usage": self.usage(data) if online_host else None})
+        site_entries = []
         for site in watched:
             status = self.site_status.get(site["id"], {})
             trouble = sites.issues(status)
@@ -818,62 +993,102 @@ class Fleetlight(Adw.Application):
             if filtering and not trouble:
                 continue
             state = status.get("state")
-            css = "good" if state == "ok" else "warning" if state else None
-            site_rows.append(self.sidebar_row(site["id"], site["name"], status.get("detail") or "Website catalogue",
-                                              "warning" if trouble else "muted", status_dot(css)))
+            site_entries.append({"id": site["id"], "title": site["name"], "detail": status.get("detail") or "Website catalogue",
+                                 "detail_css": "warning" if trouble else "muted",
+                                 "tone": "good" if state == "ok" else "warning" if state else None})
+        entries = []
         if not query:
-            icon = Gtk.Image.new_from_icon_name("view-grid-symbolic")
-            icon.set_pixel_size(16)
-            overview = self.sidebar_row(OVERVIEW, "Fleet overview", summary, "muted", icon,
-                                        str(attention_total) if attention_total else None)
-            self.host_list.append(overview)
-            if selected_id == OVERVIEW:
-                selected_row = overview
-        if host_rows:
-            self.host_list.append(self.sidebar_header("Computers"))
-        for row in host_rows:
-            self.host_list.append(row)
-            if row.host_id == selected_id:
-                selected_row = row
-        if site_rows:
-            self.host_list.append(self.sidebar_header("Websites"))
-        for row in site_rows:
-            self.host_list.append(row)
-            if row.host_id == selected_id:
-                selected_row = row
-        row = selected_row or self.first_selectable_row()
-        if row:
-            self.host_list.select_row(row)
-        else:
-            self.selected = None
+            entries.append({"id": OVERVIEW, "title": "Fleet overview", "detail": summary, "detail_css": "muted",
+                            "icon": "view-grid-symbolic", "badge": str(attention_total) if attention_total else None})
+        if host_entries:
+            entries.append({"header": "Computers"})
+        entries += host_entries
+        if site_entries:
+            entries.append({"header": "Websites"})
+        entries += site_entries
+        structure = [("header", entry["header"]) if "header" in entry else ("row", entry["id"]) for entry in entries]
+        before = self.selected
+        visible = [ident for kind, ident in structure if kind == "row"]
+        if self.selected not in visible:
+            self.selected = visible[0] if visible else None
+        self.selecting = True
+        try:
+            if structure != self.sidebar_structure:
+                self.host_list.unselect_all()
+                clear(self.host_list)
+                self.sidebar_rows = {}
+                for entry in entries:
+                    if "header" in entry:
+                        self.host_list.append(self.sidebar_header(entry["header"]))
+                    else:
+                        row = self.sidebar_row(entry)
+                        self.sidebar_rows[entry["id"]] = row
+                        self.host_list.append(row)
+                self.sidebar_structure = structure
+            else:
+                for entry in entries:
+                    if "header" not in entry:
+                        self.update_sidebar_row(self.sidebar_rows[entry["id"]], entry)
+            row = self.sidebar_rows.get(self.selected)
+            if row is not None and self.host_list.get_selected_row() is not row:
+                self.host_list.select_row(row)
+        finally:
+            self.selecting = False
+        if not visible:
             self.metric_widgets = None
+            self.overview_widgets = {}
+            self.chart = None
+            self.rendered_page = None
             clear(self.content)
             self.page_title.set_title("Fleetlight")
             self.page_title.set_subtitle("")
             self.content.append(Adw.StatusPage(title="No computers match", description="Change the search or attention filter.", icon_name="system-search-symbolic"))
+        elif not (self.keep_detail and self.selected == before and self.content.get_first_child() is not None):
+            if soon and self.selected == self.rendered_page:
+                if not self.render_pending:
+                    self.render_pending = GLib.timeout_add(300, self.render_later)
+            else:
+                self.render_detail()
 
-    def sidebar_row(self, ident, title, detail, detail_css, leading, badge=None):
+    def render_later(self):
+        self.render_pending = 0
+        if self.window is not None and self.selected is not None:
+            self.render_detail()
+        return GLib.SOURCE_REMOVE
+
+    def sidebar_row(self, entry):
         row = Gtk.ListBoxRow()
-        row.host_id = ident
+        row.host_id = entry["id"]
         body = box(False, 10)
-        body.set_margin_top(2)
-        body.set_margin_bottom(2)
+        body.set_margin_top(3)
+        body.set_margin_bottom(3)
+        if entry.get("icon"):
+            leading = Gtk.Image.new_from_icon_name(entry["icon"])
+            leading.set_pixel_size(16)
+            row.dot = None
+        else:
+            leading = status_dot()
+            row.dot = leading.dot
         leading.set_valign(Gtk.Align.CENTER)
         body.append(leading)
         names = box(True, 2)
         names.set_hexpand(True)
-        name = label(title, "row-title")
-        name.set_ellipsize(3)
-        names.append(name)
-        note = label(detail, detail_css)
-        note.set_ellipsize(3)
-        names.append(note)
+        row.name = label("", "row-title")
+        row.name.set_ellipsize(3)
+        names.append(row.name)
+        row.note = label("")
+        row.note.set_ellipsize(3)
+        names.append(row.note)
         body.append(names)
-        if badge:
-            count = label(badge, "badge warning")
-            count.set_valign(Gtk.Align.CENTER)
-            body.append(count)
+        row.bars = MiniBars((None, None, None), (None, None, None))
+        row.bars.set_visible(False)
+        body.append(row.bars)
+        row.badge = label("", "badge warning")
+        row.badge.set_valign(Gtk.Align.CENTER)
+        row.badge.set_visible(False)
+        body.append(row.badge)
         row.set_child(body)
+        self.update_sidebar_row(row, entry)
         return row
 
     def sidebar_header(self, title):
@@ -886,42 +1101,28 @@ class Fleetlight(Adw.Application):
         row.set_child(heading)
         return row
 
-    def first_selectable_row(self):
-        index = 0
-        while True:
-            row = self.host_list.get_row_at_index(index)
-            if row is None or row.get_selectable():
-                return row
-            index += 1
-
     def select_host(self, _, row):
-        if row and row.get_selectable():
-            same = row.host_id == self.selected and self.content.get_first_child() is not None
+        if self.selecting or row is None or not row.get_selectable():
+            return
+        if row.host_id != self.selected or self.content.get_first_child() is None:
             self.selected = row.host_id
-            if same and self.keep_detail:
-                return
             self.render_detail()
 
     def render_site(self, site):
         self.metric_widgets = None
         self.overview_widgets = {}
+        self.chart = None
         status = self.site_status.get(site["id"], {})
         trouble = sites.issues(status)
         clear(self.content)
         self.page_title.set_title(site["name"])
         self.page_title.set_subtitle(status.get("detail") or "Website")
-        hero = box(False, 12)
-        headings = box(True, 4)
-        headings.set_hexpand(True)
-        headings.append(label("WEBSITE", "eyebrow"))
-        headings.append(label(site["name"], "hero", wrap=True))
-        headings.append(label(site.get("url") or "", "muted", wrap=True))
-        hero.append(headings)
         state = status.get("state")
         badge_text = "Current" if state == "ok" else "Needs attention" if trouble else "Checking" if self.busy else "Not checked yet"
         badge = label(badge_text, "pill " + ("good" if state == "ok" else "warning" if trouble else "muted"))
-        badge.set_valign(Gtk.Align.CENTER)
-        hero.append(badge)
+        tile = icon_tile("web-browser-symbolic", "good" if state == "ok" else "warning" if trouble else None, large=True)
+        hero, _ = self.hero_card(tile, "WEBSITE", site["name"], [site.get("url") or ""],
+                                 "attention" if trouble else None if state == "ok" else "quiet", badge)
         self.content.append(hero)
         if trouble:
             self.content.append(self.alert_card(trouble))
@@ -953,70 +1154,74 @@ class Fleetlight(Adw.Application):
         return alert
 
     def render_detail(self):
+        if self.render_pending:
+            GLib.source_remove(self.render_pending)
+            self.render_pending = 0
+        changed = self.selected != self.rendered_page
+        if changed:
+            # A new page sweeps its gauges up from zero; the agent strip keeps its place.
+            self.gauges = {key: value for key, value in self.gauges.items() if key[0] == "agent"}
         self.rebuilding_detail = True
         try:
             self._render_detail_now()
         finally:
             self.rebuilding_detail = False
+        self.rendered_page = self.selected
+        if changed and self.window is not None:
+            self.scroller.get_vadjustment().set_value(0)
+            self.fade = Adw.TimedAnimation.new(self.content, 0.35, 1, 220, Adw.PropertyAnimationTarget.new(self.content, "opacity"))
+            self.fade.play()
 
     def update_open_metrics(self):
+        """Apply live readings to the widgets already on screen instead of rebuilding the page."""
         if self.selected == OVERVIEW:
             for host_id, widgets in (self.overview_widgets or {}).items():
                 data = self.snapshots.get(host_id, {})
-                for key in ("disk", "memory"):
-                    value = data.get(key + "_percent")
-                    widgets[key].set_text(f"{value}%" if value is not None else "—")
-                    widgets[key + "_bar"].set_fraction(max(0, min(1, (value or 0) / 100)))
-                if data.get("status") == "online":
-                    widgets["foot"].set_text(self.host_footnote(host_id, data))
+                if data.get("status") != "online":
+                    continue
+                for key, value, tone in self.usage(data):
+                    self.move_gauge(("card", host_id, key), widgets[key], value, f"{value}%" if value is not None else "—", tone)
+                foot = self.host_footnote(host_id, data)
+                if widgets["foot"].get_text() != foot:
+                    widgets["foot"].set_text(foot)
             return
         widgets = self.metric_widgets or {}
         if widgets.get("host") != self.selected:
             return
         data = self.snapshots.get(self.selected, {})
-        disk = data.get("disk_percent")
-        memory = data.get("memory_percent")
-        widgets["disk"].set_text(f"{disk}%" if disk is not None else "—")
-        widgets["disk_hint"].set_text(f"{data.get('disk_free', 0) / 1024**3:.1f} GiB free")
-        widgets["disk_bar"].set_fraction(max(0, min(1, (disk or 0) / 100)))
-        widgets["memory"].set_text(f"{memory}%" if memory is not None else "—")
-        widgets["memory_bar"].set_fraction(max(0, min(1, (memory or 0) / 100)))
-        widgets["summary"].set_text(self.host_summary(widgets["hostref"], data))
-        cpu_value, cpu_hint, load_fraction, load_css = self.cpu_summary(data)
-        widgets["cpu"].set_text(cpu_value)
-        widgets["load"].set_text(cpu_hint)
-        widgets["load_bar"].set_fraction(load_fraction)
-        for name in ("warning", "bad"):
-            widgets["load_bar"].remove_css_class(name)
-        if load_css:
-            widgets["load_bar"].add_css_class(load_css)
+        for key, value, tone in self.usage(data):
+            self.move_gauge(("page", self.selected, key), widgets[key], value, f"{value}%" if value is not None else "—", tone)
+        hints = self.metric_hints(data)
+        for key in ("cpu", "memory", "disk"):
+            if widgets[key + "_hint"].get_text() != hints[key]:
+                widgets[key + "_hint"].set_text(hints[key])
+        temperature = data.get("cpu_temperature")
+        if "temperature" in widgets and temperature is not None:
+            self.move_gauge(("page", self.selected, "temperature"), widgets["temperature"], temperature,
+                            f"{temperature:.0f}°", usage_css(temperature, 75, 90) or "accent")
+        summary = self.host_summary(widgets["hostref"], data)
+        if widgets["summary"].get_text() != summary:
+            widgets["summary"].set_text(summary)
+        if self.chart and self.chart.get("range") == "live":
+            self.refresh_chart()
 
     def host_summary(self, host, data):
         parts = [system_label(data, "This computer" if host.get("local") else "Secure Shell")]
         if data.get("status") == "online" and data.get("uptime") is not None:
             parts.append("up " + uptime(data.get("uptime")))
-        parts.append(age(data.get("checked_at")))
+        parts.append(("Last seen " + ago(data["checked_at"])) if data.get("cached") and data.get("checked_at") else age(data.get("checked_at")))
         return "  ·  ".join(parts)
-
-    def cpu_summary(self, data):
-        """Value, hint, load fraction and colour for the CPU card. Temperature leads when a sensor exists."""
-        load = data.get("load")
-        cpus = data.get("cpus") or 0
-        fraction = max(0.0, min(1.0, load / cpus)) if isinstance(load, (int, float)) and cpus else 0.0
-        css = "bad" if fraction >= 1 else "warning" if fraction >= 0.7 else None
-        temperature = data.get("cpu_temperature")
-        load_text = f"Load {load} · {cpus} CPUs" if load is not None else "Waiting for a check"
-        if temperature is not None:
-            return f"{temperature:.1f} °C", load_text + " · hottest sensor", fraction, css
-        if load is not None:
-            return f"{load}", f"Load average · {cpus} CPUs · no CPU sensor", fraction, css
-        return "—", load_text, fraction, css
 
     def host_footnote(self, host_id, data):
         trouble = issues(data) + linux_update_issues(self.app_updates.get(host_id))
         if trouble:
             return trouble[0]
-        return f"Healthy · load {data.get('load', '—')} · {data.get('cpus', '—')} CPUs"
+        parts = ["Healthy", f"load {data.get('load', '—')}"]
+        if data.get("cpu_temperature") is not None:
+            parts.append(f"{data['cpu_temperature']:.0f} °C")
+        elif data.get("cpus"):
+            parts.append(f"{data['cpus']} CPUs")
+        return " · ".join(parts)
 
     def _render_detail_now(self):
         self.render_batch()
@@ -1035,18 +1240,20 @@ class Fleetlight(Adw.Application):
     def render_overview(self):
         self.metric_widgets = None
         self.overview_widgets = {}
+        self.chart = None
         hosts = self.configuration["hosts"]
         watched = sites.configured(self.configuration)
         clear(self.content)
         trouble_by_id = {}
         online = 0
         checked_times = []
+        groups = {"good": 0, "warning": 0, "bad": 0, None: 0}
         for host in hosts:
-            data = self.snapshots.get(host["id"], {})
-            online += data.get("status") == "online"
-            if data.get("checked_at"):
+            data, checked, online_host, _cached, trouble, tone = self.host_state(host)
+            online += checked and online_host
+            groups[tone] += 1
+            if checked and data.get("checked_at"):
                 checked_times.append(data["checked_at"])
-            trouble = (issues(data) if data else []) + linux_update_issues(self.app_updates.get(host["id"]))
             if trouble:
                 trouble_by_id[host["id"]] = (host["name"], trouble)
         for site in watched:
@@ -1057,8 +1264,6 @@ class Fleetlight(Adw.Application):
         restarts = len(updates.batch_candidates(hosts, self.snapshots, self.app_updates, "restart")[0])
         self.page_title.set_title("Fleet overview")
         self.page_title.set_subtitle(f"{online} of {len(hosts)} online")
-        hero = box(True, 4)
-        hero.append(label("YOUR FLEET", "eyebrow"))
         if not checked_times and not self.demo:
             headline = "Checking your computers…"
         elif trouble_by_id:
@@ -1066,29 +1271,25 @@ class Fleetlight(Adw.Application):
             headline = f"{count} " + ("item needs" if count == 1 else "items need") + " attention"
         else:
             headline = "Everything looks healthy"
-        hero.append(label(headline, "hero", wrap=True))
         parts = [f"{len(hosts)} computer" + ("s" if len(hosts) != 1 else "")]
         if watched:
             parts.append(f"{len(watched)} website" + ("s" if len(watched) != 1 else ""))
         parts.append(age(max(checked_times)) if checked_times else "Not checked yet")
-        hero.append(label(" · ".join(parts), "muted", wrap=True))
+        ring = FleetRing([(groups["good"], "good"), (groups["warning"], "warning"), (groups["bad"], "bad"), (groups[None], None)],
+                         f"{online}/{len(hosts)}", "online")
+        ring.set_tooltip_text(f"{groups['good']} healthy · {groups['warning']} need attention · {groups['bad']} unreachable")
+        hero, words = self.hero_card(ring, "YOUR FLEET", headline, [" · ".join(parts)],
+                                     "offline" if groups["bad"] else "attention" if trouble_by_id else None)
+        stats = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, homogeneous=True)
+        stats.set_margin_top(8)
+        for icon_name, value, caption, css in (
+                ("network-server-symbolic", f"{online}/{len(hosts)}", "online", "good" if online == len(hosts) else "warning"),
+                ("dialog-warning-symbolic", str(len(trouble_by_id)), "need attention", "warning" if trouble_by_id else None),
+                ("software-update-available-symbolic", str(available), "updates ready", "accent-text" if available else None),
+                ("system-reboot-symbolic", str(restarts), "restarts pending", "warning" if restarts else None)):
+            stats.append(self.stat(icon_name, value, caption, css))
+        words.append(stats)
         self.content.append(hero)
-        tiles = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
-                            min_children_per_line=2, max_children_per_line=4, row_spacing=12, column_spacing=12)
-        for title, value, hint, css in (
-            ("ONLINE", f"{online}/{len(hosts)}", "computers reachable", "good" if online == len(hosts) else "warning"),
-            ("NEEDS ATTENTION", str(len(trouble_by_id)), "computers and websites", "warning" if trouble_by_id else "good"),
-            ("UPDATES AVAILABLE", str(available), "Codex, Claude, ChatGPT, packages", "warning" if available else None),
-            ("RESTARTS PENDING", str(restarts), "after package upgrades", "warning" if restarts else None),
-        ):
-            tile = box(True, 4)
-            tile.add_css_class("card")
-            tile.add_css_class("tile")
-            tile.append(label(title, "eyebrow"))
-            tile.append(label(value, ("metric " + css) if css else "metric"))
-            tile.append(label(hint, "muted"))
-            tiles.append(tile)
-        self.content.append(tiles)
         if trouble_by_id:
             group = self.section("Needs attention", "Select an item to open it")
             for ident, (name, trouble) in trouble_by_id.items():
@@ -1102,10 +1303,10 @@ class Fleetlight(Adw.Application):
                 group.add(row)
         heading = box(True, 2)
         heading.append(label("Computers", "section-title"))
-        heading.append(label("Select a computer for details, history and actions", "muted"))
+        heading.append(label("CPU, memory and disk in use, with reachability over the last 24 hours", "muted", wrap=True))
         self.content.append(heading)
         grid = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
-                           min_children_per_line=1, max_children_per_line=3, row_spacing=12, column_spacing=12)
+                           min_children_per_line=1, max_children_per_line=2, row_spacing=12, column_spacing=12)
         for host in sorted(hosts, key=lambda host: not host.get("local", False)):
             grid.append(self.host_card(host))
         self.content.append(grid)
@@ -1120,62 +1321,62 @@ class Fleetlight(Adw.Application):
         if recent:
             activity = self.section("Recent activity", "Status and service changes saved on this computer")
             for event in reversed(recent):
-                row = Adw.ActionRow(title=self.host_name(event.get("host")), subtitle=event.get("message", ""))
-                row.set_subtitle_lines(2)
-                stamp = label(time.strftime("%a %H:%M", time.localtime(event.get("time", 0))), "muted")
-                stamp.set_valign(Gtk.Align.CENTER)
-                row.add_suffix(stamp)
-                activity.add(row)
+                activity.add(self.event_row(event, self.host_name(event.get("host")), event.get("message", ""), "%a %H:%M"))
         self.content.append(label(f"Full checks every {self.configuration.get('refresh_seconds', 60)} seconds · Application release checks every 15 minutes", "muted", wrap=True))
 
     def host_card(self, host):
-        data = self.snapshots.get(host["id"], {})
-        checked = bool(data)
-        online = data.get("status") == "online"
-        trouble = (issues(data) if checked else []) + linux_update_issues(self.app_updates.get(host["id"]))
-        card = box(True, 8)
+        data, checked, online, cached, trouble, tone = self.host_state(host)
+        card = box(True, 12)
         card.add_css_class("card")
-        top = box(False, 8)
-        top.append(status_dot("good" if online and not trouble else "warning" if online else "bad" if checked else None))
+        top = box(False, 12)
+        top.append(icon_tile(host_icon(host, data), tone))
+        names = box(True, 2)
+        names.set_hexpand(True)
+        names.set_valign(Gtk.Align.CENTER)
         name = label(host["name"], "section-title")
         name.set_ellipsize(3)
-        name.set_hexpand(True)
-        top.append(name)
-        icon = Gtk.Image.new_from_icon_name("computer-symbolic" if host.get("local") else "network-server-symbolic")
-        icon.add_css_class("muted")
-        top.append(icon)
-        card.append(top)
+        name.set_width_chars(9)
+        names.append(name)
         if online:
             subtitle = system_label(data) + " · up " + uptime(data.get("uptime"))
         elif checked:
-            subtitle = data.get("error") or "Unavailable"
+            subtitle = "Unreachable"
         else:
             subtitle = "Waiting for first check"
-        note = label(subtitle, "muted")
+        note = label(subtitle, "muted small")
         note.set_ellipsize(3)
-        card.append(note)
+        names.append(note)
+        top.append(names)
         widgets = {}
-        for key, title, warn, bad in (("disk", "Disk", 80, 90), ("memory", "Memory", 80, 95)):
-            value = data.get(key + "_percent") if online else None
-            line = box(False, 8)
-            caption = label(title, "muted")
-            caption.set_size_request(58, -1)
-            line.append(caption)
-            bar = Gtk.ProgressBar(fraction=max(0, min(1, (value or 0) / 100)), hexpand=True, valign=Gtk.Align.CENTER)
-            css = usage_css(value, warn, bad)
-            if css:
-                bar.add_css_class(css)
-            line.append(bar)
-            amount = label(f"{value}%" if value is not None else "—", "muted", xalign=1)
-            amount.set_width_chars(4)
-            line.append(amount)
-            card.append(line)
-            widgets[key] = amount
-            widgets[key + "_bar"] = bar
-        foot = label(self.host_footnote(host["id"], data) if online else (trouble[0] if trouble else "—"),
-                     "warning" if trouble else "muted")
+        for (key, value, colour), caption in zip(self.usage(data), ("CPU", "MEM", "DISK")):
+            holder = box(True, 3)
+            ring = self.gauge(("card", host["id"], key), value, f"{value}%" if value is not None else "—", colour,
+                              size=46, thickness=5, text_size=8.2)
+            holder.append(ring)
+            holder.append(label(caption, "eyebrow", xalign=0.5))
+            top.append(holder)
+            widgets[key] = ring
+        card.append(top)
+        bottom = box(False, 12)
+        if trouble:
+            text = trouble[0]
+        elif cached:
+            text = "Last seen " + ago(data.get("checked_at") or 0) + " · checking now"
+        elif online:
+            text = self.host_footnote(host["id"], data)
+        else:
+            text = "—"
+        foot = label(text, "small " + ("warning" if trouble else "muted"))
         foot.set_ellipsize(3)
-        card.append(foot)
+        foot.set_hexpand(True)
+        bottom.append(foot)
+        now = time.time()
+        strip = AvailabilityStrip(self.history.availability(host["id"], now - 86400, now, 24), now - 86400, now, height=8)
+        strip.set_hexpand(False)
+        strip.set_size_request(132, -1)
+        strip.set_valign(Gtk.Align.CENTER)
+        bottom.append(strip)
+        card.append(bottom)
         widgets["foot"] = foot
         self.overview_widgets[host["id"]] = widgets
         button = Gtk.Button(child=card, tooltip_text="Open " + host["name"])
@@ -1184,88 +1385,117 @@ class Fleetlight(Adw.Application):
         button.connect("clicked", lambda *_: self.show_page(host["id"]))
         return button
 
-    def metric_card(self, title, value_text, hint, bar_value=None, bar_css=None, sparkline=None):
-        card = box(True, 8)
-        card.add_css_class("card")
-        card.set_hexpand(True)
-        card.append(label(title, "eyebrow"))
-        value = label(value_text, "metric")
-        card.append(value)
-        bar = None
-        if bar_value is not None:
-            bar = Gtk.ProgressBar(fraction=max(0, min(1, bar_value)))
-            if bar_css:
-                bar.add_css_class(bar_css)
-            card.append(bar)
-        if sparkline is not None:
-            card.append(sparkline)
-        note = label(hint, "muted", wrap=True)
-        note.set_max_width_chars(24)
-        card.append(note)
-        return card, value, bar, note
-
     def render_host(self, host):
         self.overview_widgets = {}
-        data = self.snapshots.get(host["id"], {})
-        checked = bool(data)
-        online = data.get("status") == "online"
+        self.metric_widgets = None
+        self.chart = None
+        data, checked, online, cached, trouble, tone = self.host_state(host)
         clear(self.content)
         system_name = system_label(data, "This computer" if host.get("local") else "Secure Shell")
         self.page_title.set_title(host["name"])
         self.page_title.set_subtitle(system_name + " · " + age(data.get("checked_at")))
-        hero = box(False, 12)
-        headings = box(True, 4)
-        headings.set_hexpand(True)
-        headings.append(label("LOCAL COMPUTER" if host.get("local") else "SSH COMPUTER", "eyebrow"))
-        headings.append(label(host["name"], "hero", wrap=True))
         summary_label = label(self.host_summary(host, data), "muted", wrap=True)
-        headings.append(summary_label)
-        facts = [data.get("hostname"), (("Linux " if data.get("os") == "Linux" else "") + data["kernel"]) if data.get("kernel") else None,
-                 data.get("architecture")]
-        if online and any(facts):
-            headings.append(label("  ·  ".join(str(item) for item in facts if item), "muted", wrap=True))
-        hero.append(headings)
-        status = "Online" if online else "Checking" if self.busy else "Unavailable" if checked else "Not checked yet"
-        badge = label(status, "pill " + ("good" if online else "bad" if checked and not self.busy else "warning"))
-        badge.set_valign(Gtk.Align.CENTER)
-        hero.append(badge)
+        status = ("Last seen " + ago(data.get("checked_at") or 0)) if cached else "Online" if online else "Checking" if self.busy else "Unavailable" if checked else "Not checked yet"
+        badge = label(status, "pill " + ("muted" if cached else "good" if online else "bad" if checked and not self.busy else "warning"))
+        hero, words = self.hero_card(icon_tile(host_icon(host, data), tone, large=True),
+                                     "LOCAL COMPUTER" if host.get("local") else "SSH COMPUTER", host["name"], [summary_label],
+                                     "offline" if tone == "bad" else "attention" if tone == "warning" else "quiet" if tone is None else None,
+                                     badge)
+        if online:
+            chips = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=8, min_children_per_line=1,
+                                row_spacing=6, column_spacing=6, halign=Gtk.Align.START)
+            chips.set_margin_top(6)
+            facts = [(data.get("hostname"), "computer-symbolic"),
+                     ((("Linux " if data.get("os") == "Linux" else "Darwin " if data.get("os") == "Darwin" else "") + data["kernel"]) if data.get("kernel") else None, "emblem-system-symbolic"),
+                     (data.get("architecture"), "application-x-firmware-symbolic")]
+            network = data.get("network") or {}
+            if network.get("interface"):
+                facts.append((network["interface"], "network-wireless-symbolic" if network.get("wireless") else "network-wired-symbolic"))
+            battery = data.get("battery") or {}
+            if battery.get("percent") is not None:
+                charging = battery.get("state") in ("charging", "charged", "full", "ac attached", "finishing charge")
+                facts.append((f"{battery['percent']}% · {battery.get('state') or 'battery'}",
+                              "battery-good-charging-symbolic" if charging else "battery-symbolic"))
+            for text, icon_name in facts:
+                if text:
+                    child = Gtk.FlowBoxChild(child=chip(str(text), icon_name), focusable=False, halign=Gtk.Align.START)
+                    chips.append(child)
+            words.append(chips)
         self.content.append(hero)
-        trouble = (issues(data) if checked else []) + linux_update_issues(self.app_updates.get(host["id"]))
         if trouble:
             self.content.append(self.alert_card(trouble))
-        metrics = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
-                              min_children_per_line=1, max_children_per_line=3, row_spacing=12, column_spacing=12)
-        widgets = {"host": host["id"], "summary": summary_label, "hostref": host}
-        disk = data.get("disk_percent") if online else None
-        values, covered = self.history_values(host["id"], "disk")
-        spark = Sparkline(values, f"Root disk over the last {span(covered)} · {len(values)} checks") if len(values) > 1 else None
-        if spark is not None:
-            spark.add_css_class(usage_css(disk, 80, 90) or "good")
-        card, widgets["disk"], widgets["disk_bar"], widgets["disk_hint"] = self.metric_card(
-            "ROOT DISK", f"{disk}%" if disk is not None else "—",
-            f"{data.get('disk_free', 0) / 1024**3:.1f} GiB free" if online else "Waiting for a check",
-            (disk or 0) / 100, usage_css(disk, 80, 90), spark)
-        metrics.append(card)
-        memory = data.get("memory_percent") if online else None
-        values, covered = self.history_values(host["id"], "memory")
-        spark = Sparkline(values, f"Memory over the last {span(covered)} · {len(values)} checks") if len(values) > 1 else None
-        if spark is not None:
-            spark.add_css_class(usage_css(memory, 80, 95) or "good")
-        card, widgets["memory"], widgets["memory_bar"], _ = self.metric_card(
-            "MEMORY", f"{memory}%" if memory is not None else "—", "Physical memory in use",
-            (memory or 0) / 100, usage_css(memory, 80, 95), spark)
-        metrics.append(card)
-        cpu_value, cpu_hint, load_fraction, load_css = self.cpu_summary(data if online else {})
-        card, widgets["cpu"], widgets["load_bar"], widgets["load"] = self.metric_card(
-            "CPU", cpu_value, cpu_hint, load_fraction, load_css)
-        metrics.append(card)
-        self.content.append(metrics)
-        self.metric_widgets = widgets
+        if online:
+            gauges = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, homogeneous=True)
+            widgets = {"host": host["id"], "summary": summary_label, "hostref": host}
+            hints = self.metric_hints(data)
+            for (key, value, colour), title in zip(self.usage(data), ("CPU", "MEMORY", "ROOT DISK")):
+                ring = self.gauge(("page", host["id"], key), value, f"{value}%" if value is not None else "—", colour,
+                                  size=92, thickness=9, text_size=15)
+                card, widgets[key + "_hint"] = self.gauge_card(title, ring, hints[key])
+                widgets[key] = ring
+                gauges.append(card)
+            temperature = data.get("cpu_temperature")
+            if temperature is not None:
+                ring = self.gauge(("page", host["id"], "temperature"), temperature, f"{temperature:.0f}°",
+                                  usage_css(temperature, 75, 90) or "accent", size=92, thickness=9, text_size=15)
+                widgets["temperature"] = ring
+                gauges.append(self.gauge_card("TEMPERATURE", ring, "Hottest CPU sensor, °C")[0])
+            else:
+                seconds = data.get("check_ms", 0) / 1000
+                ring = self.gauge(("page", host["id"], "check"), min(100, 100 * seconds / 5) if seconds else None,
+                                  f"{seconds:.1f}s" if seconds else "—", "accent" if seconds < 4 else "warning",
+                                  size=92, thickness=9, text_size=15)
+                gauges.append(self.gauge_card("CHECK TIME", ring, "Last full check" if seconds else "No verified receipt yet")[0])
+            self.content.append(gauges)
+            self.metric_widgets = widgets
+        elif checked and self.last_seen.get(host["id"]):
+            seen = self.last_seen[host["id"]]
+            last = self.section("Last seen online", "From the most recent successful check")
+            when = seen.get("checked_at")
+            self.detail_row(last, "When", (time.strftime("%a %d %b %H:%M", time.localtime(when)) + " · " + ago(when)) if when else "Unknown",
+                            "preferences-system-time-symbolic")
+            self.detail_row(last, "System", system_label(seen, "Unknown"), "computer-symbolic")
+            if seen.get("hostname"):
+                self.detail_row(last, "Hostname", seen["hostname"], "network-server-symbolic")
+            if (seen.get("network") or {}).get("mac") and not host.get("local"):
+                row = Adw.ActionRow(title="Wake-on-LAN", subtitle="Sends a wake signal on this network. The computer must allow it in its firmware and be on the same local network.")
+                row.add_prefix(Gtk.Image.new_from_icon_name("system-shutdown-symbolic"))
+                wake = Gtk.Button(label="Wake", valign=Gtk.Align.CENTER)
+                wake.add_css_class("suggested-action")
+                wake.set_sensitive(not self.demo)
+                wake.connect("clicked", lambda *_: self.wake(host))
+                row.add_suffix(wake)
+                last.add(row)
+        if online or self.history.series.get(host["id"]):
+            self.content.append(self.history_card(host))
+        if online and len(data.get("disks") or []) > 1:
+            storage = self.section("Storage", "Mounted local filesystems")
+            for disk in data["disks"][:8]:
+                if not isinstance(disk, dict) or not isinstance(disk.get("percent"), (int, float)):
+                    continue
+                row = Adw.ActionRow(title=GLib.markup_escape_text(str(disk.get("mount", "?"))),
+                                    subtitle=size_text(disk.get("free")) + " free of " + size_text(disk.get("total")))
+                row.add_prefix(Gtk.Image.new_from_icon_name("drive-harddisk-symbolic"))
+                bar = Gtk.ProgressBar(fraction=max(0, min(1, disk["percent"] / 100)), valign=Gtk.Align.CENTER)
+                bar.set_size_request(150, -1)
+                css = usage_css(disk["percent"], 80, 90)
+                if css:
+                    bar.add_css_class(css)
+                row.add_suffix(bar)
+                amount = label(f"{disk['percent']}%", "numeric " + (css or "muted"), xalign=1)
+                amount.set_width_chars(4)
+                amount.set_valign(Gtk.Align.CENTER)
+                row.add_suffix(amount)
+                storage.add(row)
+        processes = data.get("processes") if online and isinstance(data.get("processes"), dict) else None
+        if processes and (processes.get("cpu") or processes.get("memory")):
+            self.content.append(self.process_card(processes))
+        installed = data if online else {}
         apps = self.section("Applications", "Installed and available versions")
-        self.update_row(apps, host, "cli", "Codex CLI", data.get("codex"), "utilities-terminal-symbolic")
-        self.update_row(apps, host, "claude", "Claude CLI", data.get("claude"), "utilities-terminal-symbolic")
-        desktop = data.get("chatgpt", {})
-        self.update_row(apps, host, "desktop", "ChatGPT", desktop.get("version"), "applications-internet-symbolic")
+        self.update_row(apps, host, "cli", "Codex CLI", installed.get("codex"), "utilities-terminal-symbolic")
+        self.update_row(apps, host, "claude", "Claude CLI", installed.get("claude"), "utilities-terminal-symbolic")
+        desktop = installed.get("chatgpt", {})
+        self.update_row(apps, host, "desktop", "ChatGPT", desktop.get("version"), "web-browser-symbolic")
         if self.active_job and self.active_job["host"]["id"] == host["id"]:
             progress = Gtk.ProgressBar()
             progress.pulse()
@@ -1275,18 +1505,18 @@ class Fleetlight(Adw.Application):
         if data.get("os") == "Linux":
             system_card = self.section("Linux updates", "Distribution packages and restart status")
             checked_updates = self.app_updates.get(host["id"], {})
-            for kind, title in (("system", "System packages"), ("restart", "Restart")):
+            for kind, title, icon_name in (("system", "System packages", "software-update-available-symbolic"), ("restart", "Restart", "system-reboot-symbolic")):
                 status = checked_updates.get(kind, {})
-                self.detail_row(system_card, title, status.get("detail", "Checking…"), "system-software-update-symbolic",
+                self.detail_row(system_card, title, status.get("detail", "Checking…"), icon_name,
                                 "warning" if status.get("state") in ("available", "protected", "unknown") else "muted")
         services = self.section("Services", "Configured system services")
-        states = data.get("services", {})
+        states = data.get("services", {}) if online else {}
         for name in host.get("services", []):
             state = states.get(name, "not checked")
             optional = name in host.get("optional_services", [])
-            neutral = state == "unsupported" or (optional and state in ("inactive", "not installed"))
+            neutral = state in ("unsupported", "not checked") or (optional and state in ("inactive", "not installed"))
             row = Adw.ActionRow(title=name, subtitle="Optional" if optional else "Expected to run")
-            row.add_prefix(Gtk.Image.new_from_icon_name("emblem-system-symbolic"))
+            row.add_prefix(status_dot("good" if state == "active" else None if neutral else "warning"))
             state_label = label(state, "good" if state == "active" else "muted" if neutral else "warning")
             state_label.set_valign(Gtk.Align.CENTER)
             row.add_suffix(state_label)
@@ -1297,21 +1527,31 @@ class Fleetlight(Adw.Application):
             required.connect("toggled", lambda button, service=name: self.service_preference(host, service, button.get_active()))
             row.add_suffix(required)
             services.add(row)
-        if not host.get("services"):
+        failed = data.get("failed_units") if online else None
+        if isinstance(failed, list):
+            row = Adw.ActionRow(title="Failed system units",
+                                subtitle=GLib.markup_escape_text(", ".join(str(unit) for unit in failed)) if failed else "None; systemd reports every unit healthy")
+            row.set_subtitle_lines(3)
+            row.add_prefix(status_dot("warning" if failed else "good"))
+            count = label(str(len(failed)), "numeric " + ("warning" if failed else "muted"))
+            count.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(count)
+            services.add(row)
+        if not host.get("services") and not isinstance(failed, list):
             services.add(label("No services configured. Add systemd unit names in Settings.", "muted", wrap=True))
         controls = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, min_children_per_line=1,
                                max_children_per_line=4, row_spacing=8, column_spacing=8)
-        terminal = Gtk.Button(label="Open terminal")
+        terminal = icon_button("Open terminal", "utilities-terminal-symbolic")
         terminal.connect("clicked", lambda *_: self.terminal(host))
         controls.append(terminal)
-        files = Gtk.Button(label="Browse files")
+        files = icon_button("Browse files", "folder-symbolic")
         files.connect("clicked", lambda *_: self.browse(host))
         controls.append(files)
-        copy = Gtk.Button(label="Copy diagnostics")
+        copy = icon_button("Copy diagnostics", "edit-copy-symbolic")
         copy.connect("clicked", lambda *_: self.copy_diagnostics(host, data))
         controls.append(copy)
-        if data.get("package_manager") in actions.UPDATE_COMMANDS:
-            update = Gtk.Button(label="System updates…")
+        if online and data.get("package_manager") in actions.UPDATE_COMMANDS:
+            update = icon_button("System updates…", "software-update-available-symbolic")
             update.connect("clicked", lambda *_: self.confirm_update(host, data["package_manager"]))
             update.set_sensitive(not self.active_job and not self.update_checks_running)
             controls.append(update)
@@ -1322,9 +1562,7 @@ class Fleetlight(Adw.Application):
         if recent:
             activity = self.section("Recent changes", "Saved on this computer")
             for event in reversed(recent):
-                row = Adw.ActionRow(title=event["message"], subtitle=time.strftime("%a %d %b %H:%M", time.localtime(event["time"])))
-                row.set_title_lines(2)
-                activity.add(row)
+                activity.add(self.event_row(event, event.get("message", ""), "", "%a %d %b %H:%M"))
         self.content.append(label(("Local metrics every 2 seconds · " if host.get("local") else "") +
                                   f"Full checks every {self.configuration.get('refresh_seconds', 60)} seconds · " +
                                   (f"Last check took {data['check_ms'] / 1000:.1f}s" if data.get("check_ms") else "No verified receipt yet"), "muted", wrap=True))
@@ -1339,6 +1577,8 @@ class Fleetlight(Adw.Application):
         row.add_prefix(Gtk.Image.new_from_icon_name(icon))
         value_label = label(value, css or "muted", xalign=1, wrap=True)
         value_label.set_max_width_chars(40)
+        # Without this GTK prefers a squarish block and breaks short values over several lines.
+        value_label.set_natural_wrap_mode(Gtk.NaturalWrapMode.NONE)
         value_label.set_justify(Gtk.Justification.RIGHT)
         value_label.set_valign(Gtk.Align.CENTER)
         row.add_suffix(value_label)
@@ -1917,6 +2157,7 @@ class Fleetlight(Adw.Application):
         page = Adw.PreferencesPage()
         working = json.loads(json.dumps(self.configuration))
         initial = {"refresh_seconds": self.configuration.get("refresh_seconds", 60),
+                   "appearance": config.appearance(self.configuration),
                    "notifications": config.notifications_enabled(self.configuration),
                    "auto_updates": config.auto_updates_enabled(self.configuration),
                    "agents": config.enabled_agents(self.configuration)}
@@ -1927,13 +2168,20 @@ class Fleetlight(Adw.Application):
         interval.set_subtitle("Seconds between full checks")
         interval.set_value(initial["refresh_seconds"])
         monitoring.add(interval)
-        notify = Adw.SwitchRow(title="Desktop notifications", subtitle="Notify when a computer goes offline, a service stops, or the problem clears")
+        notify = Adw.SwitchRow(title="Desktop notifications", subtitle="Notify when a computer goes offline, a service stops, the problem clears, or an agent's quota runs low")
         notify.set_active(initial["notifications"])
         monitoring.add(notify)
         start = Adw.SwitchRow(title="Open Fleetlight when I log in", subtitle="Adds a user autostart entry; useful with automatic updates")
         start.set_active(actions.autostart_path().exists())
         monitoring.add(start)
         page.add(monitoring)
+
+        looks = Adw.PreferencesGroup(title="Appearance")
+        scheme = Adw.ComboRow(title="Colour scheme", subtitle="Automatic is dark unless the desktop prefers light. The accent comes from the desktop theme.",
+                              model=Gtk.StringList.new(["Automatic", "Dark", "Light"]))
+        scheme.set_selected(config.APPEARANCES.index(initial["appearance"]))
+        looks.add(scheme)
+        page.add(looks)
 
         automatic = Adw.PreferencesGroup(title="Automatic updates", description="A failed computer is skipped and the same update is not retried until you restart Fleetlight or a different set of packages appears. Keep Fleetlight open.")
         auto_toggle = Adw.SwitchRow(title="Automatically install all available updates", subtitle="Codex CLI, Claude CLI, ChatGPT and Linux packages. Computers are never restarted automatically.")
@@ -2016,10 +2264,13 @@ class Fleetlight(Adw.Application):
                 else:
                     candidate = working
                 chosen = {"refresh_seconds": int(interval.get_value()), "notifications": notify.get_active(),
+                          "appearance": config.APPEARANCES[scheme.get_selected()],
                           "auto_updates": auto_toggle.get_active(),
                           "agents": {name: toggle.get_active() for name, toggle in agent_toggles.items()}}
                 for key, value in chosen.items():
                     # A JSON edit wins unless the matching control was changed in this dialog.
+                    if key == "appearance" and value == initial[key] and key not in candidate:
+                        continue
                     if not json_edited[0] or value != initial[key]:
                         candidate[key] = value
                 candidate = config.validate(candidate)
@@ -2031,6 +2282,7 @@ class Fleetlight(Adw.Application):
                 return
             enabling = config.auto_updates_enabled(candidate) and not config.auto_updates_enabled(self.configuration)
             self.configuration = candidate
+            Adw.StyleManager.get_default().set_color_scheme(SCHEMES[config.appearance(candidate)])
             if enabling:
                 self.auto_attempted.clear()
                 self.auto_holdoff_until = 0
@@ -2050,3 +2302,297 @@ class Fleetlight(Adw.Application):
         if self.demo:
             save.set_sensitive(False)
         dialog.present()
+
+    def jump(self, index):
+        """Alt+number opens the computer at that position in the sidebar."""
+        hosts = sorted(self.configuration["hosts"], key=lambda host: not host.get("local", False))
+        if self.window is not None and index < len(hosts):
+            self.show_page(hosts[index]["id"])
+
+    def view(self, host_id):
+        """Result to display: this session's check, or the last online result until one arrives."""
+        data = self.snapshots.get(host_id)
+        if data:
+            return data
+        seen = self.last_seen.get(host_id)
+        return dict(seen, cached=True) if seen else {}
+
+    def host_state(self, host):
+        """Display facts shared by the sidebar, the overview cards and the computer page."""
+        data = self.view(host["id"])
+        cached = bool(data.get("cached"))
+        checked = bool(data) and not cached
+        online = data.get("status") == "online"
+        trouble = (issues(data) if checked else []) + linux_update_issues(self.app_updates.get(host["id"]))
+        tone = None if not checked else "good" if online and not trouble else "warning" if online else "bad"
+        return data, checked, online, cached, trouble, tone
+
+    def usage(self, data):
+        """CPU, memory and root disk as (key, percent, colour) for gauges."""
+        result = []
+        for key, value, warn, bad in (("cpu", cpu_share(data), 75, 92), ("memory", data.get("memory_percent"), 80, 95),
+                                      ("disk", data.get("disk_percent"), 80, 90)):
+            value = value if data.get("status") == "online" and isinstance(value, (int, float)) else None
+            result.append((key, value, usage_css(value, warn, bad) or "accent"))
+        return result
+
+    def gauge(self, key, percent, text, tone="accent", **shape):
+        """Ring that starts from the value it last showed on this page, so refreshes glide."""
+        ring = Ring(None if percent is None else percent / 100, text, tone, start=self.gauges.get(key, 0.0), **shape)
+        self.gauges[key] = ring.target
+        return ring
+
+    def move_gauge(self, key, ring, percent, text, tone="accent"):
+        """Live reading for a gauge already on screen; it steps rather than glides to keep idle CPU low."""
+        ring.set_value(None if percent is None else percent / 100, text, tone, animate=False)
+        self.gauges[key] = ring.target
+
+    def notify_quota(self, before, after):
+        """One desktop notification when an agent's tightest quota window drops to the low mark."""
+        for name, item in after.items():
+            remaining = item.get("remaining_percent") if isinstance(item, dict) else None
+            if not isinstance(remaining, (int, float)) or item.get("stale"):
+                continue
+            if remaining > LOW_QUOTA:
+                self.quota_warned.discard(name)
+                continue
+            previous = (before.get(name) or {}).get("remaining_percent")
+            if name in self.quota_warned or not isinstance(previous, (int, float)) or previous <= LOW_QUOTA:
+                self.quota_warned.add(name)
+                continue
+            self.quota_warned.add(name)
+            if self.demo or not config.notifications_enabled(self.configuration):
+                continue
+            notification = Gio.Notification.new((item.get("name") or name.title()) + " quota is running low")
+            notification.set_body(item.get("detail") or f"{remaining}% left")
+            notification.set_icon(Gio.ThemedIcon.new("io.github.fleetlight.Linux"))
+            try:
+                self.send_notification("fleetlight-quota-" + name, notification)
+            except GLib.Error:
+                pass
+
+    def update_sidebar_row(self, row, entry):
+        if row.name.get_text() != entry["title"]:
+            row.name.set_text(entry["title"])
+        if row.note.get_text() != entry["detail"]:
+            row.note.set_text(entry["detail"])
+        set_tone(row.note, entry["detail_css"])
+        if row.dot is not None:
+            set_tone(row.dot, entry.get("tone"))
+        badge = entry.get("badge")
+        row.badge.set_visible(bool(badge))
+        if badge and row.badge.get_text() != badge:
+            row.badge.set_text(badge)
+        usage = entry.get("usage")
+        row.bars.set_visible(bool(usage) and not badge)
+        if usage:
+            row.bars.update(tuple(value for _, value, _ in usage),
+                            tuple(tone for _, _, tone in usage))
+            row.bars.set_tooltip_text(" · ".join(
+                f"{title} {value}%" for title, (_, value, _) in zip(("CPU", "Memory", "Disk"), usage) if value is not None))
+
+    def hero_card(self, leading, eyebrow, title, lines, tone=None, trailing=None):
+        """Tinted banner at the top of a page: `tone` is attention, offline or quiet."""
+        hero = box(False, 18)
+        hero.add_css_class("hero-card")
+        if tone:
+            hero.add_css_class(tone)
+        hero.append(leading)
+        words = box(True, 4)
+        words.set_hexpand(True)
+        words.set_valign(Gtk.Align.CENTER)
+        words.append(label(eyebrow, "eyebrow"))
+        words.append(label(title, "hero", wrap=True))
+        for line in lines:
+            words.append(line if isinstance(line, Gtk.Widget) else label(line, "muted", wrap=True))
+        hero.append(words)
+        if trailing is not None:
+            trailing.set_valign(Gtk.Align.START)
+            hero.append(trailing)
+        return hero, words
+
+    def metric_hints(self, data):
+        """Caption under each gauge on a computer's page."""
+        load, cpus = data.get("load"), data.get("cpus")
+        cpu = f"Load {load} · {cpus} CPUs" if load is not None and cpus else "Waiting for a check"
+        if data.get("memory_used") is not None and data.get("memory_total"):
+            memory = size_text(data["memory_used"]) + " of " + size_text(data["memory_total"])
+            if data.get("swap_used"):
+                memory += "\n" + size_text(data["swap_used"]) + " swap in use"
+        else:
+            memory = "Physical memory in use"
+        if data.get("disk_free") is not None:
+            disk = size_text(data["disk_free"]) + " free"
+            if data.get("disk_total"):
+                disk += " of " + size_text(data["disk_total"])
+        else:
+            disk = "Waiting for a check"
+        return {"cpu": cpu, "memory": memory, "disk": disk}
+
+    def stat(self, icon_name, value, caption, css=None):
+        tile = box(False, 10)
+        tile.add_css_class("stat")
+        icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon.set_pixel_size(18)
+        icon.add_css_class(css or "muted")
+        tile.append(icon)
+        words = box(True, 0)
+        words.append(label(value, ("stat-value " + css) if css else "stat-value"))
+        note = label(caption, "small muted")
+        note.set_ellipsize(3)
+        words.append(note)
+        tile.append(words)
+        return tile
+
+    def event_row(self, event, title, subtitle, stamp_format):
+        """History entry with a dot that is green for recoveries and amber for problems."""
+        row = Adw.ActionRow(title=title, subtitle=subtitle)
+        row.set_title_lines(2)
+        row.set_subtitle_lines(2)
+        dot = Gtk.Box(valign=Gtk.Align.CENTER)
+        dot.add_css_class("timeline-dot")
+        dot.add_css_class("good" if "healthy" in str(event.get("message", "")) else "warning")
+        row.add_prefix(dot)
+        stamp = label(time.strftime(stamp_format, time.localtime(event.get("time", 0))), "muted small numeric")
+        stamp.set_valign(Gtk.Align.CENTER)
+        row.add_suffix(stamp)
+        return row
+
+    def gauge_card(self, title, ring, hint):
+        card = box(True, 8)
+        card.add_css_class("card")
+        card.set_hexpand(True)
+        card.append(label(title, "eyebrow"))
+        card.append(ring)
+        note = label(hint, "muted small", xalign=0.5, wrap=True)
+        note.set_justify(Gtk.Justification.CENTER)
+        note.set_max_width_chars(20)
+        note.set_lines(2)
+        note.set_ellipsize(3)
+        card.append(note)
+        return card, note
+
+    def process_card(self, processes):
+        """Busiest and largest programs side by side."""
+        card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=28, homogeneous=True)
+        card.add_css_class("card")
+        columns = (("TOP CPU", processes.get("cpu") or [], lambda item: f"{item[1]}%", "Share of one core during the last check"),
+                   ("TOP MEMORY", processes.get("memory") or [], lambda item: size_text(item[1]), "Resident memory, summed over each program's processes"))
+        for title, items, value_of, tip in columns:
+            column = box(True, 7)
+            heading = label(title, "eyebrow")
+            heading.set_tooltip_text(tip)
+            column.append(heading)
+            ceiling = max((item[1] for item in items if len(item) > 1 and isinstance(item[1], (int, float))), default=0)
+            for item in items[:5]:
+                if not isinstance(item, list) or len(item) < 2 or not isinstance(item[1], (int, float)):
+                    continue
+                line = box(False, 8)
+                name = label(str(item[0]) + (f"  ×{item[2]}" if len(item) > 2 and item[2] > 1 else ""))
+                name.set_ellipsize(3)
+                name.set_hexpand(True)
+                line.append(name)
+                line.append(label(value_of(item), "muted numeric", xalign=1))
+                column.append(line)
+                bar = Gtk.ProgressBar(fraction=max(0.0, min(1.0, item[1] / ceiling)) if ceiling else 0)
+                bar.add_css_class("thin")
+                column.append(bar)
+            if not column.get_first_child().get_next_sibling():
+                column.append(label("Nothing busy during the last check", "muted small"))
+            card.append(column)
+        return card
+
+    def history_card(self, host):
+        """Trend chart with metric and range pickers, plus a reachability strip."""
+        card = box(True, 12)
+        card.add_css_class("card")
+        ranges = [item for item in CHART_RANGES if item[0] != "live" or host.get("local")]
+        chosen = self.chart_range if self.chart_range in [item[0] for item in ranges] else ("live" if host.get("local") else "24h")
+        metric = self.chart_metric
+        if metric is None:
+            # Until the user picks one, prefer CPU but fall back to a metric that already has history.
+            since = time.time() - 86400
+            metric = next((field for field in ("cpu", "memory") if chosen == "live" or
+                           sum(isinstance(value, (int, float)) for _, value in self.history.points(host["id"], field, since)) > 1), "cpu")
+        header = box(False, 10)
+        titles = box(True, 1)
+        titles.set_hexpand(True)
+        titles.append(label("History", "section-title"))
+        summary = label("", "muted small numeric")
+        summary.set_ellipsize(3)
+        titles.append(summary)
+        header.append(titles)
+        picker = Gtk.DropDown.new_from_strings([title for _, title, _, _ in CHART_METRICS])
+        picker.set_selected([field for field, _, _, _ in CHART_METRICS].index(metric))
+        picker.set_valign(Gtk.Align.CENTER)
+        picker.connect("notify::selected", lambda dropdown, _: self.pick_chart(metric=CHART_METRICS[dropdown.get_selected()][0]))
+        header.append(picker)
+        toggles = box(False, 0)
+        toggles.add_css_class("linked")
+        toggles.set_valign(Gtk.Align.CENTER)
+        first = None
+        for key, title, _ in ranges:
+            toggle = Gtk.ToggleButton(label=title, active=key == chosen)
+            if first is None:
+                first = toggle
+            else:
+                toggle.set_group(first)
+            toggle.connect("toggled", lambda button, picked=key: self.pick_chart(span=picked) if button.get_active() else None)
+            toggles.append(toggle)
+        header.append(toggles)
+        card.append(header)
+        chart = TrendChart()
+        card.append(chart)
+        now = time.time()
+        reach = [up for _, up in self.history.points(host["id"], "up", now - 86400) if isinstance(up, (int, float))]
+        footer = box(False, 12)
+        caption = label(f"Reachable {100 * sum(reach) / len(reach):.1f}% · last 24 hours" if reach else "Reachability · last 24 hours",
+                        "muted small numeric")
+        footer.append(caption)
+        strip = AvailabilityStrip(self.history.availability(host["id"], now - 86400, now, 48), now - 86400, now, height=14)
+        footer.append(strip)
+        card.append(footer)
+        self.chart = {"host": host["id"], "metric": metric, "range": chosen, "chart": chart, "summary": summary}
+        self.refresh_chart()
+        return card
+
+    def pick_chart(self, metric=None, span=None):
+        if not self.chart or self.rebuilding_detail:
+            return
+        if metric:
+            self.chart_metric = self.chart["metric"] = metric
+        if span:
+            self.chart_range = self.chart["range"] = span
+        self.refresh_chart()
+
+    def refresh_chart(self):
+        state = self.chart
+        if not state:
+            return
+        field, title, unit, ceiling = next(item for item in CHART_METRICS if item[0] == state["metric"])
+        seconds = next(item[2] for item in CHART_RANGES if item[0] == state["range"])
+        now = time.time()
+        if state["range"] == "live":
+            column = {"cpu": 1, "memory": 2, "temperature": 3, "disk": 4}.get(field)
+            points = [(row[0], row[column]) for row in self.live.get(state["host"], ())] if column else []
+            empty = "Live readings arrive every two seconds" if column else "Check time is recorded with full checks; pick a longer range"
+        else:
+            points = self.history.points(state["host"], field, now - seconds)
+            empty = "No history for this range yet · points appear after a few checks"
+        chart = state["chart"]
+        chart.set_data(points, now - seconds, now, unit, ceiling, "accent", empty)
+        values = [value for _, value in chart.points]
+        if values:
+            state["summary"].set_text(f"{title} · average {chart.format(sum(values) / len(values))} · peak {chart.format(max(values))}")
+        else:
+            state["summary"].set_text(title)
+
+    def wake(self, host):
+        network = (self.last_seen.get(host["id"]) or {}).get("network") or {}
+        try:
+            actions.wake(network.get("mac"), network.get("broadcast"))
+        except (OSError, ValueError) as error:
+            self.toast(str(error))
+            return
+        self.toast("Wake signal sent to " + host["name"] + " · checking again in 45 seconds")
+        GLib.timeout_add_seconds(45, lambda: (self.check(force_updates=False), GLib.SOURCE_REMOVE)[1])

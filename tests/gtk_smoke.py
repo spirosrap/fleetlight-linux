@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import traceback
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from fleetlight.app import Fleetlight, GLib, Gtk
+from fleetlight.app import Adw, Fleetlight, GLib, Gtk
 
 app = Fleetlight(demo=True)
 failures = []
@@ -100,7 +100,7 @@ def verify():
         app.receive_local_metrics([local], dict(metrics, metrics_checked_at=metrics["metrics_checked_at"] + 10))
         refreshed = find_history(app.content)
         assert refreshed is opened and refreshed.get_expanded()
-        app.metric_widgets["disk"].set_text("1%")
+        app.metric_widgets["disk"].set_value(0.01, "1%")
         app.receive_local_metrics([local], dict(metrics, disk_percent=42, metrics_checked_at=metrics["metrics_checked_at"] + 20))
         assert app.metric_widgets["disk"].get_text() == "42%"
         refreshed.set_expanded(False)
@@ -190,11 +190,48 @@ def verify():
         app.receive(dict(snapshot, boot_id="new-boot"))
         assert host_id not in app.pending_restarts
         assert app.app_updates[host_id]["restart"]["detail"].startswith("Restart verified")
-        # Live local metrics also update the overview cards in place.
+        # Live local metrics also update the overview cards in place, and the sidebar keeps its rows.
         app.show_page("fleet")
         assert app.selected == "fleet"
-        app.receive_local_metrics([local], dict(metrics, disk_percent=57, metrics_checked_at=metrics["metrics_checked_at"] + 30))
+        row = app.sidebar_rows["local"]
+        app.receive_local_metrics([local], dict(metrics, disk_percent=57, cpu_percent=33, metrics_checked_at=metrics["metrics_checked_at"] + 30))
         assert app.overview_widgets["local"]["disk"].get_text() == "57%"
+        assert app.overview_widgets["local"]["cpu"].get_text() == "33%"
+        assert app.sidebar_rows["local"] is row and row.bars.values == (33, metrics["memory_percent"], 57)
+        # The computer page charts live readings and saved history, and remembers the chosen range.
+        app.show_page("local")
+        assert app.chart["range"] == "live" and len(app.chart["chart"].points) > 10
+        app.pick_chart(metric="memory", span="24h")
+        assert app.chart_range == "24h" and len(app.chart["chart"].points) > 100
+        app.show_page("server")
+        assert app.chart["metric"] == "memory" and app.chart["range"] == "24h"
+        storage = find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "/srv/media")
+        assert storage is not None
+        app.jump(0)
+        assert app.selected == "local"
+        # An unreachable computer keeps its last online facts and offers Wake-on-LAN from the saved address.
+        online = app.snapshots["server"]
+        app.last_seen["server"] = online
+        app.receive({"id": "server", "status": "offline", "checked_at": online["checked_at"], "error": "SSH connection unavailable"})
+        assert app.last_seen["server"] is online
+        app.show_page("server")
+        assert find_widget(app.content, lambda w: isinstance(w, Gtk.Button) and w.get_label() == "Wake") is not None
+        assert app.metric_widgets is None
+        sent = []
+        with patch("fleetlight.actions.wake", side_effect=lambda mac, broadcast=None: sent.append((mac, broadcast))):
+            app.wake(next(h for h in app.configuration["hosts"] if h["id"] == "server"))
+        assert sent == [(online["network"]["mac"], online["network"]["broadcast"])]
+        app.receive(online)
+        # Before the first check of a session the last online result is shown, but never counted as online.
+        del app.snapshots["studio"]
+        app.last_seen["studio"] = remote
+        assert app.view("studio")["cached"] and app.host_state(app.configuration["hosts"][1])[5] is None
+        app.populate_hosts()
+        assert app.summary.get_text() == "3 of 4 online"
+        assert app.sidebar_rows["studio"].note.get_text().startswith("Last seen")
+        app.receive(remote)
+        assert app.summary.get_text() == "4 of 4 online"
+        app.show_page("fleet")
         # A failed quota refresh keeps the last good reading and explains why it is stale.
         app.receive_agents({"claude": {"id": "claude", "name": "Claude", "state": "ok", "remaining_percent": 88, "detail": "88% weekly"}})
         assert app.agent_usage["claude"]["remaining_percent"] == 88 and "stale" not in app.agent_usage["claude"]
@@ -205,7 +242,7 @@ def verify():
         app.show_shortcuts()
         app.show_about()
         assert len(app.get_windows()) >= 1
-        print("GTK smoke test passed: overview, UI, batch sequencing, failure stop, cancellation and recovery")
+        print("GTK smoke test passed: overview, gauges, history chart, wake, batch sequencing, failure stop, cancellation and recovery")
     except Exception:
         failures.append(traceback.format_exc())
     finally:

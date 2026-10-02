@@ -68,6 +68,17 @@ def until(timestamp):
     return f"{minutes}m"
 
 
+def epoch(timestamp):
+    """Seconds since 1970 from a second or millisecond timestamp, or None."""
+    try:
+        value = float(timestamp)
+    except (TypeError, ValueError):
+        return None
+    if value > 10_000_000_000:
+        value /= 1000
+    return value if value > 0 else None
+
+
 def reset_day(timestamp):
     try:
         value = float(timestamp)
@@ -128,7 +139,8 @@ def summarize_codex(limits):
         label = window_label(window.get("windowDurationMins"))
         reset = until(window.get("resetsAt"))
         day = reset_day(window.get("resetsAt"))
-        windows.append({"label": label, "remaining_percent": remaining, "reset": reset, "reset_day": day})
+        windows.append({"label": label, "remaining_percent": remaining, "reset": reset, "reset_day": day,
+                        "reset_at": epoch(window.get("resetsAt"))})
     return windows
 
 
@@ -268,7 +280,7 @@ def collect_codex():
         plan = ""
     return {"id": "codex", "name": "Codex", "state": "ok", "plan": plan,
             "remaining_percent": tightest["remaining_percent"],
-            "detail": " · ".join(parts)}
+            "detail": " · ".join(parts), "windows": windows}
 
 
 def codex_auth():
@@ -412,7 +424,10 @@ def collect_cursor():
     if not summarized:
         return unavailable("cursor", "Cursor did not report plan usage")
     remaining, detail = summarized
-    result = {"id": "cursor", "name": "Cursor", "state": "ok", "remaining_percent": remaining, "detail": detail}
+    result = {"id": "cursor", "name": "Cursor", "state": "ok", "remaining_percent": remaining, "detail": detail,
+              "windows": [{"label": "period", "remaining_percent": remaining,
+                           "reset": until(payload.get("billingCycleEnd")), "reset_day": "",
+                           "reset_at": epoch(payload.get("billingCycleEnd"))}]}
     plan = cursor_plan(token)
     if plan:
         result["plan"] = plan
@@ -493,7 +508,7 @@ def summarize_claude(payload):
         if remaining is None:
             continue
         reset = iso_timestamp(window.get("resets_at"))
-        windows.append({"label": label, "remaining_percent": remaining,
+        windows.append({"label": label, "remaining_percent": remaining, "reset_at": reset,
                         "reset": until(reset) if reset else "", "reset_day": reset_day(reset) if reset else ""})
     return windows
 
@@ -526,7 +541,7 @@ def collect_claude():
     tightest = min(windows, key=lambda item: item["remaining_percent"])
     return {"id": "claude", "name": "Claude", "state": "ok", "plan": claude_plan(credentials),
             "remaining_percent": tightest["remaining_percent"],
-            "detail": " · ".join(format_codex_window(item) for item in windows)}
+            "detail": " · ".join(format_codex_window(item) for item in windows), "windows": windows}
 
 
 COLLECTORS = {"codex": collect_codex, "cursor": collect_cursor, "claude": collect_claude}
@@ -562,14 +577,22 @@ def collect(wanted=None):
 
 
 def demo_usage():
-    return {
-        "codex": {"id": "codex", "name": "Codex", "state": "ok", "plan": "Pro $200",
-                  "remaining_percent": 64, "detail": "64% weekly · 3d 12h · Tue 22 Sep 15:00"},
-        "cursor": {"id": "cursor", "name": "Cursor", "state": "ok", "plan": "Pro $20",
-                   "remaining_percent": 41, "detail": "41% remaining this period · 12d 4h"},
-        "claude": {"id": "claude", "name": "Claude", "state": "ok", "plan": "Max 5x $100",
-                   "remaining_percent": 72, "detail": "72% 5h · 2h 10m · Tue 22 Sep 17:00 · 90% weekly · 5d 1h · Sun 27 Sep 09:00"},
-    }
+    now = time.time()
+
+    def window(label, remaining, hours, day=True):
+        reset = now + hours * 3600
+        return {"label": label, "remaining_percent": remaining, "reset": until(reset),
+                "reset_day": reset_day(reset) if day else "", "reset_at": reset}
+
+    result = {}
+    for name, plan, windows in (
+            ("codex", "Pro $200", [window("weekly", 64, 84)]),
+            ("cursor", "Pro $20", [window("period", 41, 292, day=False)]),
+            ("claude", "Max 5x $100", [window("5h", 72, 2.2), window("weekly", 90, 121)])):
+        result[name] = {"id": name, "name": name.title(), "state": "ok", "plan": plan,
+                        "remaining_percent": min(item["remaining_percent"] for item in windows),
+                        "detail": " · ".join(format_codex_window(item) for item in windows), "windows": windows}
+    return result
 
 
 if __name__ == "__main__":
