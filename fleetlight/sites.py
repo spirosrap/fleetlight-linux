@@ -5,9 +5,10 @@ import json
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request
 
 from . import __version__
+from . import net
 
 MAX_BODY = 256 * 1024
 TIMESTAMP_KEYS = ("generated_at", "current.generated_at", "updated_at", "timestamp", "checked_at",
@@ -117,8 +118,7 @@ def fetch(url):
     if parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname:
         raise ValueError("Only HTTPS URLs without credentials are supported")
     request = Request(url, headers={"User-Agent": "Fleetlight/" + __version__, "Accept": "application/json"})
-    opener = build_opener(HttpsRedirectHandler)
-    with opener.open(request, timeout=10) as response:
+    with net.opener(HttpsRedirectHandler).open(request, timeout=10) as response:
         if response.geturl() and not response.geturl().startswith("https://"):
             raise ValueError("Redirect is not HTTPS")
         raw = response.read(MAX_BODY + 1)

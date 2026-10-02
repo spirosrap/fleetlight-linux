@@ -20,6 +20,7 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 - History now covers a week: every check for two hours, then 5-minute and 15-minute averages. The previous format kept under four hours for a nine-computer fleet.
 - **Settings › Appearance** chooses dark unless the desktop prefers light, always dark or always light. **Alt+1…9** opens a computer by its sidebar position.
 - The sidebar updates in place instead of being rebuilt every two seconds, a burst of check results rebuilds the open page once, and rebuilding a computer's page no longer leaks about 10 KB each time. The header no longer spins while a check runs; the button says what is happening instead.
+- Fixed steady memory growth: every HTTPS request (website checks, quota and release checks) built its own TLS context and reloaded the system certificates, about 600 KB that was never returned. All requests now share one context.
 
 ## Version 0.4.0
 

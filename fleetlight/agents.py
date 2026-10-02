@@ -18,6 +18,9 @@ import urllib.parse
 import urllib.request
 
 from . import __version__
+from . import net
+
+net.install()
 
 
 NAMES = ("codex", "cursor", "claude")

@@ -5,7 +5,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-from fleetlight import actions, agents, config, probe
+import urllib.request
+
+from fleetlight import actions, agents, config, net, probe
 from fleetlight.monitor import History
 
 
@@ -174,6 +176,21 @@ class WakeAndSettingsTests(unittest.TestCase):
         demo = agents.demo_usage()
         self.assertEqual([item["label"] for item in demo["claude"]["windows"]], ["5h", "weekly"])
         self.assertEqual(demo["claude"]["remaining_percent"], 72)
+
+
+class NetworkTests(unittest.TestCase):
+    def test_every_https_request_shares_one_tls_context(self):
+        shared = net.context()
+        self.assertIs(net.context(), shared)
+        self.assertTrue(shared.check_hostname)
+
+        def contexts(opener):
+            return [handler._context for handler in opener.handlers if isinstance(handler, urllib.request.HTTPSHandler)]
+
+        self.assertEqual(contexts(net.opener()), [shared])
+        self.assertEqual(contexts(net.opener(urllib.request.HTTPRedirectHandler)), [shared])
+        # Importing the quota module installs the shared opener for plain urlopen calls.
+        self.assertEqual(contexts(urllib.request._opener), [shared])
 
 
 if __name__ == "__main__":
