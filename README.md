@@ -4,7 +4,26 @@ A native GTK4/libadwaita dashboard for your computers. Monitor Linux and macOS h
 
 Hosts marked `"local": true` refresh memory, load, disk space and uptime every two seconds. On Linux this lightweight refresh reads kernel files directly without launching commands. Full host checks, services and installed software retain the configured `refresh_seconds` interval (60 seconds by default); release checks and history writes keep their existing schedules. This applies to the current computer on every Linux installation configured with a local host.
 
-![Fleetlight with fictional demo data](docs/screenshot.png)
+![Fleet overview in dark mode, with fictional demo computers and agent quota](docs/screenshot.png)
+
+<details>
+<summary>More screenshots: light theme, computer details and parallel updates</summary>
+
+All screenshots use fictional demo data. The parallel update view shows three simulated installers running on different computers.
+
+**Light theme**
+
+![Fleet overview in light mode](docs/screenshot-light.png)
+
+**Computer details**
+
+![Computer details with resource history, installed versions and service status](docs/screenshot-computer.png)
+
+**Three simultaneous updates**
+
+![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
+
+</details>
 
 ## Version 0.4.0
 
@@ -14,7 +33,7 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 - Computer pages show disk and memory trend sparklines from the local history, a CPU card with load per core and temperature, and uptime, hostname, kernel and architecture in the header.
 - Desktop notifications when a computer goes offline, a service stops or the problem clears. On by default; **Settings › Desktop notifications** turns them off. Clicking a notification opens that computer.
 - Settings is now a preferences page: check interval, notifications, start at login, automatic updates, agent toggles, remove buttons for computers and websites, and the JSON editor under **Configuration file**. **Add computer** gained a **Test connection** button that runs a read-only SSH check before saving.
-- Main menu with keyboard shortcuts (Ctrl+R check, Ctrl+F find, Ctrl+Home overview, Ctrl+N add, Ctrl+, settings, Ctrl+? shortcuts, Ctrl+Q quit) and an About window. A banner shows running fleet updates on every page, with **Stop after current update**.
+- Main menu with keyboard shortcuts (Ctrl+R check, Ctrl+F find, Ctrl+Home overview, Ctrl+N add, Ctrl+, settings, Ctrl+? shortcuts, Ctrl+Q quit) and an About window. A banner shows running fleet updates on every page, with **Stop queued updates**.
 
 ## Version 0.3.11
 
