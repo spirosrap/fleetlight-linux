@@ -293,9 +293,6 @@ class Fleetlight(Adw.Application):
         self.tray = None
         self.in_tray = False
         self.tray_info = ("Fleetlight", 0)
-        # What the tray shows, as a file for desktop bar widgets that draw their own icon.
-        self.status_path = config.state_path().with_name("status.json")
-        self.status_written = (None, 0)
         self.window = None
         self.snapshots = {}
         self.busy = False
@@ -395,7 +392,6 @@ class Fleetlight(Adw.Application):
         """History is written every few minutes while running; write the rest on the way out."""
         if self.demo:
             return
-        self.publish_status({"running": False})
         try:
             self.history.save()
             config.atomic_json(self.last_seen_path, self.last_seen, indent=None)
@@ -540,7 +536,6 @@ class Fleetlight(Adw.Application):
                    ("add", lambda: self.add_computer(), ["<Control>n"]),
                    ("shortcuts", lambda: self.show_shortcuts(), ["<Control>question"]),
                    ("about", lambda: self.show_about(), []),
-                   ("toggle", lambda: self.toggle_window(), []),
                    ("quit", lambda: self.quit_requested(), ["<Control>q"]))
         for name, callback, accelerators in entries:
             if self.lookup_action(name):
@@ -593,30 +588,14 @@ class Fleetlight(Adw.Application):
         summary, attention = self.tray_info
         shown = self.window.get_visible()
         state = (str(attention) + (" need attention" if attention != 1 else " needs attention")) if attention else "Everything looks healthy"
-        updating = len(self.active_jobs)
-        progress = "Updating " + str(updating) + (" computers…" if updating != 1 else " computer…")
-        self.tray.update("Fleetlight · " + (progress if updating else summary + (" · " + state if attention else "")),
-                         "updating" if updating else "attention" if attention else "normal", [
+        self.tray.update("Fleetlight · " + summary + (" · " + state if attention else ""), bool(attention), [
             (summary, None),
             (state, (lambda: (self.window.present(), self.show_page(OVERVIEW))) if attention else None),
-            *([(progress, lambda: (self.window.present(), self.show_page(OVERVIEW)))] if updating else []),
             None,
             ("Hide Fleetlight" if shown else "Show Fleetlight", self.toggle_window),
             ("Check now", self.check),
             None,
             ("Quit", self.quit_requested)])
-        self.publish_status({"running": True, "summary": summary, "attention": attention, "updating": updating, "visible": shown})
-
-    def publish_status(self, status):
-        """Write status.json when it changes, and once a minute so readers can tell a live app from a stale file."""
-        now = time.time()
-        if status == self.status_written[0] and now - self.status_written[1] < 60:
-            return
-        self.status_written = (status, now)
-        try:
-            config.atomic_json(self.status_path, dict(status, updated_at=int(now)), indent=None)
-        except OSError:
-            pass
 
     def quit_requested(self):
         if self.window is None:
@@ -2064,7 +2043,6 @@ class Fleetlight(Adw.Application):
         return next((job for job in self.active_jobs.values() if job["host"]["id"] == host_id), None)
 
     def persist_jobs(self):
-        self.refresh_tray()
         config.atomic_json(self.journal_path, {"active_jobs": self.active_jobs, "last_jobs": self.last_jobs,
                           "batch": self.batch, "pending_restarts": self.pending_restarts})
 
