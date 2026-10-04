@@ -6,9 +6,6 @@ Hosts marked `"local": true` refresh memory, load, disk space and uptime every t
 
 ![Fleet overview in dark mode, with fictional demo computers and agent quota](docs/screenshot.png)
 
-<details>
-<summary>More screenshots: light theme, computer details and parallel updates</summary>
-
 All screenshots use fictional demo data. The parallel update view shows three simulated installers running on different computers.
 
 **Light theme**
@@ -22,8 +19,6 @@ All screenshots use fictional demo data. The parallel update view shows three si
 **Three simultaneous updates**
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
-
-</details>
 
 ## Version 0.4.0
 
