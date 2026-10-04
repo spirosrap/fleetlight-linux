@@ -11,7 +11,8 @@ ITEM_PATH = "/StatusNotifierItem"
 MENU_PATH = "/MenuBar"
 ITEM_INTERFACE = "org.kde.StatusNotifierItem"
 MENU_INTERFACE = "com.canonical.dbusmenu"
-ICON = "fleetlight-symbolic"
+# Not a "-symbolic" name: bars recolour those, and this icon keeps the app's own colours.
+ICON = "fleetlight-tray"
 ICON_DIRECTORY = str(Path(__file__).resolve().parent / "icons")
 
 INTERFACES = """<node>
