@@ -11,10 +11,12 @@ import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
 
+from . import net
 from .config import validate
 from .monitor import python_command, run_process
 from .update_job import version, history_report, visible_installs
 
+net.install()
 ROOT = Path(__file__).parent
 REGISTRY = "https://registry.npmjs.org/@openai/codex/latest"
 CLAUDE_REGISTRY = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"

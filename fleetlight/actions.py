@@ -1,7 +1,10 @@
 """Interactive actions are explicit, fixed commands; never shell-interpolate host data."""
+import ipaddress
 import os
 from pathlib import Path
+import re
 import shutil
+import socket
 import subprocess
 
 from .config import validate
@@ -55,3 +58,33 @@ def set_autostart(enabled):
     path.parent.mkdir(parents=True, exist_ok=True)
     escaped = str(executable).replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$").replace("%", "%%")
     path.write_text('[Desktop Entry]\nType=Application\nName=Fleetlight\nExec="' + escaped + '"\nIcon=io.github.fleetlight.Linux\nTerminal=false\n')
+
+
+def magic_packet(mac):
+    if not isinstance(mac, str) or not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", mac):
+        raise ValueError("No hardware address is known for this computer")
+    return b"\xff" * 6 + bytes.fromhex(mac.replace(":", "")) * 16
+
+
+def wake(mac, broadcast=None):
+    """Send a Wake-on-LAN packet on the local network. Nothing is sent beyond broadcast addresses."""
+    packet = magic_packet(mac)
+    targets = ["255.255.255.255"]
+    try:
+        if broadcast and ipaddress.ip_address(broadcast).version == 4 and broadcast not in targets:
+            targets.append(broadcast)
+    except ValueError:
+        pass
+    sent = 0
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as handle:
+        handle.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for target in targets:
+            for port in (9, 7):
+                try:
+                    handle.sendto(packet, (target, port))
+                    sent += 1
+                except OSError:
+                    continue
+    if not sent:
+        raise OSError("The wake signal could not be sent from this network")
+    return targets

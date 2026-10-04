@@ -36,6 +36,15 @@ def auto_updates_enabled(configuration):
     return isinstance(configuration, dict) and configuration.get("auto_updates") is True
 
 
+APPEARANCES = ("auto", "dark", "light")
+
+
+def appearance(configuration):
+    """Colour scheme: dark unless the desktop asks for light ("auto"), or always dark or light."""
+    value = configuration.get("appearance") if isinstance(configuration, dict) else None
+    return value if value in APPEARANCES else "auto"
+
+
 def notifications_enabled(configuration):
     """Desktop notifications for status changes are on unless explicitly disabled."""
     return isinstance(configuration, dict) and configuration.get("notifications", True) is True
@@ -51,6 +60,8 @@ def validate(config):
         raise ValueError("auto_updates must be true or false")
     if "notifications" in config and type(config["notifications"]) is not bool:
         raise ValueError("notifications must be true or false")
+    if "appearance" in config and config["appearance"] not in APPEARANCES:
+        raise ValueError("appearance must be auto, dark or light")
     if "agents" in config:
         agents = config["agents"]
         if not isinstance(agents, dict) or any(name not in AGENTS or type(enabled) is not bool for name, enabled in agents.items()):
@@ -113,13 +124,13 @@ def validate(config):
     return config
 
 
-def atomic_json(path, value):
+def atomic_json(path, value, indent=2):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=".fleetlight-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as stream:
-            json.dump(value, stream, indent=2)
+            json.dump(value, stream, indent=indent, separators=None if indent else (",", ":"))
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())

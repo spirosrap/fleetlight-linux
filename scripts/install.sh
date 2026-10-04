@@ -5,6 +5,8 @@ python3 - <<'PY'
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
+gi.require_version('PangoCairo', '1.0')
+gi.require_foreign('cairo')
 from gi.repository import Gtk, Adw
 assert Adw.get_major_version() >= 1 and Adw.get_minor_version() >= 4, 'libadwaita 1.4 or newer required'
 PY

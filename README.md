@@ -2,7 +2,7 @@
 
 A native GTK4/libadwaita dashboard for your computers. Monitor Linux and macOS hosts from a Linux desktop, using the SSH access you already have.
 
-Hosts marked `"local": true` refresh memory, load, disk space and uptime every two seconds. On Linux this lightweight refresh reads kernel files directly without launching commands. Full host checks, services and installed software retain the configured `refresh_seconds` interval (60 seconds by default); release checks and history writes keep their existing schedules. This applies to the current computer on every Linux installation configured with a local host.
+Hosts marked `"local": true` refresh CPU use, memory, disk space, temperature, fan status, battery charge and uptime every two seconds. On Linux this lightweight refresh reads kernel files directly without launching commands. Full host checks, services and installed software retain the configured `refresh_seconds` interval (60 seconds by default); release checks and history writes keep their existing schedules. This applies to the current computer on every Linux installation configured with a local host.
 
 ![Fleet overview in dark mode, with fictional demo computers and agent quota](docs/screenshot.png)
 
@@ -14,11 +14,21 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 **Computer details**
 
-![Computer details with resource history, installed versions and service status](docs/screenshot-computer.png)
+![Computer details with circular gauges, interactive resource history and top processes](docs/screenshot-computer.png)
 
 **Three simultaneous updates**
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
+
+## Version 0.5.0
+
+- Circular CPU, memory, disk, temperature and agent quota gauges, a fleet health ring, and compact resource bars in the sidebar. Quota cards show each usage window and its reset time.
+- Interactive resource history charts with live, one-hour, six-hour, one-day and one-week ranges, plus availability strips and recent activity. Existing history is migrated automatically.
+- More computer details: memory and swap sizes, extra mounted disks, programs using the most CPU and memory, failed systemd units, battery charge and readable Linux fan speeds or ACPI fan state.
+- Wake-on-LAN for offline computers using the hardware address from their last successful check. Wake support must be enabled on the computer, and its network must be reachable by broadcast.
+- Automatic, dark and light appearance settings, numeric sidebar shortcuts, and notifications when an agent's quota runs low.
+- Lower long-running memory use: shared HTTPS certificate contexts, drawing callbacks that let old widgets be released, compact history saved periodically, and live readings that update existing widgets.
+- Fleet updates run on up to three different computers at once, with one installer per computer, independent progress and recovery, and cancellation of queued work. Computer restarts remain sequential.
 
 ## Version 0.4.0
 
@@ -70,11 +80,11 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 - A Wayland-native libadwaita application with a fleet overview page, a searchable fleet sidebar, attention filter, keyboard shortcuts and automatic checks.
 - Desktop notifications for computers that go offline or recover, and for services that stop; optional and on by default.
-- Disk and memory trend sparklines and a CPU load and temperature card on each computer's page.
+- Circular resource gauges, interactive history charts and availability strips on each computer's page.
 - Optional automatic Codex CLI, Claude CLI, ChatGPT and Linux package updates from Settings. Off by default; computers are not restarted automatically.
 - Show remaining Codex, Cursor and Claude quota from this computer's signed-in sessions, with Settings toggles for each agent.
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
-- Root disk, memory, uptime, load, configured systemd services, Codex CLI, Claude CLI and ChatGPT package versions.
+- CPU use, disks, memory and swap, uptime, temperature, fan status, battery charge, top processes, failed systemd units, configured services and application versions.
 - Installed/latest application versions and in-app Codex CLI, Claude CLI and ChatGPT update buttons, including remote Apple Silicon Macs.
 - Fleet-wide Linux package updates and confirmed restarts, with new-boot verification.
 - Durable update jobs with progress, verification and reconnect recovery.
@@ -86,22 +96,22 @@ All screenshots use fictional demo data. The parallel update view shows three si
 - Editable private configuration, an add-computer dialog and optional start at login.
 - A read-only JSON CLI for diagnostics, plus a fictional demo mode for screenshots.
 
-The Linux edition does not yet provide tray integration, Android controller pairing or wake-on-LAN. The Linux app monitors hosts directly and does not depend on a Mac controller.
+The Linux edition does not yet provide tray integration or Android controller pairing. The Linux app monitors hosts directly and does not depend on a Mac controller.
 
 ## Install
 
-Requires Python 3.10+, GTK4, libadwaita 1.4+ and OpenSSH. Remote computers require Python 3.9+ and a working, non-interactive SSH connection. Tested on Arch/Omarchy under Hyprland; CI uses Ubuntu 24.04 with Xvfb.
+Requires Python 3.10+, GTK4, libadwaita 1.4+, Cairo bindings and OpenSSH. Remote computers require Python 3.9+ and a working, non-interactive SSH connection. Tested on Arch/Omarchy under Hyprland; CI uses Ubuntu 24.04 with Xvfb.
 
 Arch / Omarchy:
 
 ```sh
-sudo pacman -S --needed python python-gobject gtk4 libadwaita openssh
+sudo pacman -S --needed python python-gobject python-cairo gtk4 libadwaita openssh
 ```
 
 Ubuntu 24.04+ / Debian with libadwaita 1.4+:
 
 ```sh
-sudo apt install python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 openssh-client
+sudo apt install python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 openssh-client
 ```
 
 Then:
@@ -147,9 +157,11 @@ Optional `sites` entries are checked from this computer over HTTPS. Point each o
 
 System updates can overwrite local application repairs. Confirmed terminal updates leave package selection, authentication and final confirmation to you. Unattended Linux package updates only run from **Update all Linux packages** or from Settings automatic updates, using existing passwordless sudo.
 
-`notifications` controls desktop notifications for status changes (default `true`). They use the desktop's notification service and never leave this computer.
+`appearance` selects `"auto"`, `"dark"` or `"light"`; automatic prefers dark unless the desktop asks for light.
 
-History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, capped at 2,048 samples / 24 hours and 100 events. It contains computer IDs, metrics and state changes. Diagnostics copied to the clipboard include computer names and should be reviewed before sharing.
+`notifications` controls desktop notifications for status changes and low agent quota (default `true`). They use the desktop's notification service and never leave this computer.
+
+History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, with detailed checks for two hours, five-minute averages up to one day, fifteen-minute averages up to one week, and the last 100 events. It contains computer IDs, metrics and state changes. Diagnostics copied to the clipboard include computer names and should be reviewed before sharing.
 
 ## Application updates
 

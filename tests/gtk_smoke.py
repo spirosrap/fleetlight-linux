@@ -90,7 +90,7 @@ def verify():
         expander = history.get_first_child()
         assert isinstance(expander, Gtk.Expander) and not expander.get_expanded()
         assert expander.get_label() == "What changed"
-        # Real local metric refreshes rebuild the detail pane every two seconds.
+        # Live metric refreshes update the existing widgets without rebuilding the page.
         def find_history(widget):
             return find_widget(widget, lambda w: isinstance(w, Gtk.Expander))
         app.selected = "local"
@@ -100,7 +100,7 @@ def verify():
         app.receive_local_metrics([local], dict(metrics, metrics_checked_at=metrics["metrics_checked_at"] + 10))
         refreshed = find_history(app.content)
         assert refreshed is opened and refreshed.get_expanded()
-        app.metric_widgets["disk"].set_text("1%")
+        app.metric_widgets["disk"].set_value(0.01, "1%", animate=False)
         app.receive_local_metrics([local], dict(metrics, disk_percent=42, metrics_checked_at=metrics["metrics_checked_at"] + 20))
         assert app.metric_widgets["disk"].get_text() == "42%"
         refreshed.set_expanded(False)

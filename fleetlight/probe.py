@@ -31,18 +31,241 @@ def text(path):
         return ""
 
 
-def memory(system):
+def memory_info(system):
+    """Physical memory and swap in bytes, plus the share of memory in use."""
+    result = {"memory_percent": None, "memory_total": None, "memory_used": None,
+              "swap_total": None, "swap_used": None}
     if system == "Linux":
         values = dict(re.findall(r"^(\w+):\s+(\d+)", text("/proc/meminfo"), re.M))
-        total = int(values.get("MemTotal", 0))
-        available = int(values.get("MemAvailable", 0))
-        return round(100 * (total - available) / total) if total else None
+        total = int(values.get("MemTotal", 0)) * 1024
+        available = int(values.get("MemAvailable", 0)) * 1024
+        if total:
+            result.update(memory_percent=round(100 * (total - available) / total),
+                          memory_total=total, memory_used=total - available)
+        swap = int(values.get("SwapTotal", 0)) * 1024
+        result.update(swap_total=swap, swap_used=max(0, swap - int(values.get("SwapFree", 0)) * 1024))
+        return result
     raw = command(["vm_stat"])
     page = re.search(r"page size of (\d+) bytes", raw)
     available = sum(int(v) for v in re.findall(r"Pages (?:free|inactive|speculative):\s+(\d+)", raw))
     total = command(["sysctl", "-n", "hw.memsize"])
     if page and total.isdigit():
-        return max(0, min(100, round(100 * (1 - available * int(page[1]) / int(total)))))
+        percent = max(0, min(100, round(100 * (1 - available * int(page[1]) / int(total)))))
+        result.update(memory_percent=percent, memory_total=int(total),
+                      memory_used=max(0, int(total) - available * int(page[1])))
+    swap = re.search(r"total = ([\d.]+)M\s+used = ([\d.]+)M", command(["sysctl", "-n", "vm.swapusage"]))
+    if swap:
+        result.update(swap_total=int(float(swap[1]) * 1024**2), swap_used=int(float(swap[2]) * 1024**2))
+    return result
+
+
+def memory(system):
+    return memory_info(system)["memory_percent"]
+
+
+_cpu_last = None
+
+
+def cpu_times():
+    """Total and idle jiffies from the first line of /proc/stat."""
+    try:
+        values = [int(v) for v in text("/proc/stat").split("\n", 1)[0].split()[1:9]]
+    except ValueError:
+        return None
+    if len(values) < 4:
+        return None
+    return sum(values), values[3] + (values[4] if len(values) > 4 else 0)
+
+
+def cpu_usage(before, after):
+    if not before or not after or after[0] <= before[0]:
+        return None
+    total = after[0] - before[0]
+    return max(0, min(100, round(100 * (total - (after[1] - before[1])) / total)))
+
+
+def cpu_percent(system, cpus=None):
+    """CPU in use since the previous call on Linux; the first call has nothing to compare with."""
+    global _cpu_last
+    if system == "Linux":
+        current = cpu_times()
+        previous, _cpu_last = _cpu_last, current
+        return cpu_usage(previous, current)
+    if system == "Darwin":
+        try:
+            used = sum(float(v) for v in command(["ps", "-A", "-o", "%cpu="]).split())
+        except ValueError:
+            return None
+        return max(0, min(100, round(used / (cpus or os.cpu_count() or 1))))
+    return None
+
+
+_battery_last = {"at": 0.0, "value": None}
+
+
+def battery_cached(system):
+    """Battery charge at most every 30 seconds: reading it asks the embedded controller, which is slow."""
+    now = time.time()
+    if now - _battery_last["at"] >= 30:
+        _battery_last.update(at=now, value=battery(system))
+    return _battery_last["value"]
+
+
+def battery(system, root="/sys"):
+    """Charge of the first battery, or None for computers without one."""
+    if system == "Linux":
+        for supply in sorted(Path(root, "class/power_supply").glob("BAT*")):
+            try:
+                percent = int(text(supply / "capacity").strip())
+            except ValueError:
+                continue
+            return {"percent": max(0, min(100, percent)),
+                    "state": text(supply / "status").strip().lower() or "unknown"}
+        return None
+    if system == "Darwin":
+        match = re.search(r"(\d+)%;\s*([A-Za-z ]+);", command(["pmset", "-g", "batt"]))
+        if match:
+            return {"percent": max(0, min(100, int(match[1]))), "state": match[2].strip().lower()}
+    return None
+
+
+REAL_FILESYSTEMS = ("ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs", "zfs", "bcachefs", "jfs",
+                    "ntfs", "ntfs3", "fuseblk", "exfat", "vfat")
+SKIPPED_MOUNTS = ("/boot", "/efi", "/snap", "/var/snap", "/var/lib/docker", "/var/lib/containers", "/nix")
+
+
+def disks(system, mounts=None):
+    """Mounted local filesystems of at least 1 GiB, one per device, root first."""
+    candidates, seen = [], set()
+    if system == "Linux":
+        for line in (text("/proc/mounts") if mounts is None else mounts).splitlines():
+            parts = line.split()
+            if len(parts) < 3 or parts[2] not in REAL_FILESYSTEMS or parts[0] in seen:
+                continue
+            mount = parts[1].replace("\\040", " ")
+            if mount != "/" and (mount + "/").startswith(tuple(prefix + "/" for prefix in SKIPPED_MOUNTS)):
+                continue
+            seen.add(parts[0])
+            candidates.append(mount)
+    elif system == "Darwin":
+        candidates.append("/")
+        for line in command(["df", "-kP"]).splitlines()[1:]:
+            parts = line.split(None, 5)
+            if (len(parts) == 6 and parts[0].startswith("/dev/") and parts[5].startswith("/Volumes/")
+                    and parts[5][9:] not in ("Recovery", "Preboot", "VM", "Update")):
+                candidates.append(parts[5])
+    result = []
+    for mount in sorted(candidates, key=lambda item: item != "/")[:8]:
+        try:
+            usage = shutil.disk_usage(mount)
+        except OSError:
+            continue
+        if usage.total >= 1024**3:
+            result.append({"mount": mount, "total": usage.total, "free": usage.free,
+                           "percent": round(100 * usage.used / usage.total)})
+    return result
+
+
+def process_times():
+    """Name, CPU ticks and resident pages of every process, read from /proc without subprocesses."""
+    result = {}
+    for path in glob.glob("/proc/[0-9]*/stat"):
+        try:
+            with open(path) as stream:
+                raw = stream.read()
+            end = raw.rindex(")")
+            fields = raw[end + 2:].split()
+            result[path.split("/")[2]] = (raw[raw.index("(") + 1:end], int(fields[11]) + int(fields[12]), int(fields[21]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return result
+
+
+def top_processes(system, before=None, seconds=0, limit=5):
+    """Busiest and largest programs, grouped by name. CPU is a share of one core."""
+    cpu, resident = {}, {}
+    if system == "Linux":
+        ticks = os.sysconf("SC_CLK_TCK")
+        page = os.sysconf("SC_PAGE_SIZE")
+        own = str(os.getpid())
+        for pid, (name, used, pages) in process_times().items():
+            if pid == own:
+                continue
+            entry = resident.setdefault(name, [0, 0])
+            entry[0] += pages * page
+            entry[1] += 1
+            old = (before or {}).get(pid)
+            if old and old[0] == name and used > old[1] and seconds > 0:
+                cpu[name] = cpu.get(name, 0) + 100 * (used - old[1]) / ticks / seconds
+    elif system == "Darwin":
+        own = str(os.getpid())
+        for line in command(["ps", "-A", "-o", "pid=", "-o", "pcpu=", "-o", "rss=", "-o", "comm="]).splitlines():
+            parts = line.split(None, 3)
+            try:
+                share, size = float(parts[1]), int(parts[2]) * 1024
+            except (ValueError, IndexError):
+                continue
+            if parts[0] == own:
+                continue
+            # Some programs rewrite their title to include a user or host name; keep the program only.
+            name = os.path.basename(parts[3].strip()).split(":")[0][:40] if len(parts) > 3 else "?"
+            entry = resident.setdefault(name, [0, 0])
+            entry[0] += size
+            entry[1] += 1
+            cpu[name] = cpu.get(name, 0) + share
+    else:
+        return None
+    busiest = sorted(((name, round(value)) for name, value in cpu.items() if value >= 4), key=lambda item: -item[1])
+    largest = sorted(((name, size, count) for name, (size, count) in resident.items() if size), key=lambda item: -item[1])
+    return {"cpu": [list(item) for item in busiest[:limit]], "memory": [list(item) for item in largest[:limit]]}
+
+
+def failed_units(system):
+    """Names of failed system units; None where systemd is not available."""
+    if system != "Linux" or not shutil.which("systemctl"):
+        return None
+    raw = command(["systemctl", "list-units", "--state=failed", "--no-legend", "--plain", "--no-pager"])
+    return [line.split()[0] for line in raw.splitlines() if line.split()][:10]
+
+
+def broadcast_address(name):
+    try:
+        import fcntl
+        import socket
+        import struct
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as handle:
+            raw = fcntl.ioctl(handle.fileno(), 0x8919, struct.pack("256s", name.encode()[:15]))
+        return socket.inet_ntoa(raw[20:24])
+    except (OSError, ImportError, ValueError):
+        return None
+
+
+def network(system):
+    """Default-route interface with its hardware address, which Wake-on-LAN needs once the computer is off."""
+    hardware = r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}"
+    if system == "Linux":
+        routes = []
+        for line in text("/proc/net/route").splitlines()[1:]:
+            parts = line.split()
+            if len(parts) > 6 and parts[1] == "00000000" and re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", parts[0]):
+                routes.append((int(parts[6]) if parts[6].isdigit() else 0, parts[0]))
+        for _, name in sorted(routes):
+            address = text("/sys/class/net/" + name + "/address").strip().lower()
+            if re.fullmatch(hardware, address) and address != "00:00:00:00:00:00":
+                return {"interface": name, "mac": address, "broadcast": broadcast_address(name),
+                        "wireless": os.path.isdir("/sys/class/net/" + name + "/wireless")}
+        return None
+    if system == "Darwin":
+        match = re.search(r"interface:\s*(\w+)", command(["/sbin/route", "-n", "get", "default"]))
+        names = ([match[1]] if match else []) + ["en0", "en1"]
+        for name in names:
+            # A VPN can own the default route; fall back to the built-in adapters, which do have an address.
+            raw = command(["/sbin/ifconfig", name])
+            address = re.search(r"ether (" + hardware + ")", raw)
+            broadcast = re.search(r"broadcast (\d+\.\d+\.\d+\.\d+)", raw)
+            if address and broadcast:
+                return {"interface": name, "mac": address[1], "broadcast": broadcast[1], "wireless": None}
+        return None
     return None
 
 
@@ -199,6 +422,38 @@ def cpu_temperature(system, root="/sys"):
     return round(max(values), 1) if values else None
 
 
+def fan_status(system, root="/sys"):
+    """Fastest fan in RPM when exposed; otherwise the ACPI fan's on/off or level."""
+    if system != "Linux":
+        return None
+    rpms = []
+    paths = list(Path(root, "class/hwmon").glob("hwmon*/fan*_input"))
+    paths += list(Path(root, "bus/platform/devices").glob("PNP0C0B:*/fan_speed_rpm"))
+    for path in paths:
+        try:
+            value = int(text(path).strip())
+        except ValueError:
+            continue
+        if 0 <= value < 30000:
+            rpms.append(value)
+    if rpms:
+        return {"rpm": max(rpms)}
+    levels = []
+    for device in Path(root, "class/thermal").glob("cooling_device*"):
+        if text(device / "type").strip().lower() != "fan":
+            continue
+        try:
+            current, maximum = int(text(device / "cur_state").strip()), int(text(device / "max_state").strip())
+        except ValueError:
+            continue
+        if maximum > 0:
+            levels.append((current / maximum, maximum))
+    if not levels:
+        return None
+    ratio, maximum = max(levels)
+    return {"running": ratio > 0} if maximum == 1 else {"running": ratio > 0, "percent": round(100 * ratio)}
+
+
 def collect_metrics(system=None):
     """Cheap live values; Linux uses kernel files and statvfs, without subprocesses."""
     system = system or platform.system()
@@ -214,14 +469,22 @@ def collect_metrics(system=None):
         if match:
             uptime = max(0, int(time.time()) - int(match[1]))
     return {"metrics_checked_at": time.time(), "uptime": uptime,
-            "disk_percent": round(100 * disk.used / disk.total), "disk_free": disk.free,
-            "memory_percent": memory(system), "load": round(os.getloadavg()[0], 2),
-            "cpu_temperature": cpu_temperature(system)}
+            "disk_percent": round(100 * disk.used / disk.total), "disk_free": disk.free, "disk_total": disk.total,
+            **memory_info(system), "load": round(os.getloadavg()[0], 2),
+            "cpu_percent": cpu_percent(system), "cpu_temperature": cpu_temperature(system), "fan": fan_status(system),
+            "battery": battery_cached(system)}
 
 
 def collect(services=()):
     system = platform.system()
+    # Measure CPU over a short quiet window before the slower version lookups run.
+    window = 0.5
+    before = process_times() if system == "Linux" else None
+    cpu_percent(system)
+    if system == "Linux":
+        time.sleep(window)
     metrics = collect_metrics(system)
+    processes = top_processes(system, before, window)
     service_states = {}
     for service in services:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,100}", service):
@@ -248,6 +511,8 @@ def collect(services=()):
             "boot_id": text("/proc/sys/kernel/random/boot_id").strip() if system == "Linux" else None,
             "kernel": platform.release(), "checked_at": time.time(), **metrics,
             "cpus": os.cpu_count() or 1, "services": service_states,
+            "disks": disks(system), "processes": processes, "failed_units": failed_units(system),
+            "network": network(system),
             "codex": cli, "claude": claude, "chatgpt": desktop_app(system)}
 
 
