@@ -96,7 +96,8 @@ All screenshots use fictional demo data. The parallel update view shows three si
 - Editable private configuration, an add-computer dialog and optional start at login.
 - A read-only JSON CLI for diagnostics, plus a fictional demo mode for screenshots.
 
-- A tray icon on desktops with a tray (Omarchy, Waybar, KDE, GNOME with AppIndicator support): closing the window keeps Fleetlight checking in the background, a click shows or hides it, and its menu has the fleet summary, **Check now** and **Quit**. `fleetlight --background` starts hidden, as does start at login. Without a tray, closing the window quits as before.
+- A tray icon on desktops with a tray (Omarchy, Waybar, KDE, GNOME with AppIndicator support): closing the window keeps Fleetlight checking in the background, a click shows or hides it, and its menu has the fleet summary, **Check now** and **Quit**. The icon gains an exclamation mark when something needs attention and an arrow while updates are being installed. `fleetlight --background` starts hidden, as does start at login. Without a tray, closing the window quits as before.
+- An optional Omarchy bar widget in `data/omarchy-widget`: a native icon that turns the theme's urgent colour when something needs attention, changes while updates are installed and dims when Fleetlight is not running. Click to show or hide, middle-click to check, right-click for the summary and **Quit**. Copy the folder to `~/.config/omarchy/plugins/fleetlight.status`, run `omarchy plugin enable fleetlight.status --section right`, and hide the `fleetlight` tray item from the tray's right-click menu.
 
 The Linux edition does not yet provide Android controller pairing. The Linux app monitors hosts directly and does not depend on a Mac controller.
 
