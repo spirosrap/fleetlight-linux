@@ -96,7 +96,9 @@ All screenshots use fictional demo data. The parallel update view shows three si
 - Editable private configuration, an add-computer dialog and optional start at login.
 - A read-only JSON CLI for diagnostics, plus a fictional demo mode for screenshots.
 
-The Linux edition does not yet provide tray integration or Android controller pairing. The Linux app monitors hosts directly and does not depend on a Mac controller.
+- A tray icon on desktops with a tray (Omarchy, Waybar, KDE, GNOME with AppIndicator support): closing the window keeps Fleetlight checking in the background, a click shows or hides it, and its menu has the fleet summary, **Check now** and **Quit**. `fleetlight --background` starts hidden, as does start at login. Without a tray, closing the window quits as before.
+
+The Linux edition does not yet provide Android controller pairing. The Linux app monitors hosts directly and does not depend on a Mac controller.
 
 ## Install
 

@@ -19,4 +19,4 @@ fleetlight = "fleetlight.__main__:main"
 packages = ["fleetlight"]
 
 [tool.setuptools.package-data]
-fleetlight = ["updaters/*.sh"]
+fleetlight = ["updaters/*.sh", "icons/*.svg"]

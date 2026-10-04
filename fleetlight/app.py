@@ -19,6 +19,7 @@ from . import agents as agent_quota
 from .monitor import History, issues, linux_update_issues, probe_host, refresh
 from .probe import collect_metrics
 from . import sites
+from .tray import Tray
 from . import updates
 from .update_job import installation_changes, history_report
 from .widgets import AvailabilityStrip, FleetRing, MiniBars, Ring, TrendChart
@@ -284,10 +285,14 @@ def size_text(amount):
 
 
 class Fleetlight(Adw.Application):
-    def __init__(self, configuration=None, demo=False):
+    def __init__(self, configuration=None, demo=False, background=False):
         super().__init__(application_id="io.github.fleetlight.Linux.Demo" if demo else "io.github.fleetlight.Linux", flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.config_file = configuration
         self.demo = demo
+        self.background = background
+        self.tray = None
+        self.in_tray = False
+        self.tray_info = ("Fleetlight", 0)
         self.window = None
         self.snapshots = {}
         self.busy = False
@@ -501,7 +506,15 @@ class Fleetlight(Adw.Application):
         self.populate_hosts()
         self._fleet_started = False
         self.window.connect("map", self.reveal_fleet)
-        self.window.present()
+        self.window.connect("notify::visible", lambda *_: self.refresh_tray())
+        if not self.demo:
+            self.tray = Tray(self.get_dbus_connection(), "fleetlight", "Fleetlight", self.toggle_window, self.tray_changed)
+            self.refresh_tray()
+        if self.background and self.tray:
+            # Started for the tray: stay hidden, unless no tray turns up to hold the icon.
+            GLib.timeout_add_seconds(3, self.present_without_tray)
+        else:
+            self.window.present()
         GLib.idle_add(self.reveal_fleet)
         self.timer = GLib.timeout_add_seconds(self.configuration.get("refresh_seconds", 60), self.auto_check)
         if not self.demo:
@@ -523,7 +536,7 @@ class Fleetlight(Adw.Application):
                    ("add", lambda: self.add_computer(), ["<Control>n"]),
                    ("shortcuts", lambda: self.show_shortcuts(), ["<Control>question"]),
                    ("about", lambda: self.show_about(), []),
-                   ("quit", lambda: self.window.close() if self.window else None, ["<Control>q"]))
+                   ("quit", lambda: self.quit_requested(), ["<Control>q"]))
         for name, callback, accelerators in entries:
             if self.lookup_action(name):
                 continue
@@ -543,6 +556,55 @@ class Fleetlight(Adw.Application):
             show = Gio.SimpleAction.new("show", GLib.VariantType.new("s"))
             show.connect("activate", self.show_from_notification)
             self.add_action(show)
+
+    def tray_changed(self, available):
+        """A tray took the icon, or the tray went away: only keep running windowless while it is shown."""
+        if available == self.in_tray:
+            return
+        self.in_tray = available
+        if available:
+            self.hold()
+        else:
+            if self.window is not None and not self.window.get_visible():
+                self.window.present()
+            self.release()
+
+    def present_without_tray(self):
+        if not self.in_tray and self.window is not None:
+            self.window.present()
+        return GLib.SOURCE_REMOVE
+
+    def toggle_window(self):
+        if self.window is None:
+            return
+        if self.window.get_visible():
+            self.window.set_visible(False)
+        else:
+            self.window.present()
+
+    def refresh_tray(self):
+        if self.tray is None or self.window is None:
+            return
+        summary, attention = self.tray_info
+        shown = self.window.get_visible()
+        state = (str(attention) + (" need attention" if attention != 1 else " needs attention")) if attention else "Everything looks healthy"
+        self.tray.update("Fleetlight · " + summary + (" · " + state if attention else ""), bool(attention), [
+            (summary, None),
+            (state, (lambda: (self.window.present(), self.show_page(OVERVIEW))) if attention else None),
+            None,
+            ("Hide Fleetlight" if shown else "Show Fleetlight", self.toggle_window),
+            ("Check now", self.check),
+            None,
+            ("Quit", self.quit_requested)])
+
+    def quit_requested(self):
+        if self.window is None:
+            return
+        if self.active_jobs:
+            self.window.present()
+            self.toast("Updates are running. Keep Fleetlight open to follow progress.")
+            return
+        self.quit()
 
     def show_from_notification(self, _action, parameter):
         if self.window is None:
@@ -1007,6 +1069,8 @@ class Fleetlight(Adw.Application):
         if not query:
             entries.append({"id": OVERVIEW, "title": "Fleet overview", "detail": summary, "detail_css": "muted",
                             "icon": "view-grid-symbolic", "badge": str(attention_total) if attention_total else None})
+        self.tray_info = (summary, attention_total)
+        self.refresh_tray()
         if host_entries:
             entries.append({"header": "Computers"})
         entries += host_entries
@@ -2082,6 +2146,10 @@ class Fleetlight(Adw.Application):
         return GLib.SOURCE_REMOVE
 
     def close_requested(self, *_):
+        if self.in_tray:
+            # Closing only hides the window: checks, notifications and updates carry on behind the tray icon.
+            self.window.set_visible(False)
+            return True
         if self.active_jobs:
             self.toast("Updates are running. Keep Fleetlight open to follow progress.")
             return True

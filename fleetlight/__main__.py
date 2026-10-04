@@ -12,6 +12,7 @@ def main():
     parser.add_argument("--config", help="Use an alternate private configuration file")
     parser.add_argument("--check", action="store_true", help="Print a read-only fleet snapshot as JSON and exit")
     parser.add_argument("--demo", action="store_true", help="Show fictional data, without network access")
+    parser.add_argument("--background", action="store_true", help="Start hidden behind the tray icon, when the desktop has a tray")
     args = parser.parse_args()
     if args.check:
         from .monitor import refresh
@@ -28,7 +29,7 @@ def main():
     except (ImportError, ValueError) as error:
         print("Fleetlight requires GTK4, libadwaita and PyGObject. See README installation instructions.\n" + str(error), file=sys.stderr)
         return 2
-    return Fleetlight(args.config, demo=args.demo).run([sys.argv[0]])
+    return Fleetlight(args.config, demo=args.demo, background=args.background).run([sys.argv[0]])
 
 
 if __name__ == "__main__":

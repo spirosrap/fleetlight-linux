@@ -57,7 +57,7 @@ def set_autostart(enabled):
     # The installer uses a fixed user-local command; do not consume arbitrary desktop files.
     path.parent.mkdir(parents=True, exist_ok=True)
     escaped = str(executable).replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$").replace("%", "%%")
-    path.write_text('[Desktop Entry]\nType=Application\nName=Fleetlight\nExec="' + escaped + '"\nIcon=io.github.fleetlight.Linux\nTerminal=false\n')
+    path.write_text('[Desktop Entry]\nType=Application\nName=Fleetlight\nExec="' + escaped + '" --background\nIcon=io.github.fleetlight.Linux\nTerminal=false\n')
 
 
 def magic_packet(mac):
