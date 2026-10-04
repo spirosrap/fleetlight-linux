@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 
 from . import __version__
@@ -29,7 +30,12 @@ def main():
     except (ImportError, ValueError) as error:
         print("Fleetlight requires GTK4, libadwaita and PyGObject. See README installation instructions.\n" + str(error), file=sys.stderr)
         return 2
-    return Fleetlight(args.config, demo=args.demo, background=args.background).run([sys.argv[0]])
+    status = Fleetlight(args.config, demo=args.demo, background=args.background).run([sys.argv[0]])
+    # State is saved by now. Checks still in flight would otherwise keep the process, and with it
+    # the tray icon, around for up to a minute after quitting.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)
 
 
 if __name__ == "__main__":
