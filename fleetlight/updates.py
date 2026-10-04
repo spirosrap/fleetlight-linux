@@ -21,6 +21,29 @@ CLAUDE_REGISTRY = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
 APPCAST = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
 
 
+MAX_PARALLEL_UPDATES = 3
+
+
+def restore_active_jobs(journal):
+    """Recover concurrent jobs, including the previous single-job journal format."""
+    jobs = journal.get("active_jobs")
+    if jobs is None:
+        legacy = journal.get("active_job")
+        jobs = {legacy["id"]: legacy} if legacy else {}
+    if not isinstance(jobs, dict) or len(jobs) > 32:
+        raise ValueError("Invalid saved jobs")
+    hosts = set()
+    for ident, job in jobs.items():
+        if not isinstance(job, dict) or not isinstance(ident, str) or not re.fullmatch(r"[a-f0-9]{32}", ident) or job.get("id") != ident:
+            raise ValueError("Invalid saved job")
+        validate({"version": 1, "hosts": [job["host"]]})
+        host_id = job["host"]["id"]
+        if host_id in hosts:
+            raise ValueError("More than one saved installer for a computer")
+        hosts.add(host_id)
+    return jobs
+
+
 def connection(host, command):
     validate({"version": 1, "hosts": [host]})
     if host.get("local"):

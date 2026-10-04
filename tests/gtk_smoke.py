@@ -139,45 +139,68 @@ def verify():
         # Drive the real queue state machine with fake jobs: no SSH or installation.
         from fleetlight import updates
         pending, _ = updates.batch_candidates(app.configuration["hosts"], app.snapshots, app.app_updates, "cli")
+        # Include enough fictional computers to test queue refill beyond three slots.
+        import copy, uuid
+        template = pending[0]
+        for i in range(4):
+            item = copy.deepcopy(template)
+            item["host"]["id"] = "parallel-fixture-" + str(i)
+            item["host"]["name"] = "Parallel fixture " + str(i)
+            app.configuration["hosts"].append(item["host"])
+            app.snapshots[item["host"]["id"]] = dict(app.snapshots[template["host"]["id"]], id=item["host"]["id"])
+            app.app_updates[item["host"]["id"]] = {"cli": item["checked"]}
+            pending.append(item)
         launched = []
         app.persist_jobs = lambda: None
         app.check = lambda *a, **k: None
-        def fake_start(host, kind, checked):
+        def fake_start(host, kind, checked, from_batch=False):
+            ident = uuid.uuid4().hex
             launched.append(host["id"])
-            app.active_job = {"id": "a" * 32, "host": host, "kind": kind, "state": "running"}
+            app.active_jobs[ident] = {"id": ident, "host": host, "kind": kind, "state": "running"}
+            return ident
         app.begin_update = fake_start
         app.begin_batch("cli", pending)
-        assert len(launched) == 1
-        # A new controller restores both the running job and remaining queue.
+        assert len(launched) == 3 and len(app.active_jobs) == 3
+        app.render_batch()
+        assert "3 running:" in app.batch_label.get_text()
+        assert app.banner.get_button_label() == "Stop queued updates"
+        # A new controller restores every running job and the remaining queue.
         import json, os, tempfile
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "fleetlight"
             state.mkdir()
-            (state / "update-controller.json").write_text(json.dumps({"active_job": app.active_job, "batch": app.batch, "last_jobs": {}}))
+            (state / "update-controller.json").write_text(json.dumps({"active_jobs": app.active_jobs, "batch": app.batch, "last_jobs": {}}))
             with patch.dict(os.environ, {"XDG_STATE_HOME": directory}):
                 recovered = Fleetlight()
-            assert recovered.active_job["host"]["id"] == launched[0]
-            assert len(recovered.batch["pending"]) == len(pending) - 1
-        app.receive_job({"state": "succeeded", "phase": "Verified"})
-        assert len(launched) == 2
-        app.receive_job({"state": "failed", "phase": "Fixture failure"})
-        assert len(launched) == 2 and not app.batch["running"]
+            assert recovered.active_jobs == app.active_jobs
+            assert len(recovered.batch["pending"]) == len(pending) - 3
+        # A later job finishes first; the queue fills its slot immediately.
+        app.receive_job(next(reversed(app.active_jobs)), {"state": "succeeded", "phase": "Verified"})
+        assert len(launched) == 4 and len(app.active_jobs) == 3
+        app.receive_job(next(iter(app.active_jobs)), {"state": "failed", "phase": "Fixture failure"})
+        assert len(launched) == 4 and len(app.active_jobs) == 2
         assert not app.batch["pending"] and "Fixture failure" in app.batch["stopped"]
+        for ident in list(app.active_jobs):
+            app.receive_job(ident, {"state": "succeeded", "phase": "Verified"})
+        assert not app.active_jobs and not app.batch["running"]
         app.begin_batch("cli", pending)
+        before_cancel = len(launched)
         app.cancel_batch()
-        assert app.active_job is not None and not app.batch["pending"]
-        app.receive_job({"state": "succeeded", "phase": "Verified"})
-        assert len(launched) == 3 and not app.batch["running"]
+        assert len(app.active_jobs) == 3 and not app.batch["pending"]
+        for ident in list(app.active_jobs):
+            app.receive_job(ident, {"state": "succeeded", "phase": "Verified"})
+        assert len(launched) == before_cancel and not app.batch["running"]
         launched.clear()
         app.begin_batch("cli", pending, automatic=True)
-        assert len(launched) == 1 and app.batch.get("automatic")
-        app.receive_job({"state": "failed", "phase": "Auto fixture failure"})
-        assert len(launched) == 2
+        assert len(launched) == 3 and app.batch.get("automatic")
+        app.receive_job(next(iter(app.active_jobs)), {"state": "failed", "phase": "Auto fixture failure"})
+        assert len(launched) == 4 and len(app.active_jobs) == 3
         assert "Continuing after" in app.batch["stopped"]
         app.cancel_batch()
-        app.receive_job({"state": "succeeded", "phase": "Verified"})
-        assert len(launched) == 2 and not app.batch["pending"]
+        for ident in list(app.active_jobs):
+            app.receive_job(ident, {"state": "succeeded", "phase": "Verified"})
+        assert len(launched) == 4 and not app.batch["pending"] and not app.active_jobs
         app.configuration["auto_updates"] = True
         before = list(launched)
         app.maybe_auto_update()
@@ -205,7 +228,7 @@ def verify():
         app.show_shortcuts()
         app.show_about()
         assert len(app.get_windows()) >= 1
-        print("GTK smoke test passed: overview, UI, batch sequencing, failure stop, cancellation and recovery")
+        print("GTK smoke test passed: overview, UI, parallel batch queue, failure stop, cancellation and recovery")
     except Exception:
         failures.append(traceback.format_exc())
     finally:

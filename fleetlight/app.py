@@ -215,7 +215,8 @@ class Fleetlight(Adw.Application):
         self.app_updates = {}
         self.update_checks_running = False
         self.last_update_check = 0
-        self.active_job = None
+        self.active_jobs = {}
+        self.job_polls = set()
         self.last_jobs = {}
         self.update_history_expanded = {}
         self.batch = None
@@ -234,7 +235,7 @@ class Fleetlight(Adw.Application):
         if not demo:
             try:
                 journal = json.loads(self.journal_path.read_text())
-                self.active_job = journal.get("active_job")
+                self.active_jobs = updates.restore_active_jobs(journal)
                 self.batch = journal.get("batch")
                 self.pending_restarts = journal.get("pending_restarts", {})
                 if self.batch:
@@ -247,12 +248,8 @@ class Fleetlight(Adw.Application):
                 self.last_jobs = journal.get("last_jobs", {})
                 if not isinstance(self.last_jobs, dict):
                     self.last_jobs = {}
-                if self.active_job:
-                    config.validate({"version": 1, "hosts": [self.active_job["host"]]})
-                    if not isinstance(self.active_job["id"], str) or len(self.active_job["id"]) != 32:
-                        raise ValueError("Invalid saved job")
             except (ValueError, OSError, TypeError, KeyError, AttributeError):
-                self.active_job = None
+                self.active_jobs = {}
                 self.batch = None
                 self.last_jobs = {}
             try:
@@ -541,11 +538,11 @@ class Fleetlight(Adw.Application):
         if self.demo or self._fleet_started:
             return GLib.SOURCE_REMOVE
         self._fleet_started = True
-        if self.active_job:
+        if self.active_jobs:
             self.watch_job()
-        elif self.batch and self.batch.get("running") and self.batch.get("pending"):
+        if self.batch and self.batch.get("running"):
             self.advance_batch()
-        else:
+        elif not self.active_jobs:
             self.check()
         return GLib.SOURCE_REMOVE
 
@@ -558,7 +555,7 @@ class Fleetlight(Adw.Application):
         return GLib.SOURCE_CONTINUE
 
     def check(self, force_updates=True):
-        if self.busy or self.demo or self.update_checks_running or self.active_job:
+        if self.busy or self.demo or self.update_checks_running or self.active_jobs:
             return
         self.force_update_check = force_updates
         self.busy = True
@@ -1266,11 +1263,12 @@ class Fleetlight(Adw.Application):
         self.update_row(apps, host, "claude", "Claude CLI", data.get("claude"), "utilities-terminal-symbolic")
         desktop = data.get("chatgpt", {})
         self.update_row(apps, host, "desktop", "ChatGPT", desktop.get("version"), "applications-internet-symbolic")
-        if self.active_job and self.active_job["host"]["id"] == host["id"]:
+        active = self.job_for_host(host["id"])
+        if active:
             progress = Gtk.ProgressBar()
             progress.pulse()
             apps.add(progress)
-            apps.add(label(self.active_job.get("phase", "Preparing update"), "good", wrap=True))
+            apps.add(label(active.get("phase", "Preparing update"), "good", wrap=True))
         self.update_history(apps, host)
         if data.get("os") == "Linux":
             system_card = self.section("Linux updates", "Distribution packages and restart status")
@@ -1293,7 +1291,7 @@ class Fleetlight(Adw.Application):
             required = Gtk.CheckButton(label="Warn when stopped")
             required.set_valign(Gtk.Align.CENTER)
             required.set_active(not optional)
-            required.set_sensitive(not self.demo and not self.busy and not self.update_checks_running and not self.active_job)
+            required.set_sensitive(not self.demo and not self.busy and not self.update_checks_running and not self.active_jobs)
             required.connect("toggled", lambda button, service=name: self.service_preference(host, service, button.get_active()))
             row.add_suffix(required)
             services.add(row)
@@ -1313,7 +1311,7 @@ class Fleetlight(Adw.Application):
         if data.get("package_manager") in actions.UPDATE_COMMANDS:
             update = Gtk.Button(label="System updates…")
             update.connect("clicked", lambda *_: self.confirm_update(host, data["package_manager"]))
-            update.set_sensitive(not self.active_job and not self.update_checks_running)
+            update.set_sensitive(not self.active_jobs and not self.update_checks_running)
             controls.append(update)
         if self.demo:
             controls.set_sensitive(False)
@@ -1361,7 +1359,7 @@ class Fleetlight(Adw.Application):
             button = Gtk.Button(label="Update")
             button.add_css_class("suggested-action")
             button.set_valign(Gtk.Align.CENTER)
-            button.set_sensitive(not self.demo and not self.busy and not self.update_checks_running and not self.active_job)
+            button.set_sensitive(not self.demo and not self.busy and not self.update_checks_running and not self.active_jobs)
             button.connect("clicked", lambda *_: self.request_update(host, kind, checked))
             row.add_suffix(button)
         elif state == "current":
@@ -1393,7 +1391,7 @@ class Fleetlight(Adw.Application):
         self.render_detail()
 
     def check_application_updates(self):
-        if self.update_checks_running or self.active_job or self.demo:
+        if self.update_checks_running or self.active_jobs or self.demo:
             return
         self.update_checks_running = True
         self.refresh_button.set_sensitive(False)
@@ -1438,21 +1436,25 @@ class Fleetlight(Adw.Application):
     def render_batch(self):
         if not hasattr(self, "batch_buttons"):
             return
-        blocked = self.demo or self.busy or self.update_checks_running or bool(self.active_job)
+        blocked = self.demo or self.busy or self.update_checks_running or bool(self.active_jobs)
         for kind, button in self.batch_buttons.items():
             candidates, _ = updates.batch_candidates(self.configuration["hosts"], self.snapshots, self.app_updates, kind)
             title = "Restart required computers" if kind == "restart" else "Update all " + ACTION_NAMES[kind]
             button.set_label(title + " (" + str(len(candidates)) + ")")
             button.set_sensitive(not blocked and bool(candidates))
-            button.set_tooltip_text("Run Check now to refresh available releases" if not candidates else "Review computers and start sequential updates")
+            button.set_tooltip_text("Run Check now to refresh available releases" if not candidates else
+                                    "Review computers and restart one at a time" if kind == "restart" else
+                                    "Review computers and update up to three at a time")
         running = bool(self.batch and self.batch.get("running"))
         text = ""
         if self.batch:
             done = len(self.batch.get("results", []))
             total = self.batch.get("total", 0)
             text = ("Automatic " if self.batch.get("automatic") else "") + ACTION_NAMES[self.batch["kind"]] + " fleet updates: " + str(done) + "/" + str(total) + " completed"
-            if running and self.active_job:
-                text += " · " + self.active_job["host"]["name"] + " · " + self.active_job.get("phase", "Updating")
+            if running and self.active_jobs:
+                text += " · " + str(len(self.active_jobs)) + " running: " + "; ".join(
+                    job["host"]["name"] + " · " + job.get("phase", "Updating")
+                    for job in self.active_jobs.values())
             elif self.batch.get("stopped"):
                 text += " · " + self.batch["stopped"]
             if self.pending_restarts:
@@ -1462,12 +1464,12 @@ class Fleetlight(Adw.Application):
             self.batch_label.set_text("Automatic updates are on · Codex CLI, Claude CLI, ChatGPT and Linux packages install when checks find them. Computers are not restarted.")
         else:
             self.batch_label.set_text("Fleet-wide updates · only computers with available releases are included")
-        if running and self.active_job:
+        if running and self.active_jobs:
             self.banner.set_title(text)
-            self.banner.set_button_label("Stop after current update" if self.batch.get("pending") else None)
+            self.banner.set_button_label("Stop queued updates" if self.batch.get("pending") else None)
             self.banner.set_revealed(True)
-        elif self.active_job:
-            job = self.active_job
+        elif self.active_jobs:
+            job = next(iter(self.active_jobs.values()))
             self.banner.set_title("Updating " + ACTION_NAMES.get(job.get("kind"), "software") + " on " + job["host"]["name"] + " · " + job.get("phase", "Working"))
             self.banner.set_button_label(None)
             self.banner.set_revealed(True)
@@ -1475,14 +1477,15 @@ class Fleetlight(Adw.Application):
             self.banner.set_revealed(False)
 
     def request_batch(self, kind):
-        if self.demo or self.busy or self.update_checks_running or self.active_job:
+        if self.demo or self.busy or self.update_checks_running or self.active_jobs:
             return
         pending, skipped = updates.batch_candidates(self.configuration["hosts"], self.snapshots, self.app_updates, kind)
         if not pending:
             self.toast("No eligible updates. Run Check now to refresh releases.")
             return
         title = ACTION_NAMES[kind]
-        body = "Update " + title + " sequentially on these computers:\n\n"
+        body = ("Restart these computers one at a time:\n\n" if kind == "restart" else
+                "Update " + title + " on up to three computers at a time:\n\n")
         body += "\n".join(item["host"]["name"] + (" → " + item["checked"]["latest"] if kind in ("cli", "claude", "desktop") else " · " + item["checked"].get("detail", "")) for item in pending)
         if skipped:
             body += "\n\nSkipped: " + "; ".join(item["name"] + " (" + item["reason"] + ")" for item in skipped)
@@ -1495,7 +1498,7 @@ class Fleetlight(Adw.Application):
         elif kind == "restart":
             pending.sort(key=lambda item: item["host"].get("local", False))
             body += "\n\nSave your work. Each computer will restart after a one-minute delay. The local controller is scheduled last. Fleetlight verifies a new boot when each computer returns."
-        body += "\n\nThe batch stops if an update fails. You can stop remaining updates without interrupting the active installer."
+        body += "\n\nThe batch stops starting new updates if one fails. Updates already running will finish. You can stop queued updates without interrupting installers."
         dialog = Adw.MessageDialog(transient_for=self.window, heading="Restart required computers?" if kind == "restart" else "Update all " + title + "?", body=body)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("update", ("Restart " if kind == "restart" else "Update ") + str(len(pending)) + " computers")
@@ -1506,7 +1509,7 @@ class Fleetlight(Adw.Application):
         dialog.present()
 
     def begin_batch(self, kind, pending, automatic=False):
-        if self.active_job or self.busy or self.update_checks_running:
+        if self.active_jobs or self.busy or self.update_checks_running:
             return
         # Recheck eligibility after the review dialog; use only the reviewed hosts.
         fresh, _ = updates.batch_candidates([item["host"] for item in pending], self.snapshots,
@@ -1531,7 +1534,7 @@ class Fleetlight(Adw.Application):
     def maybe_auto_update(self):
         if self.demo or not config.auto_updates_enabled(self.configuration):
             return
-        if self.busy or self.update_checks_running or self.active_job:
+        if self.busy or self.update_checks_running or self.active_jobs:
             return
         if self.batch and self.batch.get("running"):
             return
@@ -1543,17 +1546,31 @@ class Fleetlight(Adw.Application):
             self.begin_batch(kind, pending, automatic=True)
 
     def advance_batch(self):
-        if self.active_job or not self.batch:
+        if not self.batch or not self.batch.get("running"):
             return
-        if self.batch.get("pending"):
-            item = self.batch["pending"].pop(0)
-            # begin_update saves the active job and remaining queue together before dispatch.
-            self.begin_update(item["host"], self.batch["kind"], item["checked"])
-            if not self.active_job:
-                self.batch["pending"].insert(0, item)
+        # Restarts stay sequential so the local controller can be scheduled last.
+        limit = 1 if self.batch["kind"] == "restart" else updates.MAX_PARALLEL_UPDATES
+        while self.batch.get("pending") and len(self.active_jobs) < limit:
+            # Never overlap installers on one computer, even in a recovered queue.
+            index = next((i for i, item in enumerate(self.batch["pending"])
+                          if not self.job_for_host(item["host"]["id"])), None)
+            if index is None:
+                break
+            item = self.batch["pending"].pop(index)
+            # Save the new job and the remaining queue atomically before dispatch.
+            ident = self.begin_update(item["host"], self.batch["kind"], item["checked"], from_batch=True)
+            if not ident:
+                self.batch["pending"].insert(index, item)
                 self.batch["running"] = False
                 self.batch["stopped"] = "Could not start the next update; retry after checking"
+                try:
+                    self.persist_jobs()
+                except OSError:
+                    self.toast("Could not save the stopped queue")
                 self.render_batch()
+                return
+        if self.active_jobs:
+            self.render_batch()
             return
         self.batch["running"] = False
         try:
@@ -1581,7 +1598,7 @@ class Fleetlight(Adw.Application):
             self.render_batch()
 
     def request_update(self, host, kind, checked):
-        if self.active_job or self.update_checks_running or self.busy or self.demo:
+        if self.active_jobs or self.update_checks_running or self.busy or self.demo:
             return
         if checked.get("state") != "available" or time.time() - checked.get("checked_at", 0) > 1800:
             self.toast("Run Check now before updating")
@@ -1607,7 +1624,7 @@ class Fleetlight(Adw.Application):
         self.update_history_expanded[key] = widget.get_expanded()
 
     def install_records(self, host):
-        active = self.active_job if (self.active_job or {}).get("host", {}).get("id") == host["id"] else None
+        active = self.job_for_host(host["id"])
         if self.demo:
             receipt = active or self.last_jobs.get(host["id"])
             return [receipt] if receipt else []
@@ -1695,94 +1712,115 @@ class Fleetlight(Adw.Application):
             return
         self.render_detail()
 
-    def persist_jobs(self):
-        config.atomic_json(self.journal_path, {"active_job": self.active_job, "last_jobs": self.last_jobs, "batch": self.batch, "pending_restarts": self.pending_restarts})
+    def job_for_host(self, host_id):
+        return next((job for job in self.active_jobs.values() if job["host"]["id"] == host_id), None)
 
-    def begin_update(self, host, kind, checked):
-        if self.active_job or self.update_checks_running or self.busy:
+    def persist_jobs(self):
+        config.atomic_json(self.journal_path, {"active_jobs": self.active_jobs, "last_jobs": self.last_jobs,
+                          "batch": self.batch, "pending_restarts": self.pending_restarts})
+
+    def begin_update(self, host, kind, checked, from_batch=False):
+        if self.update_checks_running or self.busy or self.job_for_host(host["id"]):
+            return
+        if self.active_jobs and not from_batch:
+            return
+        limit = 1 if kind == "restart" else updates.MAX_PARALLEL_UPDATES
+        if len(self.active_jobs) >= limit:
             return
         ident = uuid.uuid4().hex
-        self.active_job = {"id": ident, "host": dict(host), "kind": kind, "target": checked["latest"],
+        self.active_jobs[ident] = {"id": ident, "host": dict(host), "kind": kind, "target": checked["latest"],
                            "boot_id": self.snapshots.get(host["id"], {}).get("boot_id"),
                            "state": "queued", "phase": "Starting " + ACTION_NAMES[kind],
                            "auto_key": list(updates.auto_target_key(host, kind, checked))}
         try:
             self.persist_jobs()
         except OSError:
-            self.active_job = None
+            self.active_jobs.pop(ident)
             self.toast("Update was not started: its recovery receipt could not be saved")
             return
         self.last_jobs.pop(host["id"], None)
         self.refresh_button.set_sensitive(False)
         self.spinner.start()
         self.render_detail()
+        self.job_polls.add(ident)
         def start():
             try:
                 receipt = updates.start_job(host, kind, checked, ident)
             except Exception as error:
                 receipt = {"state": "failed", "phase": "Update could not start: " + str(error)}
-            GLib.idle_add(self.receive_job, receipt)
+            GLib.idle_add(self.receive_job, ident, receipt)
         threading.Thread(target=start, daemon=True).start()
+        return ident
 
-    def watch_job(self):
-        if not self.active_job:
-            return GLib.SOURCE_REMOVE
-        job = dict(self.active_job)
-        self.refresh_button.set_sensitive(False)
-        self.spinner.start()
-        def poll():
-            receipt = updates.job_status(job["host"], job["id"])
-            GLib.idle_add(self.receive_job, receipt)
-        threading.Thread(target=poll, daemon=True).start()
+    def watch_job(self, ident=None):
+        for job_id in ([ident] if ident else list(self.active_jobs)):
+            if job_id not in self.active_jobs or job_id in self.job_polls:
+                continue
+            job = dict(self.active_jobs[job_id])
+            self.refresh_button.set_sensitive(False)
+            self.spinner.start()
+            self.job_polls.add(job_id)
+            def poll(job=job):
+                try:
+                    receipt = updates.job_status(job["host"], job["id"])
+                except Exception:
+                    receipt = {"state": "disconnected", "phase": "Status check failed; checking the existing job again"}
+                GLib.idle_add(self.receive_job, job["id"], receipt)
+            threading.Thread(target=poll, daemon=True).start()
         return GLib.SOURCE_REMOVE
 
-    def receive_job(self, receipt):
-        if not self.active_job:
+    def receive_job(self, ident, receipt):
+        self.job_polls.discard(ident)
+        job = self.active_jobs.get(ident)
+        if job is None:
             return GLib.SOURCE_REMOVE
-        self.active_job.update({k:v for k,v in receipt.items() if k not in ("host", "id", "kind")})
+        if receipt.get("id", ident) != ident:
+            GLib.timeout_add_seconds(3, self.watch_job, ident)
+            return GLib.SOURCE_REMOVE
+        job.update({k:v for k,v in receipt.items() if k not in ("host", "id", "kind")})
         state = receipt.get("state")
         if state in ("succeeded", "failed", "busy", "interrupted", "unknown"):
-            if state == "succeeded" and self.active_job["kind"] == "restart":
-                host = self.active_job["host"]
-                self.pending_restarts[host["id"]] = {"name": host["name"], "boot_id": self.active_job.get("boot_id"), "scheduled_at": time.time()}
+            if state == "succeeded" and job["kind"] == "restart":
+                host = job["host"]
+                self.pending_restarts[host["id"]] = {"name": host["name"], "boot_id": job.get("boot_id"), "scheduled_at": time.time()}
                 if host["id"] in self.app_updates:
                     self.app_updates[host["id"]]["restart"] = {"state": "scheduled", "detail": "Waiting for new boot"}
             if state != "succeeded":
-                key = self.active_job.get("auto_key")
+                key = job.get("auto_key")
                 if isinstance(key, list) and len(key) >= 2:
                     self.auto_attempted.add(tuple(key))
             if self.batch and self.batch.get("running"):
-                self.batch.setdefault("results", []).append({"host": self.active_job["host"]["name"], "state": state})
+                self.batch.setdefault("results", []).append({"host": job["host"]["name"], "state": state})
                 if state != "succeeded":
                     if self.batch.get("automatic"):
-                        self.batch["stopped"] = "Continuing after " + self.active_job["host"]["name"] + ": " + receipt.get("phase", state)
+                        self.batch["stopped"] = "Continuing after " + job["host"]["name"] + ": " + receipt.get("phase", state)
                     else:
                         self.batch["pending"] = []
-                        self.batch["stopped"] = "Stopped after " + self.active_job["host"]["name"] + ": " + receipt.get("phase", state)
-            self.last_jobs[self.active_job["host"]["id"]] = dict(self.active_job)
-            self.update_history_expanded[(self.active_job["host"]["id"], "install-history")] = True
-            self.refresh_install_history(self.active_job["host"])
+                        self.batch["stopped"] = "Stopped after " + job["host"]["name"] + ": " + receipt.get("phase", state)
+            self.last_jobs[job["host"]["id"]] = dict(job)
+            self.update_history_expanded[(job["host"]["id"], "install-history")] = True
+            self.refresh_install_history(job["host"])
             self.toast(receipt.get("phase", "Update completed"))
-            self.active_job = None
-            self.spinner.stop()
-            self.refresh_button.set_sensitive(True)
+            self.active_jobs.pop(ident)
+            if not self.active_jobs:
+                self.spinner.stop()
+                self.refresh_button.set_sensitive(True)
         try:
             self.persist_jobs()
         except OSError:
             self.toast("Could not save the latest update receipt; keep Fleetlight open")
         self.render_detail()
-        if self.active_job:
-            GLib.timeout_add_seconds(3 if state != "disconnected" else 10, self.watch_job)
-        else:
-            if self.batch and self.batch.get("running"):
-                self.advance_batch()
-            else:
-                self.check()
+        if ident in self.active_jobs:
+            GLib.timeout_add_seconds(3 if state != "disconnected" else 10, self.watch_job, ident)
+        if self.batch and self.batch.get("running"):
+            self.advance_batch()
+        elif not self.active_jobs:
+            self.check()
         return GLib.SOURCE_REMOVE
 
     def close_requested(self, *_):
-        if self.active_job:
-            self.toast("An update is running. Keep Fleetlight open to follow progress.")
+        if self.active_jobs:
+            self.toast("Updates are running. Keep Fleetlight open to follow progress.")
             return True
         return False
 
@@ -1883,7 +1921,7 @@ class Fleetlight(Adw.Application):
         test.connect("clicked", run_test)
 
         def add(*_):
-            if self.busy or self.update_checks_running or self.active_job:
+            if self.busy or self.update_checks_running or self.active_jobs:
                 show_result("Wait for the current check to finish", "warning")
                 return
             host = host_from_form()
@@ -2004,7 +2042,7 @@ class Fleetlight(Adw.Application):
         dialog.set_content(view)
 
         def apply(*_):
-            if self.busy or self.update_checks_running or self.active_job:
+            if self.busy or self.update_checks_running or self.active_jobs:
                 error.set_text("Wait for the current check to finish")
                 return
             try:
