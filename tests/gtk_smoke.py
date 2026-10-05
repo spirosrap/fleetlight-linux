@@ -42,6 +42,20 @@ def verify():
         assert app.page_title.get_title() == "Fleet overview"
         assert set(app.overview_widgets) == {h["id"] for h in app.configuration["hosts"]}
         assert host_rows() == ["local", "studio", "server", "lab"]
+        # Computers can be reordered; the sidebar, overview and Alt+number follow the saved order.
+        assert app.move_host("lab", "local", False)
+        assert host_rows() == ["lab", "local", "studio", "server"]
+        assert list(app.overview_widgets) == host_rows()
+        assert not app.move_host("lab", "lab", True) and not app.move_host("missing", "lab", True)
+        app.show_page("lab")
+        app.shift_host(-1)
+        assert host_rows() == ["lab", "local", "studio", "server"]
+        for _ in range(3):
+            app.shift_host(1)
+        assert host_rows() == ["local", "studio", "server", "lab"]
+        app.jump(3)
+        assert app.selected == "lab"
+        app.show_page("fleet")
         app.show_page("local")
         assert app.selected == "local"
         assert app.page_title.get_title() == "This Computer"

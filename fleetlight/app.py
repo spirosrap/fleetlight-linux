@@ -11,7 +11,7 @@ from urllib.parse import quote
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
 from . import __version__
 from . import actions, config
@@ -82,6 +82,8 @@ button.host-card:hover > .card { background-color: mix(@card_bg_color, @accent_b
   box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.55), 0 8px 22px alpha(black, 0.20); }
 .section-title { font-size: 16px; font-weight: 700; }
 .row-title { font-weight: 600; }
+.navigation-sidebar row.drop-before { box-shadow: inset 0 2px 0 @accent_bg_color; }
+.navigation-sidebar row.drop-after { box-shadow: inset 0 -2px 0 @accent_bg_color; }
 .timeline-dot { min-width: 8px; min-height: 8px; border-radius: 999px; background: currentColor; }
 """
 
@@ -98,6 +100,7 @@ SHORTCUTS_UI = """<?xml version="1.0" encoding="UTF-8"?>
             <property name="title">Fleet</property>
             <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;r F5</property><property name="title">Check all computers now</property></object></child>
             <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;f</property><property name="title">Find a computer or website</property></object></child>
+            <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Alt&gt;Up &lt;Alt&gt;Down</property><property name="title">Move the open computer up or down the sidebar</property></object></child>
             <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;Home</property><property name="title">Show the fleet overview</property></object></child>
             <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Alt&gt;1...9</property><property name="title">Open a computer by its position in the sidebar</property></object></child>
             <child><object class="GtkShortcutsShortcut"><property name="accelerator">&lt;Control&gt;n</property><property name="title">Add a computer</property></object></child>
@@ -534,6 +537,8 @@ class Fleetlight(Adw.Application):
                    ("overview", lambda: self.show_page(OVERVIEW), ["<Control>Home"]),
                    ("settings", lambda: self.settings(), ["<Control>comma"]),
                    ("add", lambda: self.add_computer(), ["<Control>n"]),
+                   ("move-up", lambda: self.shift_host(-1), ["<Alt>Up"]),
+                   ("move-down", lambda: self.shift_host(1), ["<Alt>Down"]),
                    ("shortcuts", lambda: self.show_shortcuts(), ["<Control>question"]),
                    ("about", lambda: self.show_about(), []),
                    ("quit", lambda: self.quit_requested(), ["<Control>q"]))
@@ -1034,7 +1039,7 @@ class Fleetlight(Adw.Application):
         filtering = self.attention.get_active()
         attention_total = 0
         host_entries = []
-        for host in sorted(hosts, key=lambda host: not host.get("local", False)):
+        for host in hosts:
             data, checked, online_host, cached, trouble, tone = self.host_state(host)
             attention_total += bool(trouble)
             if query and query not in host["name"].casefold():
@@ -1051,6 +1056,7 @@ class Fleetlight(Adw.Application):
                 detail, detail_css = ("Local computer" if host.get("local") else "Waiting for first check"), "muted"
             host_entries.append({"id": host["id"], "title": host["name"], "detail": detail, "detail_css": detail_css,
                                  "tone": tone, "badge": str(len(trouble)) if online_host and trouble else None,
+                                 "movable": True,
                                  "usage": self.usage(data) if online_host else None})
         site_entries = []
         for site in watched:
@@ -1159,8 +1165,63 @@ class Fleetlight(Adw.Application):
         row.badge.set_visible(False)
         body.append(row.badge)
         row.set_child(body)
+        if entry.get("movable"):
+            self.make_reorderable(row)
         self.update_sidebar_row(row, entry)
         return row
+
+    def make_reorderable(self, row):
+        """Let a computer's sidebar row be dragged onto another to change the saved order."""
+        def begin(source, _drag):
+            source.set_icon(Gtk.WidgetPaintable.new(row), 0, 0)
+
+        def mark(_target, _x, y):
+            below = y > row.get_height() / 2
+            set_tone(row, "drop-after" if below else "drop-before", ("drop-before", "drop-after"))
+            return Gdk.DragAction.MOVE
+
+        def drop(_target, value, _x, y):
+            set_tone(row, None, ("drop-before", "drop-after"))
+            return self.move_host(value, row.host_id, y > row.get_height() / 2)
+
+        source = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
+        source.connect("prepare", lambda *_: Gdk.ContentProvider.new_for_value(GObject.Value(str, row.host_id)))
+        source.connect("drag-begin", begin)
+        row.add_controller(source)
+        target = Gtk.DropTarget.new(str, Gdk.DragAction.MOVE)
+        target.connect("motion", mark)
+        target.connect("leave", lambda *_: set_tone(row, None, ("drop-before", "drop-after")))
+        target.connect("drop", drop)
+        row.add_controller(target)
+
+    def move_host(self, ident, beside, after):
+        """Place one computer just before or after another, save the order and redraw."""
+        hosts = list(self.configuration["hosts"])
+        moving = next((host for host in hosts if host["id"] == ident), None)
+        if moving is None or ident == beside or not any(host["id"] == beside for host in hosts):
+            return False
+        hosts.remove(moving)
+        hosts.insert(next(index for index, host in enumerate(hosts) if host["id"] == beside) + bool(after), moving)
+        if hosts == self.configuration["hosts"]:
+            return True
+        candidate = {**self.configuration, "hosts": hosts}
+        if not self.demo:
+            try:
+                config.atomic_json(self.config_file or config.config_path(), config.validate(candidate))
+            except (ValueError, OSError):
+                self.toast("Could not save the new order")
+                return False
+        self.configuration = candidate
+        self.populate_hosts()
+        return True
+
+    def shift_host(self, step):
+        """Alt+Up and Alt+Down move the open computer one place in the sidebar."""
+        hosts = self.configuration["hosts"]
+        index = next((index for index, host in enumerate(hosts) if host["id"] == self.selected), None)
+        if self.window is None or index is None or not 0 <= index + step < len(hosts):
+            return
+        self.move_host(self.selected, hosts[index + step]["id"], step > 0)
 
     def sidebar_header(self, title):
         row = Gtk.ListBoxRow(selectable=False, activatable=False, can_focus=False)
@@ -1388,7 +1449,7 @@ class Fleetlight(Adw.Application):
         self.content.append(heading)
         grid = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                            min_children_per_line=1, max_children_per_line=2, row_spacing=12, column_spacing=12)
-        for host in sorted(hosts, key=lambda host: not host.get("local", False)):
+        for host in hosts:
             grid.append(self.host_card(host))
         self.content.append(grid)
         fleet = box(True, 4)
@@ -2327,7 +2388,7 @@ class Fleetlight(Adw.Application):
             agents_group.add(toggle)
         page.add(agents_group)
 
-        computers = Adw.PreferencesGroup(title="Computers", description="Remove a computer here or add one with the + button. Names and services can be edited in the configuration file below.")
+        computers = Adw.PreferencesGroup(title="Computers", description="Reorder or remove a computer here, or add one with the + button. Computers can also be dragged in the sidebar. Names and services can be edited in the configuration file below.")
         computer_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         computer_list.add_css_class("boxed-list")
         computers.add(computer_list)
@@ -2338,13 +2399,24 @@ class Fleetlight(Adw.Application):
         websites.add(website_list)
         page.add(websites)
 
+        def shift(index, step):
+            hosts = working["hosts"]
+            hosts[index], hosts[index + step] = hosts[index + step], hosts[index]
+            fill_lists()
+
         def fill_lists():
             clear(computer_list)
-            for host in working["hosts"]:
+            for index, host in enumerate(working["hosts"]):
                 services = ", ".join(host.get("services", []))
                 subtitle = ("This computer" if host.get("local") else host.get("alias", "")) + ((" · " + services) if services else "")
                 row = Adw.ActionRow(title=host["name"], subtitle=subtitle)
                 row.add_prefix(Gtk.Image.new_from_icon_name("computer-symbolic" if host.get("local") else "network-server-symbolic"))
+                for step, icon, text in ((-1, "go-up-symbolic", "up"), (1, "go-down-symbolic", "down")):
+                    move = Gtk.Button(icon_name=icon, tooltip_text="Move " + host["name"] + " " + text, valign=Gtk.Align.CENTER)
+                    move.add_css_class("flat")
+                    move.set_sensitive(0 <= index + step < len(working["hosts"]))
+                    move.connect("clicked", lambda _, index=index, step=step: shift(index, step))
+                    row.add_suffix(move)
                 if not host.get("local"):
                     remove = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Remove " + host["name"], valign=Gtk.Align.CENTER)
                     remove.add_css_class("flat")
@@ -2434,7 +2506,7 @@ class Fleetlight(Adw.Application):
 
     def jump(self, index):
         """Alt+number opens the computer at that position in the sidebar."""
-        hosts = sorted(self.configuration["hosts"], key=lambda host: not host.get("local", False))
+        hosts = self.configuration["hosts"]
         if self.window is not None and index < len(hosts):
             self.show_page(hosts[index]["id"])
 

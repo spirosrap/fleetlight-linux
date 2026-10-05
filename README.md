@@ -28,6 +28,7 @@ All screenshots use fictional demo data. The parallel update view shows three si
 - Wake-on-LAN for offline computers using the hardware address from their last successful check. Wake support must be enabled on the computer, and its network must be reachable by broadcast.
 - Automatic, dark and light appearance settings, numeric sidebar shortcuts, and notifications when an agent's quota runs low.
 - Lower long-running memory use: shared HTTPS certificate contexts, drawing callbacks that let old widgets be released, compact history saved periodically, and live readings that update existing widgets.
+- Computers can be reordered: drag them in the sidebar, press Alt+Up or Alt+Down on the open computer, or use the arrows in **Settings › Computers**. The order is saved in `hosts` and no longer forces this computer to the top.
 - Fleet updates run on up to three different computers at once, with one installer per computer, independent progress and recovery, and cancellation of queued work. Computer restarts remain sequential.
 
 ## Version 0.4.0
