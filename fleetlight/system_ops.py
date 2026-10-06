@@ -196,8 +196,13 @@ def check():
         if not shutil.which('checkupdates'):
             result['detail'] = 'Install pacman-contrib to check updates'
             return result
-        with tempfile.TemporaryDirectory(prefix='fleetlight-system-check-') as directory:
-            completed = run(['checkupdates', '--nocolor'], {'CHECKUPDATES_DB': directory + '/db'})
+        for attempt in range(3):
+            # A single mirror stall must not fail the check; retry with a clean database.
+            with tempfile.TemporaryDirectory(prefix='fleetlight-system-check-') as directory:
+                completed = run(['checkupdates', '--nocolor'], {'CHECKUPDATES_DB': directory + '/db'})
+            if completed.returncode in (0, 2) or attempt == 2:
+                break
+            time.sleep(3)
         if completed.returncode not in (0, 2):
             result['detail'] = 'Package metadata refresh failed'
             return result

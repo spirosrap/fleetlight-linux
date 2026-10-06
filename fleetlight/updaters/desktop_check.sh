@@ -71,8 +71,18 @@ VERIFY:failed
 pacman_check_log="$pacman_check_db/check.log"
 cleanup_pacman_check() { rm -rf "$pacman_check_db"; }
 trap cleanup_pacman_check EXIT HUP INT TERM
-CHECKUPDATES_DB="$pacman_check_db/db" checkupdates --nocolor >"$pacman_check_log" 2>&1
-pacman_refresh_status=$?
+# A single mirror stall must not fail the check; retry with a clean database.
+pacman_refresh_attempt=1
+while :; do
+  rm -rf "$pacman_check_db/db"
+  CHECKUPDATES_DB="$pacman_check_db/db" checkupdates --nocolor >"$pacman_check_log" 2>&1
+  pacman_refresh_status=$?
+  if [ "$pacman_refresh_status" -eq 0 ] || [ "$pacman_refresh_status" -eq 2 ] || [ "$pacman_refresh_attempt" -ge 3 ]; then
+    break
+  fi
+  pacman_refresh_attempt=$((pacman_refresh_attempt + 1))
+  sleep 3
+done
 if [ "$pacman_refresh_status" -ne 0 ] && [ "$pacman_refresh_status" -ne 2 ]; then
   tail -n 8 "$pacman_check_log" 2>/dev/null || true
   printf 'CHECK:refresh-failed

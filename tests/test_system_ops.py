@@ -19,8 +19,19 @@ class SystemTests(unittest.TestCase):
             self.assertEqual(system_ops.check()['state'], 'protected')
 
     def test_metadata_failure_never_reported_current(self):
-        with patch.object(system_ops.platform, 'system', return_value='Linux'), patch.object(system_ops.shutil, 'which', return_value='/bin/tool'), patch.object(system_ops, 'reboot_status', return_value={'required':False}), patch.object(system_ops, 'run', return_value=result(1)):
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), patch.object(system_ops.shutil, 'which', return_value='/bin/tool'), patch.object(system_ops, 'reboot_status', return_value={'required':False}), patch.object(system_ops, 'run', return_value=result(1)), patch.object(system_ops.time, 'sleep'):
             self.assertEqual(system_ops.check()['state'], 'unknown')
+
+    def test_arch_metadata_refresh_retried_after_mirror_stall(self):
+        def which(name):
+            return '/bin/' + name if name in ('pacman', 'checkupdates') else None
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=which), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', side_effect=[result(1), result(2)]), \
+                patch.object(system_ops.time, 'sleep') as sleep:
+            self.assertEqual(system_ops.check()['state'], 'current')
+        sleep.assert_called_once()
 
     def apt_check(self, responses):
         with patch.object(system_ops.platform, 'system', return_value='Linux'), patch.object(system_ops.shutil, 'which', side_effect=lambda name: '/bin/apt' if name == 'apt' else None), patch.object(system_ops, 'reboot_status', return_value={'required': False}), patch.object(system_ops, 'run', side_effect=responses), patch.object(system_ops.time, 'sleep'):
