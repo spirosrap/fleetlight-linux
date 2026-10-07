@@ -593,14 +593,18 @@ class Fleetlight(Adw.Application):
         summary, attention = self.tray_info
         shown = self.window.get_visible()
         state = (str(attention) + (" need attention" if attention != 1 else " needs attention")) if attention else "Everything looks healthy"
-        self.tray.update("Fleetlight · " + summary + (" · " + state if attention else ""), bool(attention), [
+        # While installers run the icon changes and the hover text names the computers being updated.
+        updating = sorted({job["host"]["name"] for job in self.active_jobs.values()})
+        progress = "Updating " + ", ".join(updating) + "…" if updating else ""
+        self.tray.update("Fleetlight · " + (progress if updating else summary + (" · " + state if attention else "")), bool(attention), [
             (summary, None),
             (state, (lambda: (self.window.present(), self.show_page(OVERVIEW))) if attention else None),
+            *([(progress, lambda: (self.window.present(), self.show_page(OVERVIEW)))] if updating else []),
             None,
             ("Hide Fleetlight" if shown else "Show Fleetlight", self.toggle_window),
             ("Check now", self.check),
             None,
-            ("Quit", self.quit_requested)])
+            ("Quit", self.quit_requested)], updating=bool(updating))
 
     def quit_requested(self):
         if self.window is None:
@@ -2104,6 +2108,7 @@ class Fleetlight(Adw.Application):
         return next((job for job in self.active_jobs.values() if job["host"]["id"] == host_id), None)
 
     def persist_jobs(self):
+        self.refresh_tray()
         config.atomic_json(self.journal_path, {"active_jobs": self.active_jobs, "last_jobs": self.last_jobs,
                           "batch": self.batch, "pending_restarts": self.pending_restarts})
 

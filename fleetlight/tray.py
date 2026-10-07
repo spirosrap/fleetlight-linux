@@ -11,8 +11,9 @@ ITEM_PATH = "/StatusNotifierItem"
 MENU_PATH = "/MenuBar"
 ITEM_INTERFACE = "org.kde.StatusNotifierItem"
 MENU_INTERFACE = "com.canonical.dbusmenu"
-# Not a "-symbolic" name: bars recolour those, and this icon keeps the app's own colours.
+# Not "-symbolic" names: bars recolour those, and these icons keep the app's own colours.
 ICON = "fleetlight-tray"
+UPDATING_ICON = "fleetlight-updating-tray"  # The list with a download arrow, shown while installers run.
 ICON_DIRECTORY = str(Path(__file__).resolve().parent / "icons")
 
 INTERFACES = """<node>
@@ -70,6 +71,11 @@ INTERFACES = """<node>
 </node>"""
 
 
+def icon_name(updating):
+    """The icon for the tray's state: the download arrow while updates are being installed, otherwise the usual one."""
+    return UPDATING_ICON if updating else ICON
+
+
 def item_properties(entry):
     """D-Bus menu properties of one entry: None is a separator, otherwise (label, callback or None)."""
     if entry is None:
@@ -95,6 +101,7 @@ class Tray:
         self.available = available
         self.tooltip = title
         self.attention = False
+        self.updating = False
         self.entries = []
         self.revision = 1
         self.registered = False
@@ -126,8 +133,9 @@ class Tray:
             self.registered = False
             self.available(False)
 
-    def update(self, tooltip, attention, entries):
-        """Replace the hover text, the attention state and the menu: None or (label, callback or None)."""
+    def update(self, tooltip, attention, entries, updating=False):
+        """Replace the hover text, the attention state, the menu (None or (label, callback or None)) and
+        whether the icon shows updates being installed."""
         labels = [entry and entry[0] for entry in entries]
         changed = labels != [entry and entry[0] for entry in self.entries] or [bool(entry and entry[1]) for entry in entries] != [bool(entry and entry[1]) for entry in self.entries]
         self.entries = list(entries)
@@ -140,6 +148,10 @@ class Tray:
         if attention != self.attention:
             self.attention = attention
             self.emit(ITEM_PATH, ITEM_INTERFACE, "NewStatus", GLib.Variant("(s)", (self.status(),)))
+        if updating != self.updating:
+            self.updating = updating
+            self.emit(ITEM_PATH, ITEM_INTERFACE, "NewIcon", None)
+            self.emit(ITEM_PATH, ITEM_INTERFACE, "NewAttentionIcon", None)
 
     def emit(self, path, interface, name, parameters):
         try:
@@ -154,7 +166,7 @@ class Tray:
         if name in ("IconPixmap", "OverlayIconPixmap", "AttentionIconPixmap"):
             return GLib.Variant("a(iiay)", [])
         if name == "ToolTip":
-            return GLib.Variant("(sa(iiay)ss)", (ICON, [], self.tooltip, ""))
+            return GLib.Variant("(sa(iiay)ss)", (icon_name(self.updating), [], self.tooltip, ""))
         if name == "WindowId":
             return GLib.Variant("i", 0)
         if name == "ItemIsMenu":
@@ -162,7 +174,8 @@ class Tray:
         if name == "Menu":
             return GLib.Variant("o", MENU_PATH)
         return GLib.Variant("s", {"Category": "ApplicationStatus", "Id": self.ident, "Title": self.title, "Status": self.status(),
-                                  "IconThemePath": ICON_DIRECTORY, "IconName": ICON, "AttentionIconName": ICON}.get(name, ""))
+                                  "IconThemePath": ICON_DIRECTORY, "IconName": icon_name(self.updating),
+                                  "AttentionIconName": icon_name(self.updating)}.get(name, ""))
 
     def item_call(self, _connection, _sender, _path, _interface, method, _parameters, invocation):
         invocation.return_value(None)

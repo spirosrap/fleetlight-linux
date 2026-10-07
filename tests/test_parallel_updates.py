@@ -24,7 +24,7 @@ def controller(path, pending=(), kind='desktop', automatic=True):
                         pending_restarts={}, busy=False, update_checks_running=False,
                         journal_path=path, refresh_button=Mock(), spinner=Mock(),
                         toast=Mock(), render_detail=Mock(), render_batch=Mock(),
-                        check=Mock(), refresh_install_history=Mock())
+                        check=Mock(), refresh_install_history=Mock(), refresh_tray=Mock())
     c.batch = {'kind': kind, 'pending': list(pending), 'results': [], 'total': len(pending),
                'running': True, 'automatic': automatic}
     for name in ('job_for_host', 'persist_jobs', 'begin_update', 'advance_batch',
