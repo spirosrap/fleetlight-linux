@@ -1,6 +1,7 @@
 """Local Codex, Cursor and Claude remaining-quota checks. Never persist session tokens."""
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from calendar import monthrange
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -30,13 +31,13 @@ CLAUDE_USAGE = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_PROFILE = "https://api.anthropic.com/api/oauth/profile"
 # The credentials file keeps the tier from sign-in, so upgrades only show up in the live profile.
 CLAUDE_PROFILE_INTERVAL = 3600
-claude_profile = {"at": 0.0, "plan": None}
+claude_profile = {"at": 0.0, "plan": None, "renewal": None}
 CODEX_SUBSCRIPTION = "https://chatgpt.com/backend-api/subscriptions?account_id="
 # Codex reports every Pro tier as planType "pro"; the ChatGPT subscription product tells them apart.
 CODEX_PRODUCTS = {"chatgptgoplan": "Go", "chatgptplusplan": "Plus $20", "chatgptprolite": "Pro $100",
                   "chatgptpro": "Pro $200", "chatgptpromax": "Pro Max"}
 CODEX_PRODUCT_INTERVAL = 3600
-codex_product = {"at": 0.0, "name": None}
+codex_product = {"at": 0.0, "name": None, "renewal": None}
 # The usage endpoint has a small per-account budget shared with every Claude Code
 # session, so check it rarely and back off while it is rate limited.
 CLAUDE_INTERVAL = 300
@@ -278,12 +279,13 @@ def collect_codex():
         return unavailable("codex", "Codex did not report a quota window")
     tightest = min(windows, key=lambda item: item["remaining_percent"])
     parts = [format_codex_window(item) for item in windows]
-    plan = codex_plan() or limits.get("planType") or account.get("planType") or ""
+    product, renewal = codex_plan()
+    plan = product or limits.get("planType") or account.get("planType") or ""
     if not isinstance(plan, str):
         plan = ""
     return {"id": "codex", "name": "Codex", "state": "ok", "plan": plan,
             "remaining_percent": tightest["remaining_percent"],
-            "detail": " · ".join(parts), "windows": windows}
+            "detail": " · ".join(parts), "windows": windows, **({"renewal": renewal} if renewal else {})}
 
 
 def codex_auth():
@@ -307,13 +309,25 @@ def codex_product_name(payload):
     return CODEX_PRODUCTS.get(product) if isinstance(product, str) else None
 
 
+def codex_renewal(payload):
+    """When the ChatGPT subscription next bills, or ends if it was cancelled: {"at", "ends"} or None."""
+    entitlement = payload.get("entitlement") if isinstance(payload, dict) else None
+    if not isinstance(entitlement, dict):
+        return None
+    cancels = iso_timestamp(entitlement.get("cancels_at"))
+    if cancels:
+        return {"at": cancels, "ends": True}
+    renews = iso_timestamp(entitlement.get("renews_at")) or iso_timestamp(payload.get("active_until"))
+    return {"at": renews, "ends": False} if renews else None
+
+
 def codex_plan():
-    """ChatGPT product name such as "Pro $100", looked up at most hourly."""
+    """ChatGPT product name such as "Pro $100" and the plan's renewal, looked up at most hourly."""
     now = time.time()
     if now - codex_product["at"] < CODEX_PRODUCT_INTERVAL:
-        return codex_product["name"]
+        return codex_product["name"], codex_product["renewal"]
     auth = codex_auth()
-    name = None
+    name = renewal = None
     if auth:
         token, account = auth
         request = urllib.request.Request(
@@ -322,11 +336,12 @@ def codex_plan():
                      "User-Agent": "Fleetlight/" + __version__})
         try:
             with urllib.request.urlopen(request, timeout=12) as response:
-                name = codex_product_name(json.loads(response.read().decode("utf-8", "replace")))
+                payload = json.loads(response.read().decode("utf-8", "replace"))
+            name, renewal = codex_product_name(payload), codex_renewal(payload)
         except (urllib.error.URLError, TimeoutError, ValueError, OSError):
-            name = None
-    codex_product.update(at=now, name=name)
-    return name
+            name = renewal = None
+    codex_product.update(at=now, name=name, renewal=renewal)
+    return name, renewal
 
 
 def cursor_state_db():
@@ -408,11 +423,20 @@ def cursor_request(url, token):
         return json.loads(response.read().decode("utf-8", "replace"))
 
 
+def cursor_renewal(payload):
+    """The end of the Cursor billing cycle, when the plan renews: {"at", "ends"} or None."""
+    info = payload.get("planInfo") if isinstance(payload, dict) else None
+    at = epoch((info or {}).get("billingCycleEnd") if isinstance(info, dict) else None) or epoch(payload.get("billingCycleEnd") if isinstance(payload, dict) else None)
+    return {"at": at, "ends": False} if at else None
+
+
 def cursor_plan(token):
+    """The plan name and renewal from Cursor's plan info, or (None, None)."""
     try:
-        return cursor_plan_name(cursor_request(CURSOR_PLAN, token))
+        payload = cursor_request(CURSOR_PLAN, token)
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
-        return None
+        return None, None
+    return cursor_plan_name(payload), cursor_renewal(payload)
 
 
 def collect_cursor():
@@ -431,9 +455,12 @@ def collect_cursor():
               "windows": [{"label": "period", "remaining_percent": remaining,
                            "reset": until(payload.get("billingCycleEnd")), "reset_day": "",
                            "reset_at": epoch(payload.get("billingCycleEnd"))}]}
-    plan = cursor_plan(token)
+    plan, renewal = cursor_plan(token)
     if plan:
         result["plan"] = plan
+    renewal = renewal or cursor_renewal(payload)
+    if renewal:
+        result["renewal"] = renewal
     return result
 
 
@@ -473,6 +500,25 @@ def claude_profile_plan(payload):
     return claude_plan_name(organization.get("organization_type"), organization.get("rate_limit_tier")) or None
 
 
+def claude_renewal(payload, now=None):
+    """An estimate of the next monthly billing date: the subscription's start day in the coming month.
+    The profile reports when the subscription started and that it is active, not the billing day itself."""
+    organization = payload.get("organization") if isinstance(payload, dict) else None
+    if not isinstance(organization, dict) or organization.get("subscription_status") not in (None, "active"):
+        return None
+    started = iso_timestamp(organization.get("subscription_created_at"))
+    if not started:
+        return None
+    now = time.time() if now is None else now
+    start = datetime.fromtimestamp(started, tz=timezone.utc)
+    year, month = start.year, start.month
+    while True:
+        candidate = start.replace(year=year, month=month, day=min(start.day, monthrange(year, month)[1]))
+        if candidate.timestamp() > now:
+            return {"at": candidate.timestamp(), "ends": False, "estimated": True}
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+
+
 def claude_plan(credentials):
     """Live plan from the OAuth profile at most hourly, else the stored sign-in tier."""
     now = time.time()
@@ -483,10 +529,11 @@ def claude_plan(credentials):
                      "User-Agent": "Fleetlight/" + __version__})
         try:
             with urllib.request.urlopen(request, timeout=12) as response:
-                plan = claude_profile_plan(json.loads(response.read().decode("utf-8", "replace")))
+                payload = json.loads(response.read().decode("utf-8", "replace"))
+            plan, renewal = claude_profile_plan(payload), claude_renewal(payload, now)
         except (urllib.error.URLError, TimeoutError, ValueError, OSError):
-            plan = None
-        claude_profile.update(at=now, plan=plan)
+            plan = renewal = None
+        claude_profile.update(at=now, plan=plan, renewal=renewal)
     return claude_profile["plan"] or claude_plan_name(credentials.get("subscriptionType"), credentials.get("rateLimitTier"))
 
 
@@ -542,9 +589,12 @@ def collect_claude():
     if not windows:
         return unavailable("claude", "Claude did not report a quota window")
     tightest = min(windows, key=lambda item: item["remaining_percent"])
-    return {"id": "claude", "name": "Claude", "state": "ok", "plan": claude_plan(credentials),
-            "remaining_percent": tightest["remaining_percent"],
-            "detail": " · ".join(format_codex_window(item) for item in windows), "windows": windows}
+    result = {"id": "claude", "name": "Claude", "state": "ok", "plan": claude_plan(credentials),
+              "remaining_percent": tightest["remaining_percent"],
+              "detail": " · ".join(format_codex_window(item) for item in windows), "windows": windows}
+    if claude_profile["renewal"]:
+        result["renewal"] = claude_profile["renewal"]
+    return result
 
 
 COLLECTORS = {"codex": collect_codex, "cursor": collect_cursor, "claude": collect_claude}
@@ -594,7 +644,8 @@ def demo_usage():
             ("claude", "Max 5x $100", [window("5h", 72, 2.2), window("weekly", 90, 121)])):
         result[name] = {"id": name, "name": name.title(), "state": "ok", "plan": plan,
                         "remaining_percent": min(item["remaining_percent"] for item in windows),
-                        "detail": " · ".join(format_codex_window(item) for item in windows), "windows": windows}
+                        "detail": " · ".join(format_codex_window(item) for item in windows), "windows": windows,
+                        "renewal": {"at": now + 17 * 86400, "ends": False, "estimated": name == "claude"}}
     return result
 
 

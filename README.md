@@ -22,7 +22,7 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ## Version 0.5.0
 
-- Circular CPU, memory, disk, temperature and agent quota gauges, a fleet health ring, and compact resource bars in the sidebar. Quota cards show each usage window and its reset time.
+- Circular CPU, memory, disk, temperature and agent quota gauges, a fleet health ring, and compact resource bars in the sidebar. Quota cards show each usage window and its reset time, and the date the plan renews (Codex and Cursor report it; Claude's is estimated from the subscription's start day).
 - Interactive resource history charts with live, one-hour, six-hour, one-day and one-week ranges, plus availability strips and recent activity. Existing history is migrated automatically.
 - More computer details: memory and swap sizes, extra mounted disks, programs using the most CPU and memory, failed systemd units, battery charge and readable Linux fan speeds or ACPI fan state.
 - Wake-on-LAN for offline computers using the hardware address from their last successful check. Wake support must be enabled on the computer, and its network must be reachable by broadcast.

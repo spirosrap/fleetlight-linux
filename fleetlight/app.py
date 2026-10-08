@@ -973,9 +973,11 @@ class Fleetlight(Adw.Application):
                 heading.append(plan)
             body.append(heading)
             windows = data.get("windows") if isinstance(data.get("windows"), list) else []
+            shown = 0
             for window in windows[:4]:
                 if not isinstance(window, dict) or not isinstance(window.get("remaining_percent"), (int, float)):
                     continue
+                shown += 1
                 left = window["remaining_percent"]
                 line = box(False, 8)
                 line.append(label(str(window.get("label", "limit")), "small"))
@@ -1006,11 +1008,21 @@ class Fleetlight(Adw.Application):
                 amount.set_width_chars(4)
                 meter.append(amount)
                 body.append(meter)
+            renewal = data.get("renewal") if isinstance(data.get("renewal"), dict) else None
+            if shown and renewal and isinstance(renewal.get("at"), (int, float)):
+                # The plan's billing date, apart from the quota windows above it.
+                moment = time.localtime(renewal["at"])
+                verb = "Plan ends" if renewal.get("ends") else "Plan renews"
+                estimated = bool(renewal.get("estimated"))
+                when = label(f"{verb} {'~' if estimated else ''}" + time.strftime("%d %b", moment), "small muted numeric", xalign=1)
+                when.set_tooltip_text(f"{verb} on " + time.strftime("%A %d %B %Y", moment) + ", in " + agent_quota.until(renewal["at"])
+                                      + (". Estimated from the subscription's start date: the provider does not report the billing day." if estimated else "."))
+                body.append(when)
             note = None
             if data.get("stale"):
                 when = time.strftime("%H:%M", time.localtime(data["checked_at"])) if data.get("checked_at") else "earlier"
                 note = label(f"Last known at {when} · " + data["stale"], "small warning", wrap=True)
-            elif not body.get_first_child().get_next_sibling():
+            elif not shown:
                 detail = data.get("detail") or ("Checking remaining quota…" if data.get("state") == "checking" else "Unavailable")
                 note = label(detail, "small " + ("warning" if data.get("state") == "unavailable" else "muted"), wrap=True)
             if note is not None:
