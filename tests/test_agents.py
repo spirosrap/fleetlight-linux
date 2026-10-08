@@ -75,6 +75,27 @@ class AgentQuotaTests(unittest.TestCase):
         self.assertEqual(agents.summarize_claude({"five_hour": {"utilization": None}}), [])
         self.assertEqual(agents.summarize_claude(None), [])
 
+    def test_claude_model_scoped_limits_become_windows(self):
+        windows = agents.summarize_claude({
+            "five_hour": {"utilization": 11.0, "resets_at": None},
+            "seven_day": {"utilization": 1.0, "resets_at": None},
+            "seven_day_opus": {"utilization": 5.0, "resets_at": None},
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 11, "scope": None},
+                {"kind": "weekly_all", "group": "weekly", "percent": 1, "scope": None},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 2,
+                 "resets_at": "2026-10-15T15:00:00+00:00",
+                 "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 5,
+                 "scope": {"model": {"id": None, "display_name": "Opus"}, "surface": None}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 7, "scope": {"surface": "cowork"}},
+                "junk",
+            ],
+        })
+        self.assertEqual([(item["label"], item["remaining_percent"]) for item in windows],
+                         [("5h", 89), ("weekly", 99), ("weekly Opus", 95), ("weekly Fable", 98)])
+        self.assertTrue(windows[3]["reset_day"])
+
     def test_claude_expired_sign_in_is_not_refreshed(self):
         credentials = {"accessToken": "secret", "expiresAt": (time.time() - 60) * 1000, "subscriptionType": "pro"}
         original = agents.claude_credentials

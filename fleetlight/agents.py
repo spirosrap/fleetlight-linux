@@ -557,10 +557,38 @@ def summarize_claude(payload):
         remaining = remaining_percent(window.get("utilization"))
         if remaining is None:
             continue
-        reset = iso_timestamp(window.get("resets_at"))
-        windows.append({"label": label, "remaining_percent": remaining, "reset_at": reset,
-                        "reset": until(reset) if reset else "", "reset_day": reset_day(reset) if reset else ""})
+        windows.append(claude_window(label, remaining, window.get("resets_at")))
+    # Models with their own weekly budget (Fable, for example) are only reported
+    # as scoped entries of the "limits" list, not as top-level windows.
+    labels = {item["label"] for item in windows}
+    for limit in payload.get("limits") or []:
+        label = claude_scoped_label(limit)
+        if label is None or label in labels:
+            continue
+        remaining = remaining_percent(limit.get("percent"))
+        if remaining is None:
+            continue
+        labels.add(label)
+        windows.append(claude_window(label, remaining, limit.get("resets_at")))
     return windows
+
+
+def claude_window(label, remaining, resets_at):
+    reset = iso_timestamp(resets_at)
+    return {"label": label, "remaining_percent": remaining, "reset_at": reset,
+            "reset": until(reset) if reset else "", "reset_day": reset_day(reset) if reset else ""}
+
+
+def claude_scoped_label(limit):
+    """"weekly Fable" for a limit scoped to one model, None for the shared ones."""
+    if not isinstance(limit, dict) or limit.get("kind") != "weekly_scoped":
+        return None
+    scope = limit.get("scope")
+    model = scope.get("model") if isinstance(scope, dict) else None
+    name = model.get("display_name") if isinstance(model, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return "weekly " + name.strip()
 
 
 def collect_claude():
