@@ -76,6 +76,8 @@ progressbar progress { background: @accent_bg_color; }
 progressbar.good progress { background: @success_bg_color; }
 progressbar.warning progress { background: @warning_bg_color; }
 progressbar.bad progress { background: @error_bg_color; }
+progressbar.layer trough { background: transparent; }
+progressbar.model progress { background: @accent_bg_color; }
 button.host-card { padding: 0; border-radius: 16px; }
 button.host-card > .card { transition: box-shadow 160ms ease-out, background-color 160ms ease-out; }
 button.host-card:hover > .card { background-color: mix(@card_bg_color, @accent_bg_color, 0.10);
@@ -285,6 +287,50 @@ def size_text(amount):
             value = amount / scale
             return (f"{value:.0f} " if value >= 100 else f"{value:.1f} ") + unit
     return f"{amount / 1024:.0f} KiB"
+
+
+def group_windows(windows):
+    """Quota windows to draw, with a model's own share of a window (label "weekly Fable")
+    folded into that window as an extra so the card keeps one row per window."""
+    rows = [dict(item) for item in windows
+            if isinstance(item, dict) and isinstance(item.get("remaining_percent"), (int, float))]
+    by_label = {str(item.get("label", "")): item for item in rows}
+    grouped = []
+    for item in rows:
+        base, _, name = str(item.get("label", "")).partition(" ")
+        parent = by_label.get(base) if name else None
+        if parent is not None and parent is not item:
+            parent.setdefault("extras", []).append({"name": name, "remaining_percent": item["remaining_percent"]})
+        else:
+            grouped.append(item)
+    return grouped
+
+
+def quota_tone(left):
+    return "bad" if left <= LOW_QUOTA else "warning" if left <= 20 else "good"
+
+
+def layered_bar(window, extras):
+    """One thin bar; a model's own share is drawn over it in the accent colour, the shorter on top."""
+    left = window["remaining_percent"]
+    layers = [(left, quota_tone(left), str(window.get("label", "")))]
+    layers += [(item["remaining_percent"], "model", item["name"]) for item in extras]
+    layers.sort(key=lambda layer: -layer[0])
+    bars = []
+    for fraction, tone, _ in layers:
+        bar = Gtk.ProgressBar(fraction=max(0, min(1, fraction / 100)), hexpand=True, valign=Gtk.Align.CENTER)
+        bar.add_css_class("thin")
+        bar.add_css_class(tone)
+        bars.append(bar)
+    if len(bars) == 1:
+        return bars[0]
+    stack = Gtk.Overlay(hexpand=True, valign=Gtk.Align.CENTER)
+    stack.set_child(bars[0])
+    for bar in bars[1:]:
+        bar.add_css_class("layer")
+        stack.add_overlay(bar)
+    stack.set_tooltip_text(" · ".join(f"{name} {fraction}% left" for fraction, _, name in layers))
+    return stack
 
 
 class Fleetlight(Adw.Application):
@@ -974,13 +1020,12 @@ class Fleetlight(Adw.Application):
             body.append(heading)
             windows = data.get("windows") if isinstance(data.get("windows"), list) else []
             shown = 0
-            for window in windows[:4]:
-                if not isinstance(window, dict) or not isinstance(window.get("remaining_percent"), (int, float)):
-                    continue
+            for window in group_windows(windows)[:4]:
                 shown += 1
                 left = window["remaining_percent"]
+                extras = window.get("extras") or []
                 line = box(False, 8)
-                line.append(label(str(window.get("label", "limit")), "small"))
+                line.append(label(" · ".join([str(window.get("label", "limit"))] + [item["name"] for item in extras]), "small"))
                 reset_at = window.get("reset_at")
                 if isinstance(reset_at, (int, float)):
                     # Countdowns are worked out now, not when the quota was read; the weekday is enough within a week.
@@ -1000,12 +1045,10 @@ class Fleetlight(Adw.Application):
                     line.append(when)
                 body.append(line)
                 meter = box(False, 8)
-                bar = Gtk.ProgressBar(fraction=max(0, min(1, left / 100)), hexpand=True, valign=Gtk.Align.CENTER)
-                bar.add_css_class("thin")
-                bar.add_css_class("bad" if left <= LOW_QUOTA else "warning" if left <= 20 else "good")
-                meter.append(bar)
-                amount = label(f"{left}%", "small numeric", xalign=1)
-                amount.set_width_chars(4)
+                meter.append(layered_bar(window, extras))
+                amount = label(" · ".join([f"{left}%"] + [f"{item['remaining_percent']}%" for item in extras]),
+                               "small numeric", xalign=1)
+                amount.set_width_chars(4 + 6 * len(extras))
                 meter.append(amount)
                 body.append(meter)
             renewal = data.get("renewal") if isinstance(data.get("renewal"), dict) else None
