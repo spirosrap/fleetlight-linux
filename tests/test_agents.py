@@ -1,5 +1,6 @@
 import time
 import unittest
+from unittest import mock
 
 from fleetlight import agents, config
 
@@ -136,6 +137,54 @@ class AgentQuotaTests(unittest.TestCase):
         self.assertIsNone(agents.cursor_plan_name({"planInfo": {"planName": "  "}}))
         self.assertIsNone(agents.cursor_plan_name({"planInfo": None}))
         self.assertIsNone(agents.cursor_plan_name([]))
+
+    def test_cursor_window_label_follows_the_plan_period(self):
+        self.assertEqual(agents.cursor_window_label({"planInfo": {"includedUsagePeriod": "INCLUDED_USAGE_PERIOD_WEEKLY"}}), "weekly")
+        self.assertEqual(agents.cursor_window_label({"planInfo": {"includedUsagePeriod": "INCLUDED_USAGE_PERIOD_DAILY"}}), "daily")
+        self.assertEqual(agents.cursor_window_label({"planInfo": {"includedUsagePeriod": "INCLUDED_USAGE_PERIOD_MONTHLY"}}), "monthly")
+        self.assertEqual(agents.cursor_window_label({"planInfo": {"includedUsagePeriod": "INCLUDED_USAGE_PERIOD_5_HOUR"}}), "5h")
+        self.assertEqual(agents.cursor_window_label({"planInfo": {"includedUsageWindowMins": 300}}), "5h")
+        self.assertEqual(agents.cursor_window_label({"planInfo": {"includedUsageWindowMins": 10080}}), "weekly")
+        self.assertEqual(agents.cursor_window_label({"planInfo": {"includedUsagePeriod": "INCLUDED_USAGE_PERIOD_UNSPECIFIED"}}), "period")
+        self.assertEqual(agents.cursor_window_label({"planInfo": {"planName": "Pro"}}), "period")
+        self.assertEqual(agents.cursor_window_label(None), "period")
+
+    def test_cursor_summary_names_the_plan_window(self):
+        reset = time.time() + 6 * 86400 + 23 * 3600 + 60
+        usage = {"planUsage": {"totalPercentUsed": 0}, "billingCycleEnd": str(int(reset * 1000))}
+        plan = {"planInfo": {"planName": "Premium", "price": "", "billingCycleEnd": str(int((reset + 24 * 86400) * 1000)),
+                             "includedUsagePeriod": "INCLUDED_USAGE_PERIOD_WEEKLY", "includedUsageResetsAt": str(int(reset * 1000))}}
+        remaining, detail = agents.summarize_cursor(usage, plan)
+        self.assertEqual(remaining, 100)
+        self.assertEqual(detail, "100% remaining this week · 6d 23h")
+        remaining, detail = agents.summarize_cursor(usage, {"planInfo": {"includedUsagePeriod": "INCLUDED_USAGE_PERIOD_5_HOUR"}})
+        self.assertEqual(detail, "100% remaining in the 5h window · 6d 23h")
+        remaining, detail = agents.summarize_cursor(usage)
+        self.assertEqual(detail, "100% remaining this period · 6d 23h")
+
+    def test_cursor_collector_uses_the_plan_window_and_renewal(self):
+        reset = time.time() + 6 * 86400 + 23 * 3600 + 60
+        renewal = reset + 24 * 86400
+        usage = {"planUsage": {"totalPercentUsed": 0}, "billingCycleEnd": str(int(reset * 1000))}
+        plan = {"planInfo": {"planName": "Premium", "price": "", "billingCycleEnd": str(int(renewal * 1000)),
+                             "includedUsagePeriod": "INCLUDED_USAGE_PERIOD_WEEKLY", "includedUsageResetsAt": str(int(reset * 1000))}}
+        requests = {agents.CURSOR_USAGE: usage, agents.CURSOR_PLAN: plan}
+        with mock.patch.object(agents, "cursor_token", return_value="token"), \
+                mock.patch.object(agents, "cursor_request", side_effect=lambda url, token: requests[url]):
+            result = agents.collect_cursor()
+        self.assertEqual(result["plan"], "Premium")
+        self.assertEqual(result["windows"][0]["label"], "weekly")
+        self.assertEqual(result["windows"][0]["reset_day"], time.strftime("%a %d %b %H:%M", time.localtime(int(reset))))
+        self.assertAlmostEqual(result["windows"][0]["reset_at"], int(reset), delta=1)
+        self.assertAlmostEqual(result["renewal"]["at"], int(renewal), delta=1)
+        plan["planInfo"].pop("includedUsagePeriod")
+        plan["planInfo"].pop("includedUsageResetsAt")
+        with mock.patch.object(agents, "cursor_token", return_value="token"), \
+                mock.patch.object(agents, "cursor_request", side_effect=lambda url, token: requests[url]):
+            result = agents.collect_cursor()
+        self.assertEqual(result["windows"][0]["label"], "period")
+        self.assertEqual(result["windows"][0]["reset_day"], "")
+        self.assertAlmostEqual(result["windows"][0]["reset_at"], int(reset), delta=1)
 
     def test_claude_plan_name_includes_tier(self):
         self.assertEqual(agents.claude_plan_name("pro", "default_claude_ai"), "Pro $20")

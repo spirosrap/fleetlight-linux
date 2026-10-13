@@ -4,6 +4,7 @@ from calendar import monthrange
 from datetime import datetime, timezone
 import json
 import os
+import re
 from pathlib import Path
 import platform
 import queue
@@ -389,18 +390,58 @@ def cursor_token():
     return None
 
 
-def summarize_cursor(payload):
-    plan = payload.get("planUsage") if isinstance(payload, dict) else None
-    if not isinstance(plan, dict):
+CURSOR_PERIODS = {"weekly": "weekly", "daily": "daily", "monthly": "monthly", "hourly": "1h"}
+CURSOR_DETAILS = {"weekly": "this week", "daily": "today", "monthly": "this month", "period": "this period"}
+
+
+def cursor_window_label(plan):
+    """The included-usage window Cursor's plan info names ("weekly", "daily", "5h"), or "period" when it names none."""
+    info = plan.get("planInfo") if isinstance(plan, dict) else None
+    if not isinstance(info, dict):
+        return "period"
+    minutes = info.get("includedUsageWindowMins")
+    if minutes is not None:
+        label = window_label(minutes)
+        if label != "limit":
+            return label
+    period = info.get("includedUsagePeriod")
+    if not isinstance(period, str):
+        return "period"
+    period = period.strip().lower().removeprefix("included_usage_period_")
+    if period in CURSOR_PERIODS:
+        return CURSOR_PERIODS[period]
+    match = re.fullmatch(r"(\d+)[_ ]?(hour|hourly|h)", period)
+    if match:
+        return window_label(int(match.group(1)) * 60)
+    match = re.fullmatch(r"(\d+)[_ ]?(day|days|daily|d)", period)
+    if match:
+        return window_label(int(match.group(1)) * 1440)
+    return "period"
+
+
+def cursor_window_reset(payload, plan=None):
+    """When the included-usage window resets: the plan's reset time, else the usage payload's cycle end."""
+    info = plan.get("planInfo") if isinstance(plan, dict) else None
+    reset = info.get("includedUsageResetsAt") if isinstance(info, dict) else None
+    if epoch(reset) is None:
+        reset = payload.get("billingCycleEnd") if isinstance(payload, dict) else None
+    return reset
+
+
+def summarize_cursor(payload, plan=None):
+    usage = payload.get("planUsage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
         return None
-    used = plan.get("totalPercentUsed")
+    used = usage.get("totalPercentUsed")
     if used is None:
-        used = plan.get("autoPercentUsed")
+        used = usage.get("autoPercentUsed")
     remaining = remaining_percent(used)
     if remaining is None:
         return None
-    reset = until(payload.get("billingCycleEnd"))
-    detail = f"{remaining}% remaining this period" + (f" · {reset}" if reset else "")
+    label = cursor_window_label(plan)
+    reset = until(cursor_window_reset(payload, plan))
+    scope = CURSOR_DETAILS.get(label, f"in the {label} window")
+    detail = f"{remaining}% remaining {scope}" + (f" · {reset}" if reset else "")
     return remaining, detail
 
 
@@ -430,11 +471,19 @@ def cursor_renewal(payload):
     return {"at": at, "ends": False} if at else None
 
 
-def cursor_plan(token):
-    """The plan name and renewal from Cursor's plan info, or (None, None)."""
+def cursor_plan_payload(token):
+    """Cursor's plan info payload, or None when it cannot be read."""
     try:
         payload = cursor_request(CURSOR_PLAN, token)
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def cursor_plan(token):
+    """The plan name and renewal from Cursor's plan info, or (None, None)."""
+    payload = cursor_plan_payload(token)
+    if payload is None:
         return None, None
     return cursor_plan_name(payload), cursor_renewal(payload)
 
@@ -447,18 +496,21 @@ def collect_cursor():
         payload = cursor_request(CURSOR_USAGE, token)
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return unavailable("cursor", "Cursor usage could not be checked")
-    summarized = summarize_cursor(payload)
+    plan_payload = cursor_plan_payload(token)
+    summarized = summarize_cursor(payload, plan_payload)
     if not summarized:
         return unavailable("cursor", "Cursor did not report plan usage")
     remaining, detail = summarized
+    label = cursor_window_label(plan_payload)
+    reset = cursor_window_reset(payload, plan_payload)
+    # A named window (weekly, daily, 5h) gets its weekday like Codex; a plain billing period keeps the countdown alone.
     result = {"id": "cursor", "name": "Cursor", "state": "ok", "remaining_percent": remaining, "detail": detail,
-              "windows": [{"label": "period", "remaining_percent": remaining,
-                           "reset": until(payload.get("billingCycleEnd")), "reset_day": "",
-                           "reset_at": epoch(payload.get("billingCycleEnd"))}]}
-    plan, renewal = cursor_plan(token)
+              "windows": [{"label": label, "remaining_percent": remaining, "reset": until(reset),
+                           "reset_day": reset_day(reset) if label != "period" else "", "reset_at": epoch(reset)}]}
+    plan = cursor_plan_name(plan_payload) if plan_payload else None
     if plan:
         result["plan"] = plan
-    renewal = renewal or cursor_renewal(payload)
+    renewal = (cursor_renewal(plan_payload) if plan_payload else None) or cursor_renewal(payload)
     if renewal:
         result["renewal"] = renewal
     return result

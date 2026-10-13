@@ -30,6 +30,7 @@ All screenshots use fictional demo data. The parallel update view shows three si
 - Lower long-running memory use: shared HTTPS certificate contexts, drawing callbacks that let old widgets be released, compact history saved periodically, and live readings that update existing widgets.
 - Computers can be reordered: drag them in the sidebar, press Alt+Up or Alt+Down on the open computer, or use the arrows in **Settings › Computers**. The order is saved in `hosts` and no longer forces this computer to the top.
 - Fleet updates run on up to three different computers at once, with one installer per computer, independent progress and recovery, and cancellation of queued work. Computer restarts remain sequential.
+- The Cursor quota card names the usage window Cursor's plan reports (weekly, daily or an hourly window) instead of a plain period, with the reset weekday like Codex, and keeps the plan renewal date separate. Plans without a named window are unchanged.
 
 ## Version 0.4.0
 
