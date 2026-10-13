@@ -12,8 +12,10 @@ MENU_PATH = "/MenuBar"
 ITEM_INTERFACE = "org.kde.StatusNotifierItem"
 MENU_INTERFACE = "com.canonical.dbusmenu"
 # Not "-symbolic" names: bars recolour those, and these icons keep the app's own colours.
-ICON = "fleetlight-tray"
-UPDATING_ICON = "fleetlight-updating-tray"  # The list with a download arrow, shown while installers run.
+# Three linked blue nodes: a fleet. Blue and a triangle so it is not mistaken for the green bar-chart tray icons
+# beside it. New file names so bars that cache an icon by name pick the drawing up.
+ICON = "fleetlight-nodes-tray"
+UPDATING_ICON = "fleetlight-nodes-updating-tray"  # The nodes with a download arrow, shown while installers run.
 ICON_DIRECTORY = str(Path(__file__).resolve().parent / "icons")
 
 INTERFACES = """<node>

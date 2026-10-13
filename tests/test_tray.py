@@ -1,6 +1,7 @@
 import unittest
+from pathlib import Path
 
-from fleetlight.tray import ICON, UPDATING_ICON, icon_name, item_properties, layout
+from fleetlight.tray import ICON, ICON_DIRECTORY, UPDATING_ICON, icon_name, item_properties, layout
 
 
 class TrayMenu(unittest.TestCase):
@@ -23,6 +24,7 @@ class TrayMenu(unittest.TestCase):
         self.assertNotEqual(ICON, UPDATING_ICON)
         for name in (ICON, UPDATING_ICON):
             self.assertFalse(name.endswith("-symbolic"), "bars recolour symbolic icons; Omarchy blanks an item that switches back from a coloured one")
+            self.assertTrue(Path(ICON_DIRECTORY, name + ".svg").is_file(), name)
 
 
 if __name__ == "__main__":
