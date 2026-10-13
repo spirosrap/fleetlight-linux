@@ -9,6 +9,14 @@ def result(code=0, output=''):
 
 
 class SystemTests(unittest.TestCase):
+    def test_reboot_status_names_the_current_boot_on_linux(self):
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops, 'current_boot_id', return_value='boot-1'), \
+                patch.object(system_ops, 'reboot_requirement', return_value={'required': True, 'reason': 'test'}):
+            self.assertEqual(system_ops.reboot_status(), {'required': True, 'reason': 'test', 'boot_id': 'boot-1'})
+        with patch.object(system_ops.platform, 'system', return_value='Darwin'):
+            self.assertNotIn('boot_id', system_ops.reboot_status())
+
     def test_arch_protects_modified_app_when_update_would_replace_it(self):
         def which(name):
             return '/bin/' + name if name in ('omarchy-update', 'pacman', 'checkupdates') else None

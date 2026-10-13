@@ -898,12 +898,18 @@ class Fleetlight(Adw.Application):
         pending = self.pending_restarts.get(snapshot["id"])
         if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
             self.pending_restarts.pop(snapshot["id"], None)
-            self.app_updates.setdefault(snapshot["id"], {})["restart"] = {"state": "current", "checked_at": time.time(), "detail": "Restart verified; computer is online"}
+            self.app_updates.setdefault(snapshot["id"], {})["restart"] = updates.restart_verified(snapshot["boot_id"])
             self.toast(pending["name"] + " restarted and is back online")
             try:
                 self.persist_jobs()
             except OSError:
                 self.toast("Could not save restart verification")
+        elif updates.restart_superseded(self.app_updates.get(snapshot["id"], {}).get("restart"), snapshot):
+            # A restart done by hand satisfies the request just as well as one Fleetlight scheduled.
+            self.app_updates[snapshot["id"]]["restart"] = updates.restart_verified(snapshot["boot_id"], "Restart verified; computer came back on a new boot")
+            self.save_application_checks()
+            if self.selected == snapshot["id"]:
+                self.render_detail()
         self.notify_change(snapshot["id"], current, snapshot)
         self.snapshots[snapshot["id"]] = snapshot
         if snapshot.get("status") == "online":
@@ -1873,12 +1879,17 @@ class Fleetlight(Adw.Application):
         self.refresh_button.set_sensitive(True)
         self.spinner.stop()
         self.render_detail()
-        try:
-            config.atomic_json(config.state_path().with_name("application-checks.json"), self.app_updates)
-        except OSError:
+        if not self.save_application_checks():
             self.toast("Checks completed, but the local receipt could not be saved")
         self.maybe_auto_update()
         return GLib.SOURCE_REMOVE
+
+    def save_application_checks(self):
+        try:
+            config.atomic_json(config.state_path().with_name("application-checks.json"), self.app_updates)
+        except OSError:
+            return False
+        return True
 
     def render_batch(self):
         if not hasattr(self, "batch_buttons"):

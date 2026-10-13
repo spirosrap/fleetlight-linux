@@ -195,6 +195,35 @@ Unpacking hello (1.0)…
         self.assertEqual(updates.relevant_job(last, pending), last)
         self.assertEqual(updates.relevant_job({"state": "succeeded", "kind": "desktop", "phase": "Verified 26.911.61220"}, current)["state"], "succeeded")
 
+    def test_manual_restart_on_a_new_boot_retires_the_request(self):
+        checked = {'state': 'available', 'boot_id': 'old-boot', 'detail': 'The operating system requests a restart'}
+        self.assertTrue(updates.restart_superseded(checked, {'status': 'online', 'boot_id': 'new-boot'}))
+        self.assertTrue(updates.restart_superseded(dict(checked, state='unknown'), {'status': 'online', 'boot_id': 'new-boot'}))
+        self.assertFalse(updates.restart_superseded(checked, {'status': 'online', 'boot_id': 'old-boot'}))
+        self.assertFalse(updates.restart_superseded(checked, {'status': 'offline', 'boot_id': 'new-boot'}))
+        self.assertFalse(updates.restart_superseded(checked, {'status': 'online'}))
+        # A verdict recorded without a boot identity can only be cleared by the next check.
+        self.assertFalse(updates.restart_superseded({'state': 'available'}, {'status': 'online', 'boot_id': 'new-boot'}))
+        self.assertFalse(updates.restart_superseded(dict(checked, state='current'), {'status': 'online', 'boot_id': 'new-boot'}))
+        self.assertFalse(updates.restart_superseded(None, {'status': 'online', 'boot_id': 'new-boot'}))
+        verified = updates.restart_verified('new-boot')
+        self.assertEqual((verified['state'], verified['boot_id']), ('current', 'new-boot'))
+        self.assertFalse(updates.restart_superseded(verified, {'status': 'online', 'boot_id': 'third-boot'}))
+
+    def test_system_check_records_the_boot_it_was_observed_on(self):
+        host = {'id': 'test', 'name': 'Test', 'local': True}
+        payload = {'manager': 'apt', 'packages': [], 'state': 'current', 'detail': '0 package updates',
+                   'restart': {'required': True, 'reason': 'The operating system requests a restart', 'boot_id': 'boot-1'}}
+        with patch('fleetlight.updates.run_process', return_value=(0, 'FLEETLIGHT_SYSTEM_CHECK=' + json.dumps(payload), '')):
+            checked = updates.check_system(host)
+        self.assertEqual(checked['restart']['state'], 'available')
+        self.assertEqual(checked['restart']['boot_id'], 'boot-1')
+        payload['restart'] = {'required': False, 'reason': 'Not Linux'}
+        with patch('fleetlight.updates.run_process', return_value=(0, 'FLEETLIGHT_SYSTEM_CHECK=' + json.dumps(payload), '')):
+            checked = updates.check_system(host)
+        self.assertEqual(checked['restart']['state'], 'current')
+        self.assertNotIn('boot_id', checked['restart'])
+
     def test_system_check_timeout_explains_what_to_retry(self):
         host = {'id': 'test', 'name': 'Test', 'local': True}
         with patch('fleetlight.updates.run_process', side_effect=TimeoutError):

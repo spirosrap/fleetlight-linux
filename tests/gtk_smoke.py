@@ -227,6 +227,14 @@ def verify():
         app.receive(dict(snapshot, boot_id="new-boot"))
         assert host_id not in app.pending_restarts
         assert app.app_updates[host_id]["restart"]["detail"].startswith("Restart verified")
+        # A restart done by hand retires a request recorded on the earlier boot.
+        app.app_updates[host_id]["restart"] = {"state": "available", "boot_id": "new-boot", "detail": "The operating system requests a restart"}
+        app.receive(dict(snapshot, boot_id="new-boot"))
+        assert app.app_updates[host_id]["restart"]["state"] == "available"
+        app.receive(dict(snapshot, boot_id="third-boot"))
+        assert app.app_updates[host_id]["restart"]["state"] == "current"
+        assert app.app_updates[host_id]["restart"]["boot_id"] == "third-boot"
+        assert host_id not in app.pending_restarts
         # Live local metrics also update the overview cards in place.
         app.show_page("fleet")
         assert app.selected == "fleet"

@@ -334,6 +334,19 @@ def batch_candidates(hosts, snapshots, checks, kind, now=None):
     return eligible, skipped
 
 
+def restart_superseded(checked, snapshot):
+    """A restart request observed on an earlier boot is satisfied once the computer is online on a new one."""
+    if not isinstance(checked, dict) or not isinstance(snapshot, dict):
+        return False
+    if checked.get("state") not in ("available", "unknown") or not checked.get("boot_id"):
+        return False
+    return snapshot.get("status") == "online" and bool(snapshot.get("boot_id")) and snapshot["boot_id"] != checked["boot_id"]
+
+
+def restart_verified(boot_id, detail="Restart verified; computer is online"):
+    return {"state": "current", "latest": "0.0.0", "checked_at": time.time(), "detail": detail, "boot_id": boot_id}
+
+
 def relevant_job(last, checks):
     """Keep a failed job visible only while that update is still outstanding."""
     if not isinstance(last, dict):
@@ -362,6 +375,8 @@ def check_system(host):
         restart = value.get("restart", {})
         reboot = {"state": "available" if restart.get("required") is True else "unknown" if restart.get("required") is None else "current",
                   "latest": "0.0.0", "checked_at": time.time(), "detail": restart.get("reason", "Restart requirement unknown")}
+        if restart.get("boot_id"):
+            reboot["boot_id"] = str(restart["boot_id"])
         return {"system": system, "restart": reboot}
     except TimeoutError:
         return {kind: {"state": "unknown", "checked_at": time.time(),

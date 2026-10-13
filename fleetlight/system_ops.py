@@ -18,14 +18,27 @@ def run(args, env=None):
                           env=dict(os.environ, LC_ALL='C', **(env or {})))
 
 
+def current_boot_id():
+    try:
+        return Path('/proc/sys/kernel/random/boot_id').read_text().strip() or None
+    except OSError:
+        return None
+
+
 def reboot_status():
     if platform.system() != 'Linux':
         return {'required': False, 'reason': 'Not Linux'}
+    # The verdict is tied to the boot it was observed on, so a later boot can retire it.
+    status = reboot_requirement()
+    status['boot_id'] = current_boot_id()
+    return status
+
+
+def reboot_requirement():
     marker = Path.home() / '.local/state/fleetlight/system-restart.json'
     try:
         recorded = json.loads(marker.read_text())
-        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-        if recorded.get('boot_id') == boot:
+        if recorded.get('boot_id') == current_boot_id():
             return {'required': True, 'reason': 'Core system packages were updated; restart recommended'}
     except (OSError, ValueError):
         pass
