@@ -15,7 +15,7 @@ MENU_INTERFACE = "com.canonical.dbusmenu"
 # Three linked blue nodes: a fleet. Blue and a triangle so it is not mistaken for the green bar-chart tray icons
 # beside it. New file names so bars that cache an icon by name pick the drawing up.
 ICON = "fleetlight-nodes-tray"
-UPDATING_ICON = "fleetlight-nodes-updating-tray"  # The nodes with a download arrow, shown while installers run.
+UPDATING_ICON = "fleetlight-nodes-busy-tray"  # The whole icon turns amber with a download arrow while installers run.
 ICON_DIRECTORY = str(Path(__file__).resolve().parent / "icons")
 
 INTERFACES = """<node>
