@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from fleetlight import config
 from fleetlight.actions import terminal_command
-from fleetlight.monitor import History, classify_error, issues, probe_host, run_process
+from fleetlight.monitor import History, classify_error, issues, probe_host, run_process, tailscale_issues
 from fleetlight import probe
 
 
@@ -147,6 +147,31 @@ class HistoryAndActionTests(unittest.TestCase):
     def test_attention_is_not_just_connectivity(self):
         self.assertTrue(issues({"status": "online", "disk_percent": 95}))
         self.assertFalse(issues({"status": "online", "services": {"docker": "active"}}))
+
+    def test_tailscale_key_expiry_is_an_issue_within_a_week(self):
+        now = 1_760_000_000
+        soon = {"backend_state": "Running", "key_expiry": "2025-10-11T08:53:20Z"}  # now + 2 days
+        self.assertEqual(tailscale_issues(soon, now=now), ["Tailscale login expires in 2 days"])
+        self.assertEqual(tailscale_issues({"key_expiry": "2025-10-09T20:00:00Z"}, now=now), ["Tailscale login expires today"])
+        self.assertEqual(tailscale_issues({"key_expiry": "2025-10-01T00:00:00Z"}, now=now), ["Tailscale login has expired"])
+        self.assertEqual(tailscale_issues({"key_expiry": "2026-01-01T00:00:00Z"}, now=now), [])
+        self.assertEqual(tailscale_issues({"key_expiry": None}, now=now), [])
+        self.assertEqual(tailscale_issues({"backend_state": "NeedsLogin"}, now=now), ["Tailscale is logged out"])
+        self.assertEqual(tailscale_issues(None), [])
+        snapshot = {"status": "online", "services": {}, "tailscale": soon, "checked_at": now}
+        with patch("fleetlight.monitor.time.time", return_value=now):
+            self.assertIn("Tailscale login expires in 2 days", issues(snapshot))
+
+    def test_tailscale_probe_ignores_disabled_expiry(self):
+        payload = json.dumps({"BackendState": "Running", "Version": "1.104.1-t1234", "Self": {"KeyExpiry": "0001-01-01T00:00:00Z"}})
+        with patch("fleetlight.probe.command", return_value=payload), patch("fleetlight.probe.shutil.which", return_value="/usr/bin/tailscale"), \
+                patch("fleetlight.probe.os.path.exists", return_value=True):
+            self.assertEqual(probe.tailscale("Linux"), {"backend_state": "Running", "version": "1.104.1", "key_expiry": None})
+        with patch("fleetlight.probe.command", return_value=""), patch("fleetlight.probe.shutil.which", return_value="/usr/bin/tailscale"), \
+                patch("fleetlight.probe.os.path.exists", return_value=True):
+            self.assertIsNone(probe.tailscale("Linux"))
+        with patch("fleetlight.probe.shutil.which", return_value=None), patch("fleetlight.probe.os.path.exists", return_value=False):
+            self.assertIsNone(probe.tailscale("Linux"))
 
     def test_fixed_update_command_requires_known_manager(self):
         host = {"id": "server", "name": "Server", "alias": "server"}

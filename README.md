@@ -31,6 +31,7 @@ All screenshots use fictional demo data. The parallel update view shows three si
 - Computers can be reordered: drag them in the sidebar, press Alt+Up or Alt+Down on the open computer, or use the arrows in **Settings › Computers**. The order is saved in `hosts` and no longer forces this computer to the top.
 - Fleet updates run on up to three different computers at once, with one installer per computer, independent progress and recovery, and cancellation of queued work. Computer restarts remain sequential.
 - The Cursor quota card names the usage window Cursor's plan reports (weekly, daily or an hourly window) instead of a plain period, with the reset weekday like Codex, and keeps the plan renewal date separate. Plans without a named window are unchanged.
+- Computers report their Tailscale login state, and a node key that expires within a week (or has expired, or is logged out) is listed under **Needs attention**, matching the Fleetlight Mac observer and the Android app.
 - The tray icon is now three linked blue nodes instead of green lines, so it is no longer confused with other green bar-chart tray icons. While updates install, the same icon turns amber.
 
 ## Version 0.4.0

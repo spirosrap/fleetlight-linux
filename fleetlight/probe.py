@@ -269,6 +269,25 @@ def network(system):
     return None
 
 
+def tailscale(system):
+    """Tailscale login state, so a node key that is about to expire is flagged before the computer drops off the tailnet."""
+    candidates = [shutil.which("tailscale"), "/usr/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]
+    executable = next((path for path in candidates if path and os.path.exists(path)), None)
+    if not executable:
+        return None
+    try:
+        status = json.loads(command([executable, "status", "--self", "--peers=false", "--json"]))
+    except ValueError:
+        return None
+    if not isinstance(status, dict):
+        return None
+    node = status.get("Self") if isinstance(status.get("Self"), dict) else {}
+    expiry = node.get("KeyExpiry")
+    # Tailscale reports the zero time when key expiry is disabled for the node.
+    return {"backend_state": status.get("BackendState"), "version": str(status.get("Version") or "").split("-")[0] or None,
+            "key_expiry": expiry if isinstance(expiry, str) and not expiry.startswith("0001") else None}
+
+
 def codex_executable():
     shell = os.environ.get("SHELL", "/bin/sh")
     found = command([shell, "-ic", "command -v codex"], timeout=3).splitlines()
@@ -512,7 +531,7 @@ def collect(services=()):
             "kernel": platform.release(), "checked_at": time.time(), **metrics,
             "cpus": os.cpu_count() or 1, "services": service_states,
             "disks": disks(system), "processes": processes, "failed_units": failed_units(system),
-            "network": network(system),
+            "network": network(system), "tailscale": tailscale(system),
             "codex": cli, "claude": claude, "chatgpt": desktop_app(system)}
 
 

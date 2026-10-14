@@ -1,5 +1,6 @@
 """Bounded parallel probes and local history. No privileged operations."""
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -106,7 +107,35 @@ def issues(snapshot):
     for name, state in snapshot.get("services", {}).items():
         if state not in ("active", "unsupported") and not (name in snapshot.get("optional_services", []) and state in ("inactive", "not installed")):
             result.append(name + ": " + state)
+    result.extend(tailscale_issues(snapshot.get("tailscale")))
     return result
+
+
+TAILSCALE_EXPIRY_WARNING = 7 * 86400
+
+
+def tailscale_issues(status, now=None):
+    """Warn a week ahead when a Tailscale node key expires, like the Fleetlight Mac observer does."""
+    if not isinstance(status, dict):
+        return []
+    if status.get("backend_state") == "NeedsLogin":
+        return ["Tailscale is logged out"]
+    expiry = status.get("key_expiry")
+    if not isinstance(expiry, str):
+        return []
+    try:
+        when = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+    except ValueError:
+        return []
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    remaining = when.timestamp() - (time.time() if now is None else now)
+    if remaining <= 0:
+        return ["Tailscale login has expired"]
+    if remaining >= TAILSCALE_EXPIRY_WARNING:
+        return []
+    days = int(remaining // 86400)
+    return ["Tailscale login expires " + ("today" if days == 0 else "tomorrow" if days == 1 else "in %d days" % days)]
 
 
 def linux_update_issues(checks):
