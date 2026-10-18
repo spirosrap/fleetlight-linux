@@ -12,16 +12,26 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("PangoCairo", "1.0")
 from gi.repository import GLib, Gtk, PangoCairo
 
-TONES = {"accent": ("accent_color", (0.47, 0.68, 0.93)), "good": ("success_color", (0.56, 0.94, 0.64)),
-         "warning": ("warning_color", (0.97, 0.83, 0.36)), "bad": ("error_color", (1.0, 0.48, 0.39))}
+# Each tone maps to the libadwaita style class that paints text in that palette colour. The colour is
+# read off a hidden label carrying the class rather than looked up by name: since libadwaita 1.10 the
+# accent is a CSS variable, and the deprecated named-colour lookup answers "accent_color" with black.
+TONES = {"accent": ("accent", (0.47, 0.68, 0.93)), "good": ("success", (0.56, 0.94, 0.64)),
+         "warning": ("warning", (0.97, 0.83, 0.36)), "bad": ("error", (1.0, 0.48, 0.39))}
 ROUND_CAP = 1
 GLIDE_MS = 450
+_swatches = {}
 
 
 def tone_colour(widget, tone):
-    name, fallback = TONES.get(tone or "accent", TONES["accent"])
-    found, colour = widget.get_style_context().lookup_color(name)
-    return (colour.red, colour.green, colour.blue) if found else fallback
+    style_class, fallback = TONES.get(tone or "accent", TONES["accent"])
+    swatch = _swatches.get(style_class)
+    if swatch is None:
+        swatch = _swatches[style_class] = Gtk.Label()
+        swatch.add_css_class(style_class)
+    colour = swatch.get_color()
+    rgb = (colour.red, colour.green, colour.blue)
+    # A fully transparent or pure-black answer means the theme gave us nothing usable.
+    return fallback if colour.alpha == 0 or not any(rgb) else rgb
 
 
 def clamp(value):
