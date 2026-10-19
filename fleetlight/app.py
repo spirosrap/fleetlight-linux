@@ -45,47 +45,47 @@ CSS = b"""
 .muted { opacity: 0.66; }
 .small { font-size: 12px; }
 .numeric { font-feature-settings: "tnum"; }
-.good { color: @success_color; }
-.warning { color: @warning_color; }
-.bad { color: @error_color; }
-.accent-text { color: @accent_color; }
+.good { color: var(--success-color); }
+.warning { color: var(--warning-color); }
+.bad { color: var(--error-color); }
+.accent-text { color: var(--accent-color); }
 .card { padding: 16px; border-radius: 16px; }
-.hero-card { padding: 20px 22px; border-radius: 20px; border: 1px solid alpha(@accent_bg_color, 0.30);
-  background-image: linear-gradient(115deg, alpha(@accent_bg_color, 0.30), alpha(@accent_bg_color, 0.09) 55%, alpha(@accent_bg_color, 0.03)); }
-.hero-card.attention { border-color: alpha(@warning_bg_color, 0.36);
-  background-image: linear-gradient(115deg, alpha(@warning_bg_color, 0.26), alpha(@warning_bg_color, 0.07) 55%, alpha(@warning_bg_color, 0.02)); }
-.hero-card.offline { border-color: alpha(@error_bg_color, 0.38);
-  background-image: linear-gradient(115deg, alpha(@error_bg_color, 0.28), alpha(@error_bg_color, 0.07) 55%, alpha(@error_bg_color, 0.02)); }
+.hero-card { padding: 20px 22px; border-radius: 20px; border: 1px solid alpha(var(--accent-bg-color), 0.30);
+  background-image: linear-gradient(115deg, alpha(var(--accent-bg-color), 0.30), alpha(var(--accent-bg-color), 0.09) 55%, alpha(var(--accent-bg-color), 0.03)); }
+.hero-card.attention { border-color: alpha(var(--warning-bg-color), 0.36);
+  background-image: linear-gradient(115deg, alpha(var(--warning-bg-color), 0.26), alpha(var(--warning-bg-color), 0.07) 55%, alpha(var(--warning-bg-color), 0.02)); }
+.hero-card.offline { border-color: alpha(var(--error-bg-color), 0.38);
+  background-image: linear-gradient(115deg, alpha(var(--error-bg-color), 0.28), alpha(var(--error-bg-color), 0.07) 55%, alpha(var(--error-bg-color), 0.02)); }
 .hero-card.quiet { border-color: alpha(currentColor, 0.12);
   background-image: linear-gradient(115deg, alpha(currentColor, 0.09), alpha(currentColor, 0.03)); }
 .stat { padding: 10px 12px; border-radius: 14px; background: alpha(currentColor, 0.06); }
 .icon-tile { min-width: 38px; min-height: 38px; border-radius: 12px; background: alpha(currentColor, 0.13); }
 .icon-tile.large { min-width: 56px; min-height: 56px; border-radius: 17px; }
-.icon-tile.accent { color: @accent_color; }
+.icon-tile.accent { color: var(--accent-color); }
 .pill { padding: 3px 11px; border-radius: 999px; font-weight: 700; font-size: 12px; background: alpha(currentColor, 0.14); }
 .chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: alpha(currentColor, 0.08); }
 .badge { padding: 1px 8px; border-radius: 999px; font-weight: 700; font-size: 11px; background: alpha(currentColor, 0.16); }
 .dot { min-width: 10px; min-height: 10px; border-radius: 999px; background: alpha(currentColor, 0.28); }
-.dot.good { background: @success_color; }
-.dot.warning { background: @warning_color; }
-.dot.bad { background: @error_color; }
+.dot.good { background: var(--success-color); }
+.dot.warning { background: var(--warning-color); }
+.dot.bad { background: var(--error-color); }
 progressbar trough, progressbar progress { min-height: 6px; border-radius: 3px; }
 progressbar.thin trough, progressbar.thin progress { min-height: 4px; border-radius: 2px; }
 progressbar.thin trough { min-width: 40px; }
-progressbar progress { background: @accent_bg_color; }
-progressbar.good progress { background: @success_bg_color; }
-progressbar.warning progress { background: @warning_bg_color; }
-progressbar.bad progress { background: @error_bg_color; }
+progressbar progress { background: var(--accent-bg-color); }
+progressbar.good progress { background: var(--success-bg-color); }
+progressbar.warning progress { background: var(--warning-bg-color); }
+progressbar.bad progress { background: var(--error-bg-color); }
 progressbar.layer trough { background: transparent; }
-progressbar.model progress { background: @accent_bg_color; }
+progressbar.model progress { background: var(--accent-bg-color); }
 button.host-card { padding: 0; border-radius: 16px; }
 button.host-card > .card { transition: box-shadow 160ms ease-out, background-color 160ms ease-out; }
-button.host-card:hover > .card { background-color: mix(@card_bg_color, @accent_bg_color, 0.10);
-  box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.55), 0 8px 22px alpha(black, 0.20); }
+button.host-card:hover > .card { background-color: color-mix(in srgb, var(--card-bg-color), var(--accent-bg-color) 10%);
+  box-shadow: 0 0 0 1px alpha(var(--accent-bg-color), 0.55), 0 8px 22px alpha(black, 0.20); }
 .section-title { font-size: 16px; font-weight: 700; }
 .row-title { font-weight: 600; }
-.navigation-sidebar row.drop-before { box-shadow: inset 0 2px 0 @accent_bg_color; }
-.navigation-sidebar row.drop-after { box-shadow: inset 0 -2px 0 @accent_bg_color; }
+.navigation-sidebar row.drop-before { box-shadow: inset 0 2px 0 var(--accent-bg-color); }
+.navigation-sidebar row.drop-after { box-shadow: inset 0 -2px 0 var(--accent-bg-color); }
 .timeline-dot { min-width: 8px; min-height: 8px; border-radius: 999px; background: currentColor; }
 """
 
