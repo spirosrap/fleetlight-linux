@@ -32,6 +32,12 @@ def enabled_agents(configuration):
     return {name: bool(value.get(name, True)) for name in AGENTS}
 
 
+def claude_billing_day(configuration):
+    """Day of the month the Claude plan renews (1-31), or None to estimate it from the subscription start."""
+    value = configuration.get("claude_billing_day") if isinstance(configuration, dict) else None
+    return value if type(value) is int and 1 <= value <= 31 else None
+
+
 def auto_updates_enabled(configuration):
     return isinstance(configuration, dict) and configuration.get("auto_updates") is True
 
@@ -62,6 +68,9 @@ def validate(config):
         raise ValueError("notifications must be true or false")
     if "appearance" in config and config["appearance"] not in APPEARANCES:
         raise ValueError("appearance must be auto, dark or light")
+    if "claude_billing_day" in config and config["claude_billing_day"] is not None and (
+            type(config["claude_billing_day"]) is not int or not 1 <= config["claude_billing_day"] <= 31):
+        raise ValueError("claude_billing_day must be a day of the month between 1 and 31")
     if "agents" in config:
         agents = config["agents"]
         if not isinstance(agents, dict) or any(name not in AGENTS or type(enabled) is not bool for name, enabled in agents.items()):

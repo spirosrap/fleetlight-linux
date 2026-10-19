@@ -823,7 +823,7 @@ class Fleetlight(Adw.Application):
                 results[snapshot["id"]] = snapshot
                 GLib.idle_add(self.receive, snapshot)
             if wanted:
-                quota = threading.Thread(target=lambda: usage.update(agent_quota.collect(wanted)), daemon=True)
+                quota = threading.Thread(target=lambda: usage.update(agent_quota.collect(wanted, config.claude_billing_day(self.configuration))), daemon=True)
                 quota.start()
             else:
                 quota = None
@@ -2421,7 +2421,8 @@ class Fleetlight(Adw.Application):
                    "appearance": config.appearance(self.configuration),
                    "notifications": config.notifications_enabled(self.configuration),
                    "auto_updates": config.auto_updates_enabled(self.configuration),
-                   "agents": config.enabled_agents(self.configuration)}
+                   "agents": config.enabled_agents(self.configuration),
+                   "claude_billing_day": config.claude_billing_day(self.configuration)}
 
         monitoring = Adw.PreferencesGroup(title="Monitoring", description="Full checks run for every computer on this interval. The local computer also refreshes live metrics every two seconds.")
         interval = Adw.SpinRow.new_with_range(15, 3600, 15)
@@ -2457,6 +2458,11 @@ class Fleetlight(Adw.Application):
             toggle.set_active(initial["agents"][name])
             agent_toggles[name] = toggle
             agents_group.add(toggle)
+        billing_day = Adw.SpinRow.new_with_range(0, 31, 1)
+        billing_day.set_title("Claude billing day")
+        billing_day.set_subtitle("Day of the month the Claude plan renews, from claude.ai › Settings › Billing. 0 estimates it from the subscription's start date.")
+        billing_day.set_value(initial["claude_billing_day"] or 0)
+        agents_group.add(billing_day)
         page.add(agents_group)
 
         computers = Adw.PreferencesGroup(title="Computers", description="Reorder or remove a computer here, or add one with the + button. Computers can also be dragged in the sidebar. Names and services can be edited in the configuration file below.")
@@ -2538,13 +2544,16 @@ class Fleetlight(Adw.Application):
                 chosen = {"refresh_seconds": int(interval.get_value()), "notifications": notify.get_active(),
                           "appearance": config.APPEARANCES[scheme.get_selected()],
                           "auto_updates": auto_toggle.get_active(),
-                          "agents": {name: toggle.get_active() for name, toggle in agent_toggles.items()}}
+                          "agents": {name: toggle.get_active() for name, toggle in agent_toggles.items()},
+                          "claude_billing_day": int(billing_day.get_value()) or None}
                 for key, value in chosen.items():
                     # A JSON edit wins unless the matching control was changed in this dialog.
                     if key == "appearance" and value == initial[key] and key not in candidate:
                         continue
                     if not json_edited[0] or value != initial[key]:
                         candidate[key] = value
+                if candidate.get("claude_billing_day") is None:
+                    candidate.pop("claude_billing_day", None)
                 candidate = config.validate(candidate)
                 config.atomic_json(self.config_file or config.config_path(), candidate)
                 if start.get_active() != actions.autostart_path().exists():

@@ -1,3 +1,4 @@
+import json
 import time
 import unittest
 from unittest import mock
@@ -108,6 +109,25 @@ class AgentQuotaTests(unittest.TestCase):
         self.assertEqual(result["state"], "unavailable")
         self.assertNotIn("secret", str(result))
 
+    def test_claude_collector_prefers_the_configured_billing_day(self):
+        credentials = {"accessToken": "secret", "expiresAt": (time.time() + 3600) * 1000, "subscriptionType": "max"}
+        payload = {"five_hour": {"utilization": 10, "resets_at": "2026-10-20T03:19:59Z"}}
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        profile = dict(agents.claude_profile)
+        agents.claude_profile.update(at=time.time(), plan="Max 5x $100",
+                                     renewal={"at": 1.0, "ends": False, "estimated": True})
+        try:
+            with mock.patch.object(agents, "claude_credentials", lambda: credentials), \
+                    mock.patch.object(agents.urllib.request, "urlopen", return_value=response):
+                guessed = agents.collect_claude()
+                configured = agents.collect_claude(billing_day=18)
+        finally:
+            agents.claude_profile.update(profile)
+        self.assertEqual(guessed["renewal"], {"at": 1.0, "ends": False, "estimated": True})
+        self.assertEqual(configured["renewal"], agents.claude_configured_renewal(18, time.time()))
+        self.assertNotIn("estimated", configured["renewal"])
+
     def test_claude_usage_is_checked_rarely_and_backs_off_when_rate_limited(self):
         calls = []
         replies = [dict(agents.unavailable("claude", "Claude usage is rate limited"), rate_limited=True)] * 4
@@ -216,6 +236,20 @@ class AgentQuotaTests(unittest.TestCase):
         self.assertEqual(agents.cursor_renewal({"billingCycleEnd": 1792330885000}), {"at": 1792330885.0, "ends": False})
         self.assertIsNone(agents.cursor_renewal({"planInfo": {}}))
         self.assertIsNone(agents.cursor_renewal(None))
+
+    def test_claude_configured_billing_day_replaces_the_estimate(self):
+        now = time.mktime((2026, 10, 20, 12, 0, 0, 0, 0, -1))
+        renewal = agents.claude_configured_renewal(18, now)
+        self.assertEqual(renewal, {"at": time.mktime((2026, 11, 18, 0, 0, 0, 0, 0, -1)), "ends": False})
+        self.assertNotIn("estimated", renewal)
+        # Later this month, at local midnight.
+        self.assertEqual(agents.claude_configured_renewal(25, now)["at"], time.mktime((2026, 10, 25, 0, 0, 0, 0, 0, -1)))
+        # A day the next month lacks falls on its last day.
+        self.assertEqual(agents.claude_configured_renewal(31, time.mktime((2026, 2, 1, 0, 0, 0, 0, 0, -1)))["at"],
+                         time.mktime((2026, 2, 28, 0, 0, 0, 0, 0, -1)))
+        self.assertEqual(agents.claude_configured_renewal(20, now)["at"], time.mktime((2026, 11, 20, 0, 0, 0, 0, 0, -1)))
+        for bad in (None, 0, 32, "18", 18.0):
+            self.assertIsNone(agents.claude_configured_renewal(bad, now))
 
     def test_claude_renewal_estimates_the_next_monthly_anniversary(self):
         payload = {"organization": {"subscription_status": "active", "subscription_created_at": "2026-01-31T08:48:49Z"}}

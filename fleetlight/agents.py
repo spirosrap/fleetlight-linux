@@ -552,6 +552,16 @@ def claude_profile_plan(payload):
     return claude_plan_name(organization.get("organization_type"), organization.get("rate_limit_tier")) or None
 
 
+def next_monthly(start, now):
+    """The first occurrence of start's day of the month (clamped to shorter months) after now."""
+    year, month = start.year, start.month
+    while True:
+        candidate = start.replace(year=year, month=month, day=min(start.day, monthrange(year, month)[1]))
+        if candidate.timestamp() > now:
+            return candidate.timestamp()
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+
+
 def claude_renewal(payload, now=None):
     """An estimate of the next monthly billing date: the subscription's start day in the coming month.
     The profile reports when the subscription started and that it is active, not the billing day itself."""
@@ -563,11 +573,21 @@ def claude_renewal(payload, now=None):
         return None
     now = time.time() if now is None else now
     start = datetime.fromtimestamp(started, tz=timezone.utc)
-    year, month = start.year, start.month
+    return {"at": next_monthly(start, now), "ends": False, "estimated": True}
+
+
+def claude_configured_renewal(billing_day, now=None):
+    """The next renewal from a configured billing day of the month (clamped to shorter months), at local midnight."""
+    if type(billing_day) is not int or not 1 <= billing_day <= 31:
+        return None
+    now = time.time() if now is None else now
+    today = datetime.fromtimestamp(now)  # naive local time, so midnight follows the local clock across DST changes
+    year, month = today.year, today.month
     while True:
-        candidate = start.replace(year=year, month=month, day=min(start.day, monthrange(year, month)[1]))
+        candidate = today.replace(year=year, month=month, day=min(billing_day, monthrange(year, month)[1]),
+                                  hour=0, minute=0, second=0, microsecond=0)
         if candidate.timestamp() > now:
-            return {"at": candidate.timestamp(), "ends": False, "estimated": True}
+            return {"at": candidate.timestamp(), "ends": False}
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
 
 
@@ -643,7 +663,7 @@ def claude_scoped_label(limit):
     return "weekly " + name.strip()
 
 
-def collect_claude():
+def collect_claude(billing_day=None):
     credentials = claude_credentials()
     if not credentials:
         return unavailable("claude", "Sign in to Claude Code to read remaining quota")
@@ -672,8 +692,9 @@ def collect_claude():
     result = {"id": "claude", "name": "Claude", "state": "ok", "plan": claude_plan(credentials),
               "remaining_percent": tightest["remaining_percent"],
               "detail": " · ".join(format_codex_window(item) for item in windows), "windows": windows}
-    if claude_profile["renewal"]:
-        result["renewal"] = claude_profile["renewal"]
+    renewal = claude_configured_renewal(billing_day) or claude_profile["renewal"]
+    if renewal:
+        result["renewal"] = renewal
     return result
 
 
@@ -690,7 +711,7 @@ def schedule_claude(item, now):
     claude_schedule.update(next=now + delay, delay=delay)
 
 
-def collect(wanted=None):
+def collect(wanted=None, claude_billing_day=None):
     now = time.time()
     names = [name for name in NAMES if name in (wanted or NAMES)
              and (name != "claude" or now >= claude_schedule["next"])]
@@ -698,7 +719,8 @@ def collect(wanted=None):
     if not names:
         return result
     with ThreadPoolExecutor(max_workers=len(names)) as pool:
-        futures = {name: pool.submit(COLLECTORS[name]) for name in names}
+        futures = {name: pool.submit(COLLECTORS[name], **({"billing_day": claude_billing_day} if name == "claude" and claude_billing_day else {}))
+                   for name in names}
         for name, future in futures.items():
             try:
                 result[name] = future.result()

@@ -68,6 +68,18 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             config.validate(value)
 
+    def test_claude_billing_day_is_optional_and_a_day_of_the_month(self):
+        self.assertIsNone(config.claude_billing_day(config.default_config()))
+        value = config.default_config()
+        value["claude_billing_day"] = 18
+        self.assertEqual(config.claude_billing_day(config.validate(value)), 18)
+        value["claude_billing_day"] = None
+        self.assertIsNone(config.claude_billing_day(config.validate(value)))
+        for bad in (0, 32, "18", 18.0, True):
+            value["claude_billing_day"] = bad
+            with self.assertRaises(ValueError):
+                config.validate(value)
+
     def test_auto_updates_default_off(self):
         self.assertFalse(config.auto_updates_enabled(config.default_config()))
         self.assertFalse(config.auto_updates_enabled({"version": 1, "hosts": []}))
