@@ -10,7 +10,7 @@ import time
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("PangoCairo", "1.0")
-from gi.repository import GLib, Gtk, PangoCairo
+from gi.repository import GLib, Gtk, Pango, PangoCairo
 
 # Each tone maps to the libadwaita style class that paints text in that palette colour. The colour is
 # read off a hidden label carrying the class rather than looked up by name: since libadwaita 1.10 the
@@ -51,6 +51,52 @@ def draw_text(widget, context, text, x, y, size, weight=400, alpha=1.0, align=0.
     context.move_to(x - width * align, y - height * valign)
     PangoCairo.show_layout(context, layout)
     return width, height
+
+
+class FittingLabel(Gtk.Widget):
+    """A label given several wordings of the same fact, longest first, that shows the longest one fitting
+    the width it is allocated, so a narrow card drops the weekday or the price instead of cutting a word
+    in half with an ellipsis. Only the shortest wording is ever ellipsized."""
+
+    def __init__(self, texts, css=None, xalign=0.0):
+        super().__init__()
+        self.texts = [str(text) for text in texts if str(text)] or [""]
+        self.child = Gtk.Label(label=self.texts[0], xalign=xalign)
+        self.child.set_ellipsize(Pango.EllipsizeMode.END)
+        for name in (css or "").split():
+            self.child.add_css_class(name)
+        self.child.set_parent(self)
+
+    def do_dispose(self):
+        if self.child is not None:
+            self.child.unparent()
+            self.child = None
+        Gtk.Widget.do_dispose(self)
+
+    def get_text(self):
+        return self.child.get_label()
+
+    def width_of(self, text):
+        # A copy of the label's own layout keeps the style's letter spacing and tabular digits, which a
+        # fresh layout would miss; it is unclipped so the text is measured whole.
+        layout = self.child.get_layout().copy()
+        layout.set_width(-1)
+        layout.set_ellipsize(Pango.EllipsizeMode.NONE)
+        layout.set_text(text, -1)
+        return layout.get_pixel_size()[0]
+
+    def do_measure(self, orientation, for_size):
+        minimum, natural, minimum_baseline, natural_baseline = self.child.measure(orientation, for_size)
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            natural = max([minimum] + [self.width_of(text) for text in self.texts])
+        return minimum, natural, minimum_baseline, natural_baseline
+
+    def do_size_allocate(self, width, height, baseline):
+        chosen = next((text for text in self.texts if self.width_of(text) <= width), self.texts[-1])
+        if chosen != self.child.get_label():
+            self.child.set_label(chosen)
+            self.child.measure(Gtk.Orientation.HORIZONTAL, -1)
+        self.child.allocate(width, height, baseline, None)
 
 
 def rounded(context, x, y, width, height, radius):

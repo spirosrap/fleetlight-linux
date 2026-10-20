@@ -7,7 +7,22 @@ import unittest
 from unittest.mock import Mock, patch
 
 from fleetlight import actions, agents, config, net, probe
+from fleetlight.app import plan_wordings, reset_wordings
 from fleetlight.monitor import History
+
+
+class QuotaCardWordingTests(unittest.TestCase):
+    def test_reset_wordings_drop_the_day_before_the_countdown(self):
+        self.assertEqual(reset_wordings("6d 10h", "Tue 27 Oct", "27 Oct"), ["6d 10h · Tue 27 Oct", "6d 10h · 27 Oct", "6d 10h"])
+        self.assertEqual(reset_wordings("4h 1m", "Wed 04:00", "Wed"), ["4h 1m · Wed 04:00", "4h 1m · Wed", "4h 1m"])
+        self.assertEqual(reset_wordings("4h 1m", "", ""), ["4h 1m"])
+        self.assertEqual(reset_wordings("", "Tue 27 Oct", "27 Oct"), ["Tue 27 Oct", "27 Oct"])
+        self.assertEqual(reset_wordings("", "", ""), [])
+
+    def test_plan_wordings_drop_the_price_last(self):
+        self.assertEqual(plan_wordings("Max 5x $100"), ["MAX 5X $100", "MAX 5X"])
+        self.assertEqual(plan_wordings("Pro $200"), ["PRO $200", "PRO"])
+        self.assertEqual(plan_wordings("Premium"), ["PREMIUM"])
 
 
 class DashboardMetricsTests(unittest.TestCase):

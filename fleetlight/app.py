@@ -22,7 +22,7 @@ from . import sites
 from .tray import Tray
 from . import updates
 from .update_job import installation_changes, history_report
-from .widgets import AvailabilityStrip, FleetRing, MiniBars, Ring, TrendChart
+from .widgets import AvailabilityStrip, FittingLabel, FleetRing, MiniBars, Ring, TrendChart
 
 
 ACTION_NAMES = {"cli": "Codex CLI", "claude": "Claude CLI", "desktop": "ChatGPT", "system": "Linux packages", "restart": "required restarts"}
@@ -304,6 +304,26 @@ def group_windows(windows):
         else:
             grouped.append(item)
     return grouped
+
+
+def wordings(*texts):
+    """Distinct non-empty wordings of one fact, longest first, for a label that drops detail when space is short."""
+    kept = []
+    for text in texts:
+        if text and text not in kept:
+            kept.append(text)
+    return kept
+
+
+def reset_wordings(countdown, day, short_day):
+    """How a quota window's reset reads at three widths: with the full day, with a shorter day, countdown only."""
+    return wordings(*(" · ".join(part for part in (countdown, when) if part) for when in (day, short_day, "")))
+
+
+def plan_wordings(plan):
+    """A plan's name in capitals, then without its price, so "MAX 5X $100" narrows to "MAX 5X" rather than "MAX 5X $1…"."""
+    text = str(plan).upper()
+    return wordings(text, " ".join(word for word in text.split() if not word.startswith("$")))
 
 
 def quota_tone(left):
@@ -1019,9 +1039,9 @@ class Fleetlight(Adw.Application):
             heading = box(False, 8)
             heading.append(label(data.get("name") or name.title(), "row-title"))
             if data.get("plan"):
-                plan = label(str(data["plan"]).upper(), "eyebrow", xalign=1)
+                plan = FittingLabel(plan_wordings(data["plan"]), "eyebrow", xalign=1)
                 plan.set_hexpand(True)
-                plan.set_ellipsize(3)
+                plan.set_tooltip_text(str(data["plan"]))
                 heading.append(plan)
             body.append(heading)
             windows = data.get("windows") if isinstance(data.get("windows"), list) else []
@@ -1036,17 +1056,20 @@ class Fleetlight(Adw.Application):
                 if isinstance(reset_at, (int, float)):
                     # Countdowns are worked out now, not when the quota was read; the weekday is enough within a week.
                     moment = time.localtime(reset_at)
-                    day = time.strftime("%a %H:%M" if reset_at - time.time() < 6 * 86400 else "%a %d %b", moment)
-                    parts = [agent_quota.until(reset_at), day if window.get("reset_day") else ""]
+                    near = reset_at - time.time() < 6 * 86400
+                    day, short_day = (time.strftime("%a %H:%M", moment), time.strftime("%a", moment)) if near else \
+                        (time.strftime("%a %d %b", moment), time.strftime("%d %b", moment))
+                    if not window.get("reset_day"):
+                        day = short_day = ""
+                    texts = reset_wordings(agent_quota.until(reset_at), day, short_day)
                     full = "Resets " + time.strftime("%A %d %B at %H:%M", moment) + ", in " + agent_quota.until(reset_at)
                 else:
-                    parts = [window.get("reset") or "", window.get("reset_day") or ""]
-                    full = "Resets in " + " · ".join(part for part in parts if part)
-                reset = " · ".join(part for part in parts if part)
-                if reset:
-                    when = label(reset, "small muted numeric", xalign=1)
+                    texts = reset_wordings(window.get("reset") or "", window.get("reset_day") or "", "")
+                    full = "Resets in " + (texts[0] if texts else "")
+                if texts:
+                    # A narrow card shows a shorter wording instead of cutting the day short.
+                    when = FittingLabel(texts, "small muted numeric", xalign=1)
                     when.set_hexpand(True)
-                    when.set_ellipsize(3)
                     when.set_tooltip_text(full)
                     line.append(when)
                 body.append(line)
