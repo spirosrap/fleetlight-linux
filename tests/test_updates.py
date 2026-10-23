@@ -29,6 +29,19 @@ class UpdateTests(unittest.TestCase):
         checks["0"]["cli"]["latest"] = "9.0.0"
         self.assertEqual(pending[0]["checked"]["latest"], "1.1.0")
 
+    def test_failed_system_attempt_does_not_block_the_next_release_of_that_package(self):
+        host = {"id": "a", "name": "A", "local": True}
+        first = {"state": "available", "latest": "0.0.0", "checked_at": 200, "packages": ["claude-desktop"],
+                 "changes": ["claude-desktop 3.1623.3-1 -> 3.1623.4-1"]}
+        later = dict(first, changes=["claude-desktop 3.1623.4-1 -> 3.6556.1-1"])
+        attempted = {updates.auto_target_key(host, "system", first)}
+        self.assertNotIn(updates.auto_target_key(host, "system", later), attempted)
+        kind, pending = updates.next_auto_batch([host], {"a": {"status": "online"}}, {"a": {"system": later}}, attempted, now=200)
+        self.assertEqual(kind, "system")
+        self.assertEqual(pending[0]["host"]["id"], "a")
+        # Older checks without versions still key on the package names.
+        self.assertEqual(updates.auto_target_key(host, "system", {"packages": ["x", "y"]}), ("a", "system", "x,y"))
+
     def test_next_auto_batch_installs_apps_then_packages_never_restarts(self):
         hosts = [{"id": "a", "name": "A", "local": True}, {"id": "b", "name": "B", "local": True}]
         snapshots = {host["id"]: {"status": "online", "boot_id": "boot"} for host in hosts}

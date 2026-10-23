@@ -295,8 +295,9 @@ def auto_target_key(host, kind, checked):
     ident = host["id"] if isinstance(host, dict) else host
     checked = checked if isinstance(checked, dict) else {}
     if kind == "system":
-        packages = checked.get("packages") or []
-        token = ",".join(packages) if isinstance(packages, list) else str(packages)
+        # Versions keep a failed attempt from blocking the next release of the same package.
+        releases = checked.get("changes") or checked.get("packages") or []
+        token = ",".join(str(item) for item in releases) if isinstance(releases, list) else str(releases)
         return (ident, kind, token or str(checked.get("detail") or "system"))
     return (ident, kind, str(checked.get("latest") or ""), str(checked.get("build") or ""))
 
@@ -371,7 +372,8 @@ def check_system(host):
         if code or value.get("state") not in ("available", "current", "protected", "unknown", "unsupported"):
             raise ValueError("Invalid system check")
         system = {"state": value["state"], "latest": "0.0.0", "checked_at": time.time(),
-                  "detail": value.get("detail", ""), "provider": value.get("manager"), "packages": value.get("packages", [])}
+                  "detail": value.get("detail", ""), "provider": value.get("manager"), "packages": value.get("packages", []),
+                  "changes": [str(change)[:200] for change in value.get("changes") or [] if isinstance(change, str)][:200]}
         restart = value.get("restart", {})
         reboot = {"state": "available" if restart.get("required") is True else "unknown" if restart.get("required") is None else "current",
                   "latest": "0.0.0", "checked_at": time.time(), "detail": restart.get("reason", "Restart requirement unknown")}

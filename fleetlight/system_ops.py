@@ -364,13 +364,29 @@ def update():
         marker.write_text(json.dumps({'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip()}))
     print('PHASE:Checking the installed package state', flush=True)
     verified = check()
-    if verified['state'] != 'current':
+    if not installed_everything(checked, verified):
         print('UPDATE:verification-failed\nVERIFY:failed')
         return 1
+    for change in (verified.get('changes') or verified.get('packages') or [])[:80]:
+        print('NEW:' + str(change).replace('\n', ' ')[:180], flush=True)
     print('REBOOT:' + ('required' if verified['restart']['required'] else 'unknown' if verified['restart']['required'] is None else 'not-required'))
     print('VERIFY:ok')
     return 0
 
+
+def installed_everything(checked, verified):
+    """The packages that were pending at the start are now current.
+
+    A release published while the installer ran is a new finding for the next check,
+    not a failure of this one: the first update of the day used to be blamed for it,
+    and the controller then stopped retrying that package name altogether.
+    """
+    if verified.get('state') == 'current':
+        return True
+    if verified.get('state') != 'available':
+        return False
+    remaining = set(verified.get('packages') or [])
+    return not any(package in remaining for package in checked.get('packages') or [])
 
 def restart():
     print('FLEETLIGHT_RESTART\nPHASE:Checking restart requirement', flush=True)

@@ -235,6 +235,25 @@ class SystemTests(unittest.TestCase):
         install.assert_not_called()
         sidecars.assert_called_once()
 
+    def test_update_succeeds_when_an_unrelated_release_appears_during_install(self):
+        checked = {'state': 'available', 'packages': ['claude-desktop'], 'manager': 'omarchy',
+                   'changes': ['claude-desktop 3.1623.3-1 -> 3.1623.4-1']}
+        verified = {'state': 'available', 'packages': ['brave-bin'], 'manager': 'omarchy',
+                    'changes': ['brave-bin 1:1.97.59-1 -> 1:1.98.60-1'], 'restart': {'required': False}}
+        with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
+                patch.object(system_ops, 'run', return_value=result()), \
+                patch.object(system_ops.subprocess, 'call', return_value=0):
+            self.assertEqual(system_ops.update(), 0)
+
+    def test_update_fails_when_a_requested_package_is_still_pending(self):
+        checked = {'state': 'available', 'packages': ['claude-desktop', 'brave-bin'], 'manager': 'omarchy'}
+        verified = {'state': 'available', 'packages': ['claude-desktop'], 'manager': 'omarchy', 'restart': {'required': False}}
+        with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
+                patch.object(system_ops, 'run', return_value=result()), \
+                patch.object(system_ops.subprocess, 'call', return_value=0):
+            self.assertEqual(system_ops.update(), 1)
+        self.assertFalse(system_ops.installed_everything({'packages': ['a']}, {'state': 'unknown', 'packages': []}))
+
     def test_no_update_when_protected(self):
         with patch.object(system_ops, 'check', return_value={'state':'protected'}), patch.object(system_ops.subprocess, 'call') as install:
             self.assertEqual(system_ops.update(), 1)
