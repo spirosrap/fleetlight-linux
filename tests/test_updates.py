@@ -194,6 +194,24 @@ Unpacking hello (1.0)…
         with self.assertRaises(ValueError):
             validate({'version': 1, 'hosts': [{'id':'test', 'name':'Test', 'local':True, 'optional_services':['unknown']}]})
 
+    def test_grokbot_plan_tells_official_release_from_omarchy_package(self):
+        linux = {"status": "online", "os": "Linux",
+                 "grokbot": {"version": "0.75.8", "provider": "pacman", "candidate": "0.75.8", "status": "current in cached repository"}}
+        ahead = updates.grokbot_plan(linux, {"grokbot": {"version": "0.77.0"}})
+        self.assertEqual((ahead["state"], ahead["latest"], ahead["packaged"]), ("available", "0.77.0", False))
+        self.assertIn("Omarchy still packages 0.75.8", ahead["detail"])
+        packaged = dict(linux, grokbot=dict(linux["grokbot"], candidate="0.77.0", status="update available"))
+        ready = updates.grokbot_plan(packaged, {"grokbot": {"version": "0.77.0"}})
+        self.assertEqual((ready["state"], ready["packaged"]), ("available", True))
+        self.assertIn("Linux packages", ready["detail"])
+        self.assertEqual(updates.grokbot_plan(linux, {"grokbot": {"version": "0.75.8"}})["state"], "current")
+        failed = updates.grokbot_plan(linux, {"grokbot": {"error": "Could not check the official Grok Bot release"}})
+        self.assertEqual((failed["state"], failed["detail"]), ("unknown", "Could not check the official Grok Bot release"))
+        mac = updates.grokbot_plan({"status": "online", "os": "Darwin", "grokbot": {"version": None, "status": "not detected"}},
+                                   {"grokbot": {"version": "0.77.0"}})
+        self.assertEqual((mac["state"], mac["detail"]), ("missing", "Not installed"))
+        self.assertEqual(updates.grokbot_plan(dict(linux, status="offline"), {})["state"], "offline")
+
     def test_macos_release_build(self):
         self.assertEqual(updates.plan('26.1.2', '26.1.2', 'macos', build='124', installed_build='123')['state'], 'available')
         with self.assertRaises(ValueError):

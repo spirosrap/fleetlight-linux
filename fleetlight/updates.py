@@ -21,6 +21,8 @@ ROOT = Path(__file__).parent
 REGISTRY = "https://registry.npmjs.org/@openai/codex/latest"
 CLAUDE_REGISTRY = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
 APPCAST = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
+# Grok Bot is built on Cursor's update service; "sand" is its internal product name.
+GROKBOT_RELEASE = "https://api2.cursor.sh/updates/api/download/stable/linux-x64/sand"
 
 
 MAX_PARALLEL_UPDATES = 3
@@ -97,6 +99,35 @@ def releases():
         result["desktop"] = parse_appcast(raw)
     except Exception:
         result["desktop"] = {"error": "Could not check the official macOS appcast"}
+    try:
+        request = urllib.request.Request(GROKBOT_RELEASE, headers={"User-Agent": "Fleetlight/0.2"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read(1_000_000))
+        if not version(data.get("version")):
+            raise ValueError("Invalid Grok Bot version")
+        result["grokbot"] = {"version": data["version"]}
+    except Exception:
+        result["grokbot"] = {"error": "Could not check the official Grok Bot release"}
+    return result
+
+
+def grokbot_plan(snapshot, official):
+    """Installed Grok Bot package against the official x.ai release, noting whether Omarchy has packaged it yet."""
+    app = snapshot.get("grokbot") if isinstance(snapshot.get("grokbot"), dict) else {}
+    release = official.get("grokbot") or {}
+    installed, latest, candidate = app.get("version"), release.get("version"), app.get("candidate")
+    result = plan(installed, latest, app.get("provider"), release.get("error", "Official Grok Bot release"))
+    result["candidate"] = candidate
+    result["packaged"] = bool(version(candidate) and version(latest) and version(candidate) >= version(latest))
+    if result["state"] == "available":
+        if result["packaged"]:
+            result["detail"] = "Update available · installs with Linux packages"
+        else:
+            result["detail"] = "Released by x.ai · Omarchy still packages " + (candidate or installed or "?")
+    elif result["state"] == "missing":
+        result["detail"] = "Not installed"
+    if snapshot.get("status") != "online":
+        result.update(state="offline", detail="Computer is offline")
     return result
 
 
@@ -143,7 +174,8 @@ def check_host(host, snapshot, official):
     if snapshot.get("status") != "online":
         cli.update(state="offline", detail="Computer is offline")
         return {"cli": cli, "desktop": {**cli, "installed": None, "latest": None},
-                "claude": {**cli, "installed": snapshot.get("claude"), "latest": (official.get("claude") or {}).get("version")}}
+                "claude": {**cli, "installed": snapshot.get("claude"), "latest": (official.get("claude") or {}).get("version")},
+                "grokbot": grokbot_plan(snapshot, official)}
     app = snapshot.get("chatgpt", {})
     if snapshot.get("os") == "Darwin":
         release = official.get("desktop", {})
@@ -171,7 +203,7 @@ def check_host(host, snapshot, official):
         claude.update(state="unsupported", detail="This installation method requires a manual update")
     if snapshot.get("status") != "online":
         claude.update(state="offline", detail="Computer is offline")
-    result = {"cli": cli, "desktop": desktop, "claude": claude}
+    result = {"cli": cli, "desktop": desktop, "claude": claude, "grokbot": grokbot_plan(snapshot, official)}
     if snapshot.get("os") == "Linux":
         result.update(check_system(host))
     return result
@@ -186,7 +218,7 @@ def check_all(hosts, snapshots, callback):
             try:
                 value = future.result()
             except Exception:
-                value = {kind: plan(None, None, None, "Update check failed") for kind in ("cli", "desktop", "claude")}
+                value = {kind: plan(None, None, None, "Update check failed") for kind in ("cli", "desktop", "claude", "grokbot")}
             callback(ident, value)
 
 

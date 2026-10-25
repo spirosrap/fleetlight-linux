@@ -591,6 +591,8 @@ class Fleetlight(Adw.Application):
         if self.demo:
             self.refresh_button.set_sensitive(False)
             self.app_updates = {h["id"]: {kind: updates.plan("1.0.0", "1.1.0" if kind == "cli" else "1.0.0", "standalone" if kind == "cli" else "native" if kind == "claude" else "macos-appcast") for kind in ("cli", "claude", "desktop")} for h in self.configuration["hosts"]}
+            for h in self.configuration["hosts"]:
+                self.app_updates[h["id"]]["grokbot"] = updates.grokbot_plan({"status": "online", **self.snapshots.get(h["id"], {})}, {"grokbot": {"version": "0.77.0"}})
             self.agent_usage = agent_quota.demo_usage()
             self.render_agents()
             self.render_detail()
@@ -1729,7 +1731,7 @@ class Fleetlight(Adw.Application):
         self.update_row(apps, host, "claude", "Claude CLI", installed.get("claude"), "utilities-terminal-symbolic")
         desktop = installed.get("chatgpt", {})
         self.update_row(apps, host, "desktop", "ChatGPT", desktop.get("version"), "web-browser-symbolic")
-        self.package_row(apps, "Grok Bot", installed.get("grokbot"), "web-browser-symbolic")
+        self.package_row(apps, host, "grokbot", "Grok Bot", installed.get("grokbot"), "web-browser-symbolic")
         active = self.job_for_host(host["id"])
         if active:
             progress = Gtk.ProgressBar()
@@ -1819,28 +1821,30 @@ class Fleetlight(Adw.Application):
         row.add_suffix(value_label)
         attach(parent, row)
 
-    def package_row(self, parent, name, package, icon):
+    def package_row(self, parent, host, kind, name, package, icon):
         """Version row for an application kept current by the Linux packages update, not by its own updater."""
+        checked = self.app_updates.get(host["id"], {}).get(kind, {})
         package = package if isinstance(package, dict) else {}
-        version = package.get("version")
-        status = package.get("status")
-        versions = version or "Not detected"
-        detail = "Not installed"
-        if version and status == "update available" and package.get("candidate"):
-            versions += " → " + str(package["candidate"])
-            detail = "Update available · installs with Linux packages"
-        elif version:
-            detail = "Installed" + (" · " + package["provider"] if package.get("provider") else "")
-            if status == "current in cached repository":
-                detail = "Up to date" + (" · " + package["provider"] if package.get("provider") else "")
+        installed = package.get("version") or checked.get("installed")
+        state = checked.get("state", "checking" if self.update_checks_running else "unknown")
+        latest = checked.get("latest")
+        versions = installed or "Not detected"
+        if installed and state == "available" and latest:
+            versions += " → " + latest
+        detail = checked.get("detail", "Checking for updates…" if self.update_checks_running else "Press Check now to check releases")
+        if state == "current":
+            detail = "Up to date" + (" · " + package["provider"] if package.get("provider") else "")
+        elif not installed and state in ("missing", "unknown", "checking"):
+            detail = "Not installed" if state == "missing" or not checked else detail
         row = Adw.ActionRow(title=name, subtitle=GLib.markup_escape_text(versions + "\n" + detail))
         row.set_subtitle_lines(3)
         row.add_prefix(Gtk.Image.new_from_icon_name(icon))
-        if version and status == "update available":
+        if installed and state == "available":
             flag = Gtk.Image.new_from_icon_name("software-update-available-symbolic")
             flag.add_css_class("warning")
+            flag.set_tooltip_text(detail)
             row.add_suffix(flag)
-        elif status == "current in cached repository":
+        elif state == "current":
             current = label("Current", "good")
             current.set_valign(Gtk.Align.CENTER)
             row.add_suffix(current)
