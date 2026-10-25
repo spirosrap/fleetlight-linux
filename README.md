@@ -89,7 +89,7 @@ All screenshots use fictional demo data. The parallel update view shows three si
 - Show remaining Codex, Cursor and Claude quota from this computer's signed-in sessions, with Settings toggles for each agent.
 - Direct, concurrent SSH monitoring. The local computer is checked without SSH.
 - CPU use, disks, memory and swap, uptime, temperature, fan status, battery charge, top processes, failed systemd units, configured services and application versions.
-- Installed/latest application versions and in-app Codex CLI, Claude CLI and ChatGPT update buttons, including remote Apple Silicon Macs.
+- Installed/latest application versions and in-app Codex CLI, Claude CLI and ChatGPT update buttons, including remote Apple Silicon Macs. Grok Bot (the Omarchy `grok-bot` package) is listed on Linux and updates with the Linux packages.
 - Fleet-wide Linux package updates and confirmed restarts, with new-boot verification.
 - Durable update jobs with progress, verification and reconnect recovery.
 - Per-service **Warn when stopped** preferences for optional services.

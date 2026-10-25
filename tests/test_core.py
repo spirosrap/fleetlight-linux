@@ -143,6 +143,20 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(app["version"], "1.2.3")
             self.assertEqual(app["status"], "current in cached repository")
 
+    def test_grokbot_reports_pacman_versions(self):
+        def command(args, timeout=4):
+            return {("pacman", "-Q", "grok-bot"): "grok-bot 0.75.8-1",
+                    ("pacman", "-Si", "grok-bot"): "Repository : omarchy\nVersion : 0.76.0-1",
+                    ("vercmp", "0.75.8-1", "0.76.0-1"): "-1"}.get(tuple(args), "")
+        with patch("fleetlight.probe.shutil.which", return_value="/usr/bin/pacman"), \
+                patch("fleetlight.probe.command", side_effect=command):
+            app = probe.grokbot("Linux")
+            self.assertEqual(app, {"version": "0.75.8", "provider": "pacman", "candidate": "0.76.0", "status": "update available"})
+            self.assertEqual(probe.grokbot("Darwin")["status"], "not detected")
+        with patch("fleetlight.probe.shutil.which", return_value="/usr/bin/pacman"), \
+                patch("fleetlight.probe.command", return_value=""):
+            self.assertIsNone(probe.grokbot("Linux")["version"])
+
 
 class HistoryAndActionTests(unittest.TestCase):
     def test_service_failure_and_recovery_events(self):

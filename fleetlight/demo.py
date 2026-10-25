@@ -47,6 +47,8 @@ def demo_data():
             "network": {"interface": "en0" if mac else "enp3s0", "mac": "02:00:00:00:00:0" + str(index + 1),
                         "broadcast": "203.0.113.255", "wireless": False},
             "chatgpt": {"version": "1.0.0", "provider": "macOS app" if mac else "pacman", "status": "installed"},
+            "grokbot": ({"version": None, "provider": None, "candidate": None, "status": "not detected"} if mac
+                        else {"version": "0.75.8", "provider": "pacman", "candidate": "0.75.8", "status": "current in cached repository"}),
             "services": {s: "active" for s in host["services"]}, "package_manager": None if mac else "pacman",
             **extra}
     return {"version": 1, "refresh_seconds": 60, "hosts": hosts}, snapshots

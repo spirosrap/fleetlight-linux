@@ -1729,6 +1729,7 @@ class Fleetlight(Adw.Application):
         self.update_row(apps, host, "claude", "Claude CLI", installed.get("claude"), "utilities-terminal-symbolic")
         desktop = installed.get("chatgpt", {})
         self.update_row(apps, host, "desktop", "ChatGPT", desktop.get("version"), "web-browser-symbolic")
+        self.package_row(apps, "Grok Bot", installed.get("grokbot"), "web-browser-symbolic")
         active = self.job_for_host(host["id"])
         if active:
             progress = Gtk.ProgressBar()
@@ -1816,6 +1817,33 @@ class Fleetlight(Adw.Application):
         value_label.set_justify(Gtk.Justification.RIGHT)
         value_label.set_valign(Gtk.Align.CENTER)
         row.add_suffix(value_label)
+        attach(parent, row)
+
+    def package_row(self, parent, name, package, icon):
+        """Version row for an application kept current by the Linux packages update, not by its own updater."""
+        package = package if isinstance(package, dict) else {}
+        version = package.get("version")
+        status = package.get("status")
+        versions = version or "Not detected"
+        detail = "Not installed"
+        if version and status == "update available" and package.get("candidate"):
+            versions += " → " + str(package["candidate"])
+            detail = "Update available · installs with Linux packages"
+        elif version:
+            detail = "Installed" + (" · " + package["provider"] if package.get("provider") else "")
+            if status == "current in cached repository":
+                detail = "Up to date" + (" · " + package["provider"] if package.get("provider") else "")
+        row = Adw.ActionRow(title=name, subtitle=GLib.markup_escape_text(versions + "\n" + detail))
+        row.set_subtitle_lines(3)
+        row.add_prefix(Gtk.Image.new_from_icon_name(icon))
+        if version and status == "update available":
+            flag = Gtk.Image.new_from_icon_name("software-update-available-symbolic")
+            flag.add_css_class("warning")
+            row.add_suffix(flag)
+        elif status == "current in cached repository":
+            current = label("Current", "good")
+            current.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(current)
         attach(parent, row)
 
     def update_row(self, parent, host, kind, name, installed, icon):

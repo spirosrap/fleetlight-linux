@@ -413,6 +413,34 @@ def desktop_app(system):
     return result
 
 
+def pacman_package(name):
+    """Installed and repository versions of a pacman package, in the shape of desktop_app()."""
+    result = {"version": None, "provider": None, "candidate": None, "status": "not detected"}
+    if not shutil.which("pacman"):
+        return result
+    installed = command(["pacman", "-Q", name]).split()
+    if len(installed) != 2:
+        return result
+    match = re.search(r"^Version\s*:\s*(\S+)", command(["pacman", "-Si", name]), re.M)
+    target = match[1] if match else None
+    comparison = command(["vercmp", installed[1], target]) if target else ""
+    status = "installed"
+    if comparison and int(comparison) < 0:
+        status = "update available"
+    elif target and comparison:
+        status = "current in cached repository"
+    result.update(version=installed[1].split(":")[-1].rsplit("-", 1)[0], provider="pacman",
+                  candidate=target.split(":")[-1].rsplit("-", 1)[0] if target else None, status=status)
+    return result
+
+
+def grokbot(system):
+    """Grok Bot desktop agent; shipped as the grok-bot package in the Omarchy repository."""
+    if system != "Linux":
+        return {"version": None, "provider": None, "candidate": None, "status": "not detected"}
+    return pacman_package("grok-bot")
+
+
 def cpu_temperature(system, root="/sys"):
     """Hottest readable CPU sensor in Celsius; never substitute GPU/battery heat."""
     if system != "Linux":
@@ -532,7 +560,7 @@ def collect(services=()):
             "cpus": os.cpu_count() or 1, "services": service_states,
             "disks": disks(system), "processes": processes, "failed_units": failed_units(system),
             "network": network(system), "tailscale": tailscale(system),
-            "codex": cli, "claude": claude, "chatgpt": desktop_app(system)}
+            "codex": cli, "claude": claude, "chatgpt": desktop_app(system), "grokbot": grokbot(system)}
 
 
 if __name__ == "__main__":
