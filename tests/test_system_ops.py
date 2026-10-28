@@ -159,7 +159,8 @@ class SystemTests(unittest.TestCase):
                 patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
                 patch.object(system_ops, 'run', side_effect=[
                     result(2),
-                    result(0, '{"node":{"current":"20.0.0","latest":"22.0.0"}}'),
+                    result(0, '{"node":{"current":"20.0.0","latest":"22.0.0"},'
+                              '"amp":{"current":null,"latest":"0.0.1"}}'),
                     result(0, '1780000000.sh\n'),
                     result(1)]):
             checked = system_ops.check()

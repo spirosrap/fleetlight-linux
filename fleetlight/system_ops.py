@@ -133,7 +133,9 @@ def omarchy_extra_updates():
                 data = {}
             if isinstance(data, dict):
                 for name, value in data.items():
-                    if isinstance(value, dict) and value.get('current') != value.get('latest'):
+                    # Omarchy 4.5 declares lazy agent CLIs at "latest" in /etc/mise/conf.d; one
+                    # that was never run has no current version and is not an update to install.
+                    if isinstance(value, dict) and value.get('current') and value.get('current') != value.get('latest'):
                         label = 'mise:' + name
                         names.append(label)
                         current = value.get('current') or ''
