@@ -31,6 +31,20 @@ def text(path):
         return ""
 
 
+def distribution_name(os_release):
+    """PRETTY_NAME plus VERSION_ID when the name carries no version (Omarchy says just "Omarchy")."""
+    fields = {}
+    for line in os_release.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            fields[key.strip()] = value.strip().strip('"')
+    name = fields.get("PRETTY_NAME") or fields.get("NAME") or ""
+    version = fields.get("VERSION_ID") or ""
+    if name and version and not any(char.isdigit() for char in name):
+        return name + " " + version
+    return name
+
+
 def memory_info(system):
     """Physical memory and swap in bytes, plus the share of memory in use."""
     result = {"memory_percent": None, "memory_total": None, "memory_used": None,
@@ -543,10 +557,7 @@ def collect(services=()):
                                        else properties.get("ActiveState", "unknown"))
         else:
             service_states[service] = "unsupported"
-    distro = platform.mac_ver()[0] if system == "Darwin" else ""
-    for line in text("/etc/os-release").splitlines():
-        if line.startswith("PRETTY_NAME="):
-            distro = line.split("=", 1)[1].strip('"')
+    distro = platform.mac_ver()[0] if system == "Darwin" else distribution_name(text("/etc/os-release"))
     manager = ("omarchy" if shutil.which("omarchy-update") and shutil.which("pacman")
                else next((name for name in ("pacman", "apt", "dnf") if shutil.which(name)), None))
     cli = codex_version()

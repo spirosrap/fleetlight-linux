@@ -220,3 +220,18 @@ class HistoryAndActionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DistributionNameTest(unittest.TestCase):
+    def test_omarchy_gets_its_version_from_version_id(self):
+        release = 'NAME="Omarchy"\nPRETTY_NAME="Omarchy"\nID=omarchy\nBUILD_ID="4.5.0rc2"\nVERSION_ID="4.5.0rc2"\n'
+        self.assertEqual(probe.distribution_name(release), "Omarchy 4.5.0rc2")
+
+    def test_versioned_pretty_names_are_kept(self):
+        release = 'PRETTY_NAME="Ubuntu 24.04.3 LTS"\nVERSION_ID="24.04"\n'
+        self.assertEqual(probe.distribution_name(release), "Ubuntu 24.04.3 LTS")
+
+    def test_rolling_releases_without_a_version(self):
+        self.assertEqual(probe.distribution_name('PRETTY_NAME="Arch Linux"\nID=arch\n'), "Arch Linux")
+        self.assertEqual(probe.distribution_name(""), "")
+
