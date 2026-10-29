@@ -85,6 +85,14 @@ class SystemTests(unittest.TestCase):
         self.assertIn('timed out', checked['detail'])
         self.assertIn('timed out', checked['error_output'])
 
+    def test_restart_refuses_when_not_required_but_manual_reboot_proceeds(self):
+        with patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', return_value=result()) as run:
+            self.assertEqual(system_ops.restart(), 1)
+            run.assert_not_called()
+            self.assertEqual(system_ops.restart(required=False), 0)
+        run.assert_called_once_with(['sudo', '-n', 'shutdown', '-r', '+1'])
+
     def test_pacman_update_allows_omarchy_guarded_upgrades(self):
         checked = {'state': 'available', 'packages': ['aether'], 'manager': 'pacman'}
         verified = {'state': 'current', 'packages': [], 'manager': 'pacman', 'restart': {'required': False}}

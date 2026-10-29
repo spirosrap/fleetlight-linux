@@ -308,7 +308,8 @@ def start_job(host, kind, checked, ident=None):
         raise ValueError("This installation is protected or unavailable")
     ident = ident or uuid.uuid4().hex
     if kind in ("system", "restart"):
-        script = python_command((ROOT / "system_ops.py").read_text(), "update" if kind == "system" else "restart")
+        operation = "update" if kind == "system" else "reboot" if checked.get("manual") else "restart"
+        script = python_command((ROOT / "system_ops.py").read_text(), operation)
     else:
         script = (ROOT / {"cli": "updaters/cli.sh", "desktop": "updaters/desktop.sh", "claude": "updaters/claude.sh"}[kind]).read_text()
     return job_request(host, {"operation": "start", "id": ident, "kind": kind,

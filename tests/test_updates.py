@@ -181,6 +181,15 @@ Unpacking hello (1.0)…
         with self.assertRaises(ValueError):
             updates.start_job({'id': 'test', 'name': 'Test', 'local': True}, 'desktop', protected)
 
+    def test_manual_restart_runs_the_unconditional_reboot(self):
+        host = {'id': 'test', 'name': 'Test', 'local': True}
+        sent = []
+        with patch.object(updates, 'job_request', side_effect=lambda _, request: sent.append(request) or {}):
+            updates.start_job(host, 'restart', {'state': 'available', 'latest': '0.0.0', 'manual': True})
+            updates.start_job(host, 'restart', {'state': 'available', 'latest': '0.0.0'})
+        self.assertTrue(sent[0]['script'].endswith(' reboot'))
+        self.assertTrue(sent[1]['script'].endswith(' restart'))
+
     def test_optional_services_not_failures(self):
         snapshot = {'status': 'online', 'services': {'docker': 'inactive', 'smb': 'not installed'}, 'optional_services': ['docker', 'smb']}
         self.assertEqual(issues(snapshot), [])

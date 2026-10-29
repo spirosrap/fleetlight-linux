@@ -390,9 +390,10 @@ def installed_everything(checked, verified):
     remaining = set(verified.get('packages') or [])
     return not any(package in remaining for package in checked.get('packages') or [])
 
-def restart():
+def restart(required=True):
     print('FLEETLIGHT_RESTART\nPHASE:Checking restart requirement', flush=True)
-    if reboot_status()['required'] is not True:
+    # A restart asked for by hand on one computer does not need the system to request it.
+    if required and reboot_status()['required'] is not True:
         print('UPDATE:restart-not-required\nVERIFY:failed')
         return 1
     # Delay leaves time to persist the receipt, including when restarting this controller.
@@ -412,5 +413,7 @@ if __name__ == '__main__':
         sys.exit(update())
     elif operation == 'restart':
         sys.exit(restart())
+    elif operation == 'reboot':
+        sys.exit(restart(required=False))
     else:
         sys.exit(2)

@@ -1792,6 +1792,11 @@ class Fleetlight(Adw.Application):
             update.connect("clicked", lambda *_: self.confirm_update(host, data["package_manager"]))
             update.set_sensitive(not self.active_jobs and not self.update_checks_running)
             controls.append(update)
+        if online and data.get("os") == "Linux":
+            reboot = icon_button("Restart…", "system-reboot-symbolic")
+            reboot.connect("clicked", lambda *_: self.request_restart(host))
+            reboot.set_sensitive(bool(data.get("boot_id")) and not self.active_jobs and not self.update_checks_running and not self.busy)
+            controls.append(reboot)
         if self.demo:
             controls.set_sensitive(False)
         self.content.append(controls)
@@ -2129,6 +2134,26 @@ class Fleetlight(Adw.Application):
         dialog.set_default_response("cancel")
         dialog.set_close_response("cancel")
         dialog.connect("response", lambda _, response: self.begin_update(host, kind, checked) if response == "update" else None)
+        dialog.present()
+
+    def request_restart(self, host):
+        if self.active_jobs or self.update_checks_running or self.busy or self.demo:
+            return
+        if not self.snapshots.get(host["id"], {}).get("boot_id"):
+            self.toast("Restart unavailable: the computer's boot identity is unknown")
+            return
+        if host.get("local"):
+            body = "This computer will restart in one minute. Save your work first. Fleetlight reopens only if you start it again."
+        else:
+            body = "Active work and services on " + host["name"] + " will be interrupted. It restarts one minute after the request; Fleetlight then verifies that it comes back on a new boot."
+        dialog = Adw.MessageDialog(transient_for=self.window, heading="Restart " + host["name"] + "?", body=body)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("restart", "Restart")
+        dialog.set_response_appearance("restart", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        checked = {"state": "available", "latest": "0.0.0", "manual": True, "checked_at": time.time(), "detail": "Restart requested"}
+        dialog.connect("response", lambda _, response: self.begin_update(host, "restart", checked) if response == "restart" else None)
         dialog.present()
 
     def remember_history(self, key, widget):
