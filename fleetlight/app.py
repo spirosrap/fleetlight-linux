@@ -1795,7 +1795,8 @@ class Fleetlight(Adw.Application):
         if online and data.get("os") == "Linux":
             reboot = icon_button("Restart…", "system-reboot-symbolic")
             reboot.connect("clicked", lambda *_: self.request_restart(host))
-            reboot.set_sensitive(bool(data.get("boot_id")) and not self.active_jobs and not self.update_checks_running and not self.busy)
+            # Not gated on the minute-by-minute probe: the page is not redrawn when it ends, so the button stayed off.
+            reboot.set_sensitive(bool(data.get("boot_id")))
             controls.append(reboot)
         if self.demo:
             controls.set_sensitive(False)
@@ -2137,7 +2138,10 @@ class Fleetlight(Adw.Application):
         dialog.present()
 
     def request_restart(self, host):
-        if self.active_jobs or self.update_checks_running or self.busy or self.demo:
+        if self.demo:
+            return
+        if self.active_jobs:
+            self.toast("Wait for the running update to finish before restarting")
             return
         if not self.snapshots.get(host["id"], {}).get("boot_id"):
             self.toast("Restart unavailable: the computer's boot identity is unknown")
@@ -2153,8 +2157,25 @@ class Fleetlight(Adw.Application):
         dialog.set_default_response("cancel")
         dialog.set_close_response("cancel")
         checked = {"state": "available", "latest": "0.0.0", "manual": True, "checked_at": time.time(), "detail": "Restart requested"}
-        dialog.connect("response", lambda _, response: self.begin_update(host, "restart", checked) if response == "restart" else None)
+        dialog.connect("response", lambda _, response: self.start_restart(host, checked) if response == "restart" else None)
         dialog.present()
+
+    def start_restart(self, host, checked, attempts=0):
+        # A status check in progress holds jobs back; start as soon as it ends.
+        if self.busy or self.update_checks_running:
+            if attempts == 0:
+                self.toast("Restarting " + host["name"] + " once the current check finishes")
+            if attempts < 300:
+                GLib.timeout_add_seconds(1, lambda: self.start_restart(host, checked, attempts + 1) and False)
+            else:
+                self.toast("Restart not started: checks are still running")
+            return False
+        if self.active_jobs:
+            self.toast("Restart not started: another update is running")
+            return False
+        if not self.begin_update(host, "restart", checked):
+            self.toast("Restart could not start")
+        return False
 
     def remember_history(self, key, widget):
         if self.rebuilding_detail or widget.get_parent() is None:
