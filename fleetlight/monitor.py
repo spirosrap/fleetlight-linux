@@ -104,11 +104,100 @@ def issues(snapshot):
         result.append("Root disk is nearly full")
     if (snapshot.get("memory_percent") or 0) >= 95:
         result.append("Memory usage is high")
+    regressions = snapshot.get("service_regressions") or {}
     for name, state in snapshot.get("services", {}).items():
-        if state not in ("active", "unsupported") and not (name in snapshot.get("optional_services", []) and state in ("inactive", "not installed")):
-            result.append(name + ": " + state)
+        if name in regressions and state not in ("active", "unsupported"):
+            result.append(service_label(name) + ": " + state + " since " + regression_cause(regressions[name]))
+        elif state not in ("active", "unsupported") and not (name in snapshot.get("optional_services", []) and state in ("inactive", "not installed")):
+            result.append(service_label(name) + ": " + state)
     result.extend(tailscale_issues(snapshot.get("tailscale")))
     return result
+
+
+def service_label(spec):
+    """Short name for a service entry: user:app-dev.lizardbyte.app.Sunshine.service reads "Sunshine"."""
+    if spec.startswith("port:"):
+        return "port " + spec[5:]
+    if spec.startswith(("http://", "https://")):
+        return spec.split("://", 1)[1].rstrip("/")
+    name = spec[5:] if spec.startswith("user:") else spec
+    name = name[:-8] if name.endswith(".service") else name
+    parts = name.split(".")
+    # Reverse-DNS names (desktop app units, launchd labels) end in the readable part.
+    return parts[-1] if len(parts) >= 3 and parts[-1] else name
+
+
+def regression_cause(regression):
+    moment = time.strftime("%a %H:%M", time.localtime(regression.get("at") or 0))
+    if regression.get("reason") != "packages":
+        return "the restart at " + moment
+    changes = regression.get("changes") or []
+    detail = ", ".join(changes[:2]) + (" +" + str(regression.get("count", len(changes)) - 2) + " more"
+                                        if regression.get("count", len(changes)) > 2 else "")
+    return "the package update at " + moment + (" (" + detail + ")" if detail else "")
+
+
+class ServiceWatch:
+    """Remembers which services ran before each package update or restart, so ones that stop afterwards are named.
+
+    A computer's marker is its boot plus its latest package transaction. When the marker changes, every
+    service that was running under the previous marker and is not running now is a regression, until it runs again.
+    """
+    WINDOW = 1800
+
+    def __init__(self, path=None):
+        self.path = Path(path or state_path().with_name("service-watch.json"))
+        try:
+            data = json.loads(self.path.read_text())
+            self.hosts = data["hosts"] if isinstance(data.get("hosts"), dict) else {}
+        except (OSError, ValueError, KeyError, TypeError):
+            self.hosts = {}
+
+    def observe(self, snapshot, now=None):
+        """The regressions for this snapshot, as {service: {reason, at, changes, count}}; saves when they change."""
+        ident = snapshot.get("id")
+        entry = self.hosts.get(ident)
+        if snapshot.get("status") != "online":
+            return dict((entry or {}).get("regressions", {}))
+        now = time.time() if now is None else now
+        states = snapshot.get("services") or {}
+        active = sorted(name for name, state in states.items() if state == "active")
+        activity = snapshot.get("package_activity") or {}
+        marker = [snapshot.get("boot_id"), activity.get("at")]
+        before = json.dumps(entry, sort_keys=True)
+        if not isinstance(entry, dict):
+            entry = {"marker": marker, "active": active, "changed_at": 0, "regressions": {}}
+        elif entry.get("marker") != marker:
+            packages = activity.get("at") and activity.get("at") != (entry.get("marker") or [None, None])[1]
+            cause = {"reason": "packages" if packages else "restart",
+                     "at": activity.get("at") if packages else now,
+                     "changes": self.prioritise(activity.get("changes") or [], entry.get("active", [])) if packages else [],
+                     "count": activity.get("count", 0) if packages else 0}
+            entry.update(marker=marker, changed_at=now, cause=cause, baseline=entry.get("active", []))
+        regressions = {name: value for name, value in entry.get("regressions", {}).items()
+                       if name in states and states[name] not in ("active", "unsupported")}
+        if now - entry.get("changed_at", 0) <= self.WINDOW:
+            for name in entry.get("baseline", []):
+                if name in states and states[name] not in ("active", "unsupported") and name not in regressions:
+                    regressions[name] = entry["cause"]
+        else:
+            entry.pop("baseline", None)
+        entry["regressions"] = regressions
+        # Inside the window keep the pre-update set, so a slow start still counts against the update.
+        entry["active"] = sorted(set(active) | set(entry.get("baseline", []))) if "baseline" in entry else active
+        self.hosts[ident] = entry
+        if json.dumps(entry, sort_keys=True) != before:
+            try:
+                atomic_json(self.path, {"version": 1, "hosts": self.hosts}, indent=None)
+            except OSError:
+                pass
+        return dict(regressions)
+
+    @staticmethod
+    def prioritise(changes, services):
+        """Put packages whose name appears in a watched service first: they are the likely cause."""
+        words = {service_label(name).lower() for name in services}
+        return sorted(changes, key=lambda change: not any(word and word in change.split(" ")[0].lower() for word in words))
 
 
 TAILSCALE_EXPIRY_WARNING = 7 * 86400

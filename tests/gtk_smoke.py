@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import traceback
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from fleetlight.app import Fleetlight, GLib, Gtk
+from fleetlight.app import Adw, Fleetlight, GLib, Gtk
 
 app = Fleetlight(demo=True)
 failures = []
@@ -73,6 +73,21 @@ def verify():
         assert app.snapshots["local"]["metrics_checked_at"] == metrics["metrics_checked_at"]
         app.receive_local_metrics([local], dict(metrics, metrics_checked_at=0))
         assert app.snapshots["local"]["metrics_checked_at"] == metrics["metrics_checked_at"]
+        # A service that stopped after an update names the update on its row and in the alert.
+        saved_services, saved_snapshot = list(local["services"]), dict(app.snapshots["local"])
+        local["services"] = ["tailscaled", "user:app-dev.lizardbyte.app.Sunshine.service", "http://127.0.0.1:1/?a=1&b=2"]
+        app.snapshots["local"] = dict(app.snapshots["local"], services={"tailscaled": "active",
+            "user:app-dev.lizardbyte.app.Sunshine.service": "failed", "http://127.0.0.1:1/?a=1&b=2": "unreachable"},
+            service_regressions={"user:app-dev.lizardbyte.app.Sunshine.service": {
+                "reason": "packages", "at": 1793301228.0, "changes": ["sunshine 1 → 2"], "count": 1}})
+        app.selected = "local"
+        app.render_detail()
+        assert find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "Sunshine"
+                           and "Stopped after the package update" in w.get_subtitle())
+        app.selected = "fleet"
+        app.render_detail()
+        local["services"], app.snapshots["local"] = saved_services, saved_snapshot
+        app.selected = "local"
         app.search.set_text("Studio")
         app.populate_hosts()
         assert app.selected == "studio"

@@ -536,6 +536,141 @@ def collect_metrics(system=None):
             "battery": battery_cached(system)}
 
 
+SERVICE_SPEC = re.compile(r"(?:user:)?[A-Za-z0-9][A-Za-z0-9_.@-]{0,100}|port:[0-9]{1,5}|https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+;=%-]{1,300}")
+
+
+def valid_service(spec):
+    """Service entries: a systemd unit (a launchd label on macOS), user:<unit>, port:<number> or an http(s) URL."""
+    if not isinstance(spec, str) or not SERVICE_SPEC.fullmatch(spec):
+        return False
+    return not spec.startswith("port:") or 1 <= int(spec[5:]) <= 65535
+
+
+def systemd_state(unit, user=False):
+    args = ["systemctl"] + (["--user"] if user else []) + ["show", unit, "--property=LoadState,ActiveState", "--no-pager"]
+    if user and not os.environ.get("XDG_RUNTIME_DIR"):
+        # SSH sessions without pam_systemd still reach the user manager through its runtime directory.
+        os.environ["XDG_RUNTIME_DIR"] = "/run/user/" + str(os.getuid())
+    raw = command(args)
+    properties = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+    if not properties:
+        return "unknown"
+    return "not installed" if properties.get("LoadState") == "not-found" else properties.get("ActiveState", "unknown")
+
+
+def launchd_state(label):
+    raw = command(["launchctl", "list", label])
+    if not raw:
+        return "not installed"
+    if re.search(r'"PID"\s*=\s*\d+', raw):
+        return "active"
+    status = re.search(r'"LastExitStatus"\s*=\s*(-?\d+)', raw)
+    return "inactive" if not status or status[1] == "0" else "failed (exit " + status[1] + ")"
+
+
+def port_state(port):
+    import socket
+    for address in ("127.0.0.1", "::1"):
+        try:
+            with socket.create_connection((address, port), timeout=2):
+                return "active"
+        except OSError:
+            continue
+    return "not listening"
+
+
+def url_state(url):
+    import ssl
+    import urllib.error
+    import urllib.request
+    request = urllib.request.Request(url, headers={"User-Agent": "Fleetlight"})
+    try:
+        # Services on the computer itself often use self-signed or tailnet-only certificates.
+        with urllib.request.urlopen(request, timeout=5, context=ssl._create_unverified_context()) as response:
+            code = response.status
+    except urllib.error.HTTPError as error:
+        code = error.code
+    except (OSError, ValueError):
+        return "unreachable"
+    return "active" if code < 400 else "HTTP " + str(code)
+
+
+def service_state(system, spec):
+    if not valid_service(spec):
+        return "invalid"
+    if spec.startswith("port:"):
+        return port_state(int(spec[5:]))
+    if spec.startswith(("http://", "https://")):
+        return url_state(spec)
+    user = spec.startswith("user:")
+    name = spec[5:] if user else spec
+    if system == "Linux" and shutil.which("systemctl"):
+        return systemd_state(name, user)
+    if system == "Darwin" and not user and shutil.which("launchctl"):
+        return launchd_state(name)
+    return "unsupported"
+
+
+def log_tail(path, size=262144):
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - size))
+            return stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def package_events(system):
+    """(time, change) pairs from the package manager's log, oldest first."""
+    from datetime import datetime
+    events = []
+    if system != "Linux":
+        return events
+    pacman = re.compile(r"^\[([0-9T:+ -]+)\] \[ALPM\] (upgraded|installed|removed|downgraded) (\S+) \((.*)\)$")
+    for line in log_tail("/var/log/pacman.log").splitlines():
+        match = pacman.match(line)
+        if not match:
+            continue
+        stamp = match[1]
+        for layout in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M"):
+            try:
+                when = datetime.strptime(stamp, layout).timestamp()
+                break
+            except ValueError:
+                when = None
+        if when is not None:
+            change = match[3] + " " + match[4] if match[2] in ("upgraded", "downgraded") else match[3] + " (" + match[2] + ")"
+            events.append((when, change.replace(" -> ", " → ")))
+    dpkg = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (upgrade|install|remove) (\S+) (\S+) (\S+)$")
+    for line in log_tail("/var/log/dpkg.log").splitlines():
+        match = dpkg.match(line)
+        if not match:
+            continue
+        try:
+            when = datetime.strptime(match[1], "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        name = match[3].split(":")[0]
+        change = name + " " + match[4] + " → " + match[5] if match[2] == "upgrade" else name + " (" + match[2] + "ed)"
+        events.append((when, change.replace("removeed", "removed")))
+    return sorted(events)
+
+
+def package_activity(system):
+    """The latest package transaction: its time and changes, grouping events less than five minutes apart."""
+    events = package_events(system)
+    if not events:
+        return None
+    group = [events[-1]]
+    for event in reversed(events[:-1]):
+        if group[-1][0] - event[0] > 300:
+            break
+        group.append(event)
+    changes = list(dict.fromkeys(change for _, change in reversed(group)))
+    return {"at": events[-1][0], "changes": changes[:40], "count": len(changes)}
+
+
 def collect(services=()):
     system = platform.system()
     # Measure CPU over a short quiet window before the slower version lookups run.
@@ -548,15 +683,8 @@ def collect(services=()):
     processes = top_processes(system, before, window)
     service_states = {}
     for service in services:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,100}", service):
-            continue
-        if system == "Linux" and shutil.which("systemctl"):
-            raw = command(["systemctl", "show", service, "--property=LoadState,ActiveState", "--no-pager"])
-            properties = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
-            service_states[service] = ("not installed" if properties.get("LoadState") == "not-found"
-                                       else properties.get("ActiveState", "unknown"))
-        else:
-            service_states[service] = "unsupported"
+        if valid_service(service):
+            service_states[service] = service_state(system, service)
     distro = platform.mac_ver()[0] if system == "Darwin" else distribution_name(text("/etc/os-release"))
     manager = ("omarchy" if shutil.which("omarchy-update") and shutil.which("pacman")
                else next((name for name in ("pacman", "apt", "dnf") if shutil.which(name)), None))
@@ -570,6 +698,7 @@ def collect(services=()):
             "kernel": platform.release(), "checked_at": time.time(), **metrics,
             "cpus": os.cpu_count() or 1, "services": service_states,
             "disks": disks(system), "processes": processes, "failed_units": failed_units(system),
+            "package_activity": package_activity(system),
             "network": network(system), "tailscale": tailscale(system),
             "codex": cli, "claude": claude, "chatgpt": desktop_app(system), "grokbot": grokbot(system)}
 

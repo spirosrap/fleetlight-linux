@@ -6,6 +6,8 @@ import re
 import tempfile
 from urllib.parse import urlparse
 
+from .probe import valid_service
+
 
 def config_path():
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "fleetlight" / "fleet.json"
@@ -97,8 +99,8 @@ def validate(config):
         services = host.get("services", [])
         if not isinstance(services, list) or len(services) > 20:
             raise ValueError("At most 20 services are supported per computer")
-        if any(not isinstance(s, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,100}", s) for s in services):
-            raise ValueError("Use systemd service names without paths or command options")
+        if not all(valid_service(s) for s in services):
+            raise ValueError("Services must be unit names (launchd labels on a Mac), user:<unit>, port:<number> or http(s) URLs without commas")
         optional = host.get("optional_services", [])
         if not isinstance(optional, list) or any(not isinstance(s, str) or s not in services for s in optional):
             raise ValueError("optional_services must be a list of configured service names")

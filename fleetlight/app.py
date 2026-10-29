@@ -16,7 +16,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 from . import __version__
 from . import actions, config
 from . import agents as agent_quota
-from .monitor import History, issues, linux_update_issues, probe_host, refresh
+from .monitor import History, ServiceWatch, issues, linux_update_issues, probe_host, refresh, regression_cause, service_label
 from .probe import collect_metrics
 from . import sites
 from .tray import Tray
@@ -452,6 +452,7 @@ class Fleetlight(Adw.Application):
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
         self.history = History() if not demo else History(Path("/nonexistent/fleetlight-demo"))
+        self.service_watch = ServiceWatch() if not demo else ServiceWatch(Path("/nonexistent/fleetlight-demo/service-watch.json"))
         if demo:
             self.journal_path = Path("/nonexistent/fleetlight-demo/update-controller.json")
         self.connect("activate", self.activate_window)
@@ -917,6 +918,7 @@ class Fleetlight(Adw.Application):
                 "metrics_checked_at", "uptime", "disk_percent", "disk_free", "disk_total", "memory_percent",
                 "memory_total", "memory_used", "swap_total", "swap_used", "load", "cpu_percent",
                 "cpu_temperature", "fan", "battery") if key in current}}
+        snapshot = {**snapshot, "service_regressions": self.service_watch.observe(snapshot)}
         pending = self.pending_restarts.get(snapshot["id"])
         if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
             self.pending_restarts.pop(snapshot["id"], None)
@@ -1525,7 +1527,7 @@ class Fleetlight(Adw.Application):
         if trouble_by_id:
             group = self.section("Needs attention", "Select an item to open it")
             for ident, (name, trouble) in trouble_by_id.items():
-                row = Adw.ActionRow(title=name, subtitle="; ".join(trouble[:3]), activatable=True)
+                row = Adw.ActionRow(title=GLib.markup_escape_text(name), subtitle=GLib.markup_escape_text("; ".join(trouble[:3])), activatable=True)
                 row.set_subtitle_lines(2)
                 icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
                 icon.add_css_class("warning")
@@ -1746,13 +1748,20 @@ class Fleetlight(Adw.Application):
                 status = checked_updates.get(kind, {})
                 self.detail_row(system_card, title, status.get("detail", "Checking…"), icon_name,
                                 "warning" if status.get("state") in ("available", "protected", "unknown") else "muted")
-        services = self.section("Services", "Configured system services")
+        services = self.section("Services", "Units, launchd jobs, ports and web addresses checked on this computer")
         states = data.get("services", {}) if online else {}
+        regressions = data.get("service_regressions") or {}
         for name in host.get("services", []):
             state = states.get(name, "not checked")
             optional = name in host.get("optional_services", [])
-            neutral = state in ("unsupported", "not checked") or (optional and state in ("inactive", "not installed"))
-            row = Adw.ActionRow(title=name, subtitle="Optional" if optional else "Expected to run")
+            regression = regressions.get(name) if state not in ("active", "unsupported", "not checked") else None
+            neutral = not regression and (state in ("unsupported", "not checked") or (optional and state in ("inactive", "not installed")))
+            subtitle = ("Stopped after " + regression_cause(regression) if regression
+                        else "Optional" if optional else "Expected to run")
+            if service_label(name) != name:
+                subtitle = name + " · " + subtitle
+            row = Adw.ActionRow(title=GLib.markup_escape_text(service_label(name)), subtitle=GLib.markup_escape_text(subtitle))
+            row.set_subtitle_lines(3)
             row.add_prefix(status_dot("good" if state == "active" else None if neutral else "warning"))
             state_label = label(state, "good" if state == "active" else "muted" if neutral else "warning")
             state_label.set_valign(Gtk.Align.CENTER)
@@ -1775,7 +1784,7 @@ class Fleetlight(Adw.Application):
             row.add_suffix(count)
             services.add(row)
         if not host.get("services") and not isinstance(failed, list):
-            services.add(label("No services configured. Add systemd unit names in Settings.", "muted", wrap=True))
+            services.add(label("No services configured. Add unit names, user:<unit>, port:<number> or URLs in Settings.", "muted", wrap=True))
         controls = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, min_children_per_line=1,
                                max_children_per_line=4, row_spacing=8, column_spacing=8)
         terminal = icon_button("Open terminal", "utilities-terminal-symbolic")
@@ -2433,7 +2442,7 @@ class Fleetlight(Adw.Application):
         page = Adw.PreferencesPage()
         group = Adw.PreferencesGroup(title="SSH computer", description="Uses your existing SSH keys and known hosts. Verify the connection in a terminal first; Fleetlight never accepts unknown host keys.")
         entries = {}
-        for key, title in (("name", "Display name"), ("alias", "SSH alias or user@host"), ("services", "Services, comma-separated")):
+        for key, title in (("name", "Display name"), ("alias", "SSH alias or user@host"), ("services", "Services, comma-separated: unit, user:unit, port:N or URL")):
             entries[key] = Adw.EntryRow(title=title)
             group.add(entries[key])
         page.add(group)
