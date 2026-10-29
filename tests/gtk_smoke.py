@@ -73,6 +73,18 @@ def verify():
         assert app.snapshots["local"]["metrics_checked_at"] == metrics["metrics_checked_at"]
         app.receive_local_metrics([local], dict(metrics, metrics_checked_at=0))
         assert app.snapshots["local"]["metrics_checked_at"] == metrics["metrics_checked_at"]
+        # A bar restart (the tray goes away and comes back) keeps a hidden window hidden;
+        # a tray that stays away shows it.
+        app.tray_changed(True)
+        app.window.set_visible(False)
+        app.tray_changed(False)
+        assert app.tray_grace and not app.window.get_visible()
+        app.tray_changed(True)
+        assert not app.tray_grace and not app.window.get_visible()
+        app.tray_changed(False)
+        GLib.source_remove(app.tray_grace)
+        app.tray_gone()
+        assert app.window.get_visible() and not app.in_tray and not app.tray_grace
         # A service that stopped after an update names the update on its row and in the alert.
         saved_services, saved_snapshot = list(local["services"]), dict(app.snapshots["local"])
         local["services"] = ["tailscaled", "user:app-dev.lizardbyte.app.Sunshine.service", "http://127.0.0.1:1/?a=1&b=2"]

@@ -20,6 +20,10 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.7.1
+
+- When the tray disappears, Fleetlight waits 20 seconds for it to come back before showing its window. `omarchy-update` restarts the bar, which used to pop the hidden window up on whichever monitor had focus.
+
 ## Version 0.7.0
 
 - A stopped service gets a **Restart** button on the computer's Services card: it resets and restarts the systemd unit (user units directly, system units through passwordless `sudo -n systemctl`) or kickstarts the launchd job on a Mac, waits a few seconds and reports whether it runs again.

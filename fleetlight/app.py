@@ -33,6 +33,8 @@ CHART_METRICS = (("cpu", "CPU", "%", 100), ("memory", "Memory", "%", 100), ("dis
                  ("temperature", "Temperature", "°C", None), ("ms", "Check time", "ms", None))
 CHART_RANGES = (("live", "Live", 300), ("1h", "1 h", 3600), ("6h", "6 h", 6 * 3600),
                 ("24h", "24 h", 86400), ("7d", "7 d", 7 * 86400))
+# Seconds a vanished tray has to come back before the hidden window is shown instead.
+TRAY_GRACE_SECONDS = 20
 SCHEMES = {"auto": Adw.ColorScheme.PREFER_DARK, "dark": Adw.ColorScheme.FORCE_DARK, "light": Adw.ColorScheme.FORCE_LIGHT}
 LOW_QUOTA = 10
 
@@ -361,6 +363,7 @@ class Fleetlight(Adw.Application):
         self.background = background
         self.tray = None
         self.in_tray = False
+        self.tray_grace = 0
         self.tray_info = ("Fleetlight", 0)
         self.window = None
         self.snapshots = {}
@@ -639,11 +642,23 @@ class Fleetlight(Adw.Application):
             return
         self.in_tray = available
         if available:
-            self.hold()
+            if self.tray_grace:
+                # The tray came back in time, as after omarchy-update restarts the bar: stay hidden, keep the hold.
+                GLib.source_remove(self.tray_grace)
+                self.tray_grace = 0
+            else:
+                self.hold()
         else:
+            # Give a restarting bar time to come back before showing the window on whatever monitor has focus.
+            self.tray_grace = GLib.timeout_add_seconds(TRAY_GRACE_SECONDS, self.tray_gone)
+
+    def tray_gone(self):
+        self.tray_grace = 0
+        if not self.in_tray:
             if self.window is not None and not self.window.get_visible():
                 self.window.present()
             self.release()
+        return GLib.SOURCE_REMOVE
 
     def present_without_tray(self):
         if not self.in_tray and self.window is not None:
