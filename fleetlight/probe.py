@@ -180,6 +180,27 @@ def disks(system, mounts=None):
     return result
 
 
+def memory_filesystems(system, mounts=None):
+    """Memory-backed filesystems that fill up silently: this user's runtime directory, /tmp and /dev/shm."""
+    if system != "Linux":
+        return []
+    wanted = {"/run/user/" + str(os.getuid()), "/tmp", "/dev/shm"}
+    result = []
+    for line in (text("/proc/mounts") if mounts is None else mounts).splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[2] != "tmpfs" or parts[1] not in wanted:
+            continue
+        wanted.discard(parts[1])
+        try:
+            usage = shutil.disk_usage(parts[1])
+        except OSError:
+            continue
+        if usage.total:
+            result.append({"mount": parts[1], "total": usage.total, "free": usage.free,
+                           "percent": round(100 * usage.used / usage.total)})
+    return sorted(result, key=lambda item: item["mount"])
+
+
 def process_times():
     """Name, CPU ticks and resident pages of every process, read from /proc without subprocesses."""
     result = {}
@@ -697,7 +718,7 @@ def collect(services=()):
             "boot_id": text("/proc/sys/kernel/random/boot_id").strip() if system == "Linux" else None,
             "kernel": platform.release(), "checked_at": time.time(), **metrics,
             "cpus": os.cpu_count() or 1, "services": service_states,
-            "disks": disks(system), "processes": processes, "failed_units": failed_units(system),
+            "disks": disks(system), "memory_filesystems": memory_filesystems(system), "processes": processes, "failed_units": failed_units(system),
             "package_activity": package_activity(system),
             "network": network(system), "tailscale": tailscale(system),
             "codex": cli, "claude": claude, "chatgpt": desktop_app(system), "grokbot": grokbot(system)}

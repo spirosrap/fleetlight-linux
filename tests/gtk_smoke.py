@@ -79,11 +79,14 @@ def verify():
         app.snapshots["local"] = dict(app.snapshots["local"], services={"tailscaled": "active",
             "user:app-dev.lizardbyte.app.Sunshine.service": "failed", "http://127.0.0.1:1/?a=1&b=2": "unreachable"},
             service_regressions={"user:app-dev.lizardbyte.app.Sunshine.service": {
-                "reason": "packages", "at": 1793301228.0, "changes": ["sunshine 1 → 2"], "count": 1}})
+                "reason": "packages", "at": 1793301228.0, "changes": ["sunshine 1 → 2"], "count": 1}},
+            os="Linux", memory_filesystems=[{"mount": "/run/user/1000", "total": 2**31, "free": 2**26, "percent": 97}])
         app.selected = "local"
         app.render_detail()
         assert find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "Sunshine"
                            and "Stopped after the package update" in w.get_subtitle())
+        assert find_widget(app.content, lambda w: isinstance(w, Gtk.Button) and w.get_label() == "Restart")
+        assert find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "/run/user/1000")
         app.selected = "fleet"
         app.render_detail()
         local["services"], app.snapshots["local"] = saved_services, saved_snapshot

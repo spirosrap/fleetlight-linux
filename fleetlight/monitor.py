@@ -104,6 +104,12 @@ def issues(snapshot):
         result.append("Root disk is nearly full")
     if (snapshot.get("memory_percent") or 0) >= 95:
         result.append("Memory usage is high")
+    for item in snapshot.get("memory_filesystems") or []:
+        if isinstance(item, dict) and (item.get("percent") or 0) >= 90:
+            result.append(str(item.get("mount")) + " is " + str(item["percent"]) + "% full (memory-backed)")
+    for item in snapshot.get("memory_runaways") or []:
+        result.append(item["name"] + " memory grew from " + gigabytes(item["from"]) + " to " + gigabytes(item["to"])
+                      + " in " + str(item["minutes"]) + " min")
     regressions = snapshot.get("service_regressions") or {}
     for name, state in snapshot.get("services", {}).items():
         if name in regressions and state not in ("active", "unsupported"):
@@ -112,6 +118,51 @@ def issues(snapshot):
             result.append(service_label(name) + ": " + state)
     result.extend(tailscale_issues(snapshot.get("tailscale")))
     return result
+
+
+def gigabytes(size):
+    return f"{size / 1024**3:.1f} GB"
+
+
+class MemoryWatch:
+    """Programs whose memory keeps growing over the last hour, like fseventsd filling the Air.
+
+    Samples come from the probe's largest programs (grouped by name). A program counts as running away when,
+    over at least 45 minutes, it grew by 1 GiB and by half, mostly without shrinking, and now holds at least
+    15% of the computer's memory. A browser opening tabs rarely grows that steadily; a leak does.
+    """
+    WINDOW, MINIMUM_SPAN = 3600, 2700
+    GROWTH, SHARE, STEADY = 1024**3, 0.15, 0.75
+
+    def __init__(self):
+        self.samples = {}
+
+    def observe(self, snapshot, now=None):
+        if snapshot.get("status") != "online":
+            return []
+        now = time.time() if now is None else now
+        programs = self.samples.setdefault(snapshot.get("id"), {})
+        largest = (snapshot.get("processes") or {}).get("memory") or []
+        for item in largest:
+            if isinstance(item, list) and len(item) >= 2 and isinstance(item[1], (int, float)):
+                programs.setdefault(str(item[0]), []).append((now, item[1]))
+        total = snapshot.get("memory_total") or 0
+        result = []
+        for name in list(programs):
+            rows = [row for row in programs[name] if now - row[0] <= self.WINDOW]
+            if not rows:
+                del programs[name]
+                continue
+            programs[name] = rows
+            if now - rows[0][0] < self.MINIMUM_SPAN or rows[-1][0] < now - 300:
+                continue
+            start, end = min(size for moment, size in rows if moment - rows[0][0] <= 600), rows[-1][1]
+            pairs = list(zip(rows, rows[1:]))
+            steady = sum(1 for a, b in pairs if b[1] >= a[1] * 0.98) / len(pairs) if pairs else 0
+            if (end - start >= self.GROWTH and end >= 1.5 * start and steady >= self.STEADY
+                    and total and end >= self.SHARE * total):
+                result.append({"name": name, "from": start, "to": end, "minutes": round((now - rows[0][0]) / 60)})
+        return result
 
 
 def service_label(spec):

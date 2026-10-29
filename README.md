@@ -20,6 +20,12 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.7.0
+
+- A stopped service gets a **Restart** button on the computer's Services card: it resets and restarts the systemd unit (user units directly, system units through passwordless `sudo -n systemctl`) or kickstarts the launchd job on a Mac, waits a few seconds and reports whether it runs again.
+- Memory-backed filesystems (this user's `/run/user/<uid>`, `/tmp` and `/dev/shm`) are listed under Storage once half full and raise an alert at 90%, before a runaway log can make updates fail with "no space left on device".
+- A program whose memory grows steadily for 45 minutes or more (by at least 1 GiB and half its size, to 15% of the computer's memory) is listed under **Needs attention**, such as `fseventsd memory grew from 1.0 GB to 4.3 GB in 55 min`.
+
 ## Version 0.6.0
 
 - Services can be systemd user units (`user:<unit>`, such as Sunshine), launchd job labels on a Mac, `port:<number>` or an `http(s)://` address, all checked on the computer itself. Rows show a short name (`Sunshine` instead of `app-dev.lizardbyte.app.Sunshine.service`).

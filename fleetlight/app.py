@@ -16,7 +16,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 from . import __version__
 from . import actions, config
 from . import agents as agent_quota
-from .monitor import History, ServiceWatch, issues, linux_update_issues, probe_host, refresh, regression_cause, service_label
+from .monitor import History, MemoryWatch, ServiceWatch, issues, linux_update_issues, probe_host, refresh, regression_cause, service_label
 from .probe import collect_metrics
 from . import sites
 from .tray import Tray
@@ -453,6 +453,8 @@ class Fleetlight(Adw.Application):
                 pass
         self.history = History() if not demo else History(Path("/nonexistent/fleetlight-demo"))
         self.service_watch = ServiceWatch() if not demo else ServiceWatch(Path("/nonexistent/fleetlight-demo/service-watch.json"))
+        self.memory_watch = MemoryWatch()
+        self.restarting_services = set()
         if demo:
             self.journal_path = Path("/nonexistent/fleetlight-demo/update-controller.json")
         self.connect("activate", self.activate_window)
@@ -918,7 +920,8 @@ class Fleetlight(Adw.Application):
                 "metrics_checked_at", "uptime", "disk_percent", "disk_free", "disk_total", "memory_percent",
                 "memory_total", "memory_used", "swap_total", "swap_used", "load", "cpu_percent",
                 "cpu_temperature", "fan", "battery") if key in current}}
-        snapshot = {**snapshot, "service_regressions": self.service_watch.observe(snapshot)}
+        snapshot = {**snapshot, "service_regressions": self.service_watch.observe(snapshot),
+                    "memory_runaways": self.memory_watch.observe(snapshot)}
         pending = self.pending_restarts.get(snapshot["id"])
         if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
             self.pending_restarts.pop(snapshot["id"], None)
@@ -1705,14 +1708,18 @@ class Fleetlight(Adw.Application):
                 last.add(row)
         if online or self.history.series.get(host["id"]):
             self.content.append(self.history_card(host))
-        if online and len(data.get("disks") or []) > 1:
-            storage = self.section("Storage", "Mounted local filesystems")
-            for disk in data["disks"][:8]:
+        # tmpfs mounts are listed once they are half full; nearly full ones also appear under Needs attention.
+        memory_backed = [dict(item, memory=True) for item in data.get("memory_filesystems") or []
+                         if isinstance(item, dict) and (item.get("percent") or 0) >= 50]
+        if online and (len(data.get("disks") or []) > 1 or memory_backed):
+            storage = self.section("Storage", "Mounted local filesystems and memory-backed ones (tmpfs)")
+            for disk in (data.get("disks") or [])[:8] + memory_backed:
                 if not isinstance(disk, dict) or not isinstance(disk.get("percent"), (int, float)):
                     continue
                 row = Adw.ActionRow(title=GLib.markup_escape_text(str(disk.get("mount", "?"))),
-                                    subtitle=size_text(disk.get("free")) + " free of " + size_text(disk.get("total")))
-                row.add_prefix(Gtk.Image.new_from_icon_name("drive-harddisk-symbolic"))
+                                    subtitle=size_text(disk.get("free")) + " free of " + size_text(disk.get("total"))
+                                    + (" · in memory" if disk.get("memory") else ""))
+                row.add_prefix(Gtk.Image.new_from_icon_name("media-flash-symbolic" if disk.get("memory") else "drive-harddisk-symbolic"))
                 bar = Gtk.ProgressBar(fraction=max(0, min(1, disk["percent"] / 100)), valign=Gtk.Align.CENTER)
                 bar.set_size_request(150, -1)
                 css = usage_css(disk["percent"], 80, 90)
@@ -1766,6 +1773,15 @@ class Fleetlight(Adw.Application):
             state_label = label(state, "good" if state == "active" else "muted" if neutral else "warning")
             state_label.set_valign(Gtk.Align.CENTER)
             row.add_suffix(state_label)
+            restartable = not name.startswith(("port:", "http://", "https://")) and (
+                data.get("os") == "Linux" or (data.get("os") == "Darwin" and not name.startswith("user:")))
+            if online and restartable and state not in ("active", "unsupported", "not installed", "not checked", "activating"):
+                running = (host["id"], name) in self.restarting_services
+                restart = Gtk.Button(label="Restarting…" if running else "Restart", valign=Gtk.Align.CENTER)
+                restart.set_tooltip_text("Reset and restart " + service_label(name) + " on " + host["name"])
+                restart.set_sensitive(not self.demo and not running)
+                restart.connect("clicked", lambda _, service=name: self.restart_service(host, service))
+                row.add_suffix(restart)
             required = Gtk.CheckButton(label="Warn when stopped")
             required.set_valign(Gtk.Align.CENTER)
             required.set_active(not optional)
@@ -2145,6 +2161,34 @@ class Fleetlight(Adw.Application):
         dialog.set_close_response("cancel")
         dialog.connect("response", lambda _, response: self.begin_update(host, kind, checked) if response == "update" else None)
         dialog.present()
+
+    def restart_service(self, host, service):
+        key = (host["id"], service)
+        if self.demo or key in self.restarting_services:
+            return
+        system = self.snapshots.get(host["id"], {}).get("os")
+        self.restarting_services.add(key)
+        self.render_detail()
+
+        def work():
+            try:
+                succeeded, message = actions.restart_service(host, system, service)
+            except Exception as error:
+                succeeded, message = False, str(error)
+            try:
+                snapshot = probe_host(host)
+            except Exception:
+                snapshot = None
+            GLib.idle_add(self.service_restarted, key, message, snapshot)
+        threading.Thread(target=work, daemon=True).start()
+
+    def service_restarted(self, key, message, snapshot):
+        self.restarting_services.discard(key)
+        self.toast(message)
+        if snapshot and any(host["id"] == key[0] for host in self.configuration["hosts"]):
+            self.receive(snapshot)
+        self.render_detail()
+        return GLib.SOURCE_REMOVE
 
     def request_restart(self, host):
         if self.demo:

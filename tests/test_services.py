@@ -96,3 +96,66 @@ class ServiceWatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RestartScriptTests(unittest.TestCase):
+    def test_scripts_quote_the_unit_and_refuse_ports(self):
+        from fleetlight import actions
+        script = actions.service_restart_script("Linux", SUNSHINE)
+        self.assertIn("systemctl --user restart app-dev.lizardbyte.app.Sunshine.service", script)
+        self.assertIn("sudo -n systemctl restart plex-open-web.service",
+                      actions.service_restart_script("Linux", "plex-open-web.service"))
+        self.assertIn('launchctl kickstart -k "gui/$(id -u)/"com.spiros.WithingsScaleBar',
+                      actions.service_restart_script("Darwin", "com.spiros.WithingsScaleBar"))
+        for system, spec in (("Linux", "port:22"), ("Linux", "https://x/"), ("Darwin", SUNSHINE), ("Linux", "a;b")):
+            with self.assertRaises(ValueError):
+                actions.service_restart_script(system, spec)
+
+    def test_restart_reports_missing_sudo(self):
+        from fleetlight import actions
+        host = {"id": "a", "name": "A", "local": True}
+        with patch("fleetlight.monitor.run_process", return_value=(3, "sudo: a password is required\n", "")):
+            ok, message = actions.restart_service(host, "Linux", "plex-open-web.service")
+        self.assertFalse(ok)
+        self.assertIn("passwordless sudo", message)
+        with patch("fleetlight.monitor.run_process", return_value=(0, "STATE:active\n", "")):
+            self.assertEqual(actions.restart_service(host, "Linux", SUNSHINE), (True, "Sunshine restarted and is running"))
+
+
+class MemoryFilesystemTests(unittest.TestCase):
+    def test_only_this_users_runtime_directory_and_shared_tmpfs(self):
+        mounts = ("tmpfs /run/user/%d tmpfs rw 0 0\ntmpfs /run/user/4242 tmpfs rw 0 0\n"
+                  "tmpfs /tmp tmpfs rw 0 0\n/dev/sda1 /home ext4 rw 0 0\n") % probe.os.getuid()
+        Usage = type("Usage", (), {"total": 100, "free": 5, "used": 95})
+        with patch.object(probe.shutil, "disk_usage", return_value=Usage()):
+            found = probe.memory_filesystems("Linux", mounts)
+        self.assertEqual([item["mount"] for item in found], ["/run/user/%d" % probe.os.getuid(), "/tmp"])
+        message = issues({"status": "online", "memory_filesystems": found})[0]
+        self.assertTrue(message.endswith("is 95% full (memory-backed)"), message)
+
+
+class MemoryWatchTests(unittest.TestCase):
+    GIB = 1024**3
+
+    def feed(self, watch, sizes, step=300, total=16 * 1024**3, name="fseventsd"):
+        result = []
+        for index, size in enumerate(sizes):
+            result = watch.observe({"id": "air", "status": "online", "memory_total": total,
+                                    "processes": {"memory": [[name, size, 1]]}}, now=1000 + index * step)
+        return result
+
+    def test_steady_growth_is_reported(self):
+        from fleetlight.monitor import MemoryWatch
+        found = self.feed(MemoryWatch(), [int((1 + 0.3 * i) * self.GIB) for i in range(12)])
+        self.assertEqual([item["name"] for item in found], ["fseventsd"])
+        message = issues({"status": "online", "memory_runaways": found})[0]
+        self.assertTrue(message.startswith("fseventsd memory grew from 1.0 GB to 4.3 GB in 55 min"), message)
+
+    def test_too_short_too_small_or_jumpy_is_not(self):
+        from fleetlight.monitor import MemoryWatch
+        self.assertEqual(self.feed(MemoryWatch(), [int((1 + 0.5 * i) * self.GIB) for i in range(6)]), [])
+        self.assertEqual(self.feed(MemoryWatch(), [int((1 + 0.02 * i) * self.GIB) for i in range(12)]), [])
+        jumpy = [self.GIB * (4 if i % 2 else 1) + i * 50 * 1024**2 for i in range(12)]
+        self.assertEqual(self.feed(MemoryWatch(), jumpy), [])
+        # Large growth on a big machine that stays under 15% of memory is not a runaway either.
+        self.assertEqual(self.feed(MemoryWatch(), [int((1 + 0.3 * i) * self.GIB) for i in range(12)], total=64 * self.GIB), [])
