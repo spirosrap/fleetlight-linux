@@ -373,7 +373,7 @@ def codex_installation():
     method = "unknown"
     if "/.codex/packages/standalone/" in paths:
         method = "standalone"
-    elif "/mise/shims/" in paths or "/mise/installs/codex/" in paths:
+    elif any(part in paths for part in ("/mise/shims/", "/mise/installs/codex/", "/mise/command-wrappers/")):
         method = "mise"
     elif "/node_modules/@openai/codex/" in paths:
         method = "npm"

@@ -18,7 +18,7 @@ if python3 -c 'import re,sys; v=lambda x: tuple(map(int,x.split("."))); sys.exit
 fi
 real_path=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$active_path")
 case "$active_path:$real_path" in
-  *'/mise/shims/'*|*'/mise/installs/codex/'*) mode=mise ;;
+  *'/mise/shims/'*|*'/mise/installs/codex/'*|*'/mise/command-wrappers/'*) mode=mise ;;
   *'/node_modules/@openai/codex/'*) mode=npm ;;
   *'/.codex/packages/standalone/'*) mode=standalone ;;
   *) printf 'UPDATE:unsupported-installation\nVERIFY:failed\n'; exit 2 ;;

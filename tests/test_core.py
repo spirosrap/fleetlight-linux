@@ -235,3 +235,9 @@ class DistributionNameTest(unittest.TestCase):
         self.assertEqual(probe.distribution_name('PRETTY_NAME="Arch Linux"\nID=arch\n'), "Arch Linux")
         self.assertEqual(probe.distribution_name(""), "")
 
+
+    def test_mise_command_wrapper_counts_as_mise_codex(self):
+        wrapper = "/home/u/.local/share/mise/command-wrappers/bin/codex"
+        with patch.object(probe, "codex_executable", return_value=wrapper), \
+                patch.object(probe.os.path, "realpath", return_value="/usr/bin/mise"):
+            self.assertEqual(probe.codex_installation(), {"method": "mise"})
