@@ -20,6 +20,15 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.6.0
+
+- Services can be systemd user units (`user:<unit>`, such as Sunshine), launchd job labels on a Mac, `port:<number>` or an `http(s)://` address, all checked on the computer itself. Rows show a short name (`Sunshine` instead of `app-dev.lizardbyte.app.Sunshine.service`).
+- A service that was running before a package update or restart and stops soon afterwards is reported as stopped since that update, naming its time and the upgraded packages (the likely one first), on the computer's Services card, under **Needs attention** and in the notification. Updates run by hand count too; Linux reads the pacman or dpkg log.
+- A **Restart…** button on each online Linux computer's page restarts it on request, then verifies it came back on a new boot.
+- Grok Bot is listed under Applications, with the official x.ai release checked beside the Omarchy package.
+- Omarchy computers show their release beside the distribution name.
+- Codex installed through mise's command wrappers (mise 2026.10.21 and later) updates automatically again instead of asking for a manual update; never-installed lazy mise tools no longer count as package updates.
+
 ## Version 0.5.0
 
 - Circular CPU, memory, disk, temperature and agent quota gauges, a fleet health ring, and compact resource bars in the sidebar. Quota cards show each usage window and its reset time, and the date the plan renews (Codex and Cursor report it; Claude's is estimated from the subscription's start day unless you set the real billing day of the month in Settings › Agent quota, stored as `claude_billing_day` in `fleet.json`).
