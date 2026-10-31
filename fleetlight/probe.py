@@ -336,13 +336,18 @@ def codex_version():
         ".local/bin", ".local/share/mise/shims", ".npm-global/bin")]
     paths += sorted(glob.glob(str(Path.home() / ".nvm/versions/node/*/bin")), reverse=True)
     paths += ["/opt/homebrew/bin", "/usr/local/bin"]
-    os.environ["PATH"] = os.pathsep.join(paths + [os.environ.get("PATH", "")])
-    executable = codex_executable()
-    if executable:
-        result = command([executable, "--version"], timeout=5)
-        match = re.search(r"codex(?:-cli)?\s+(\d+\.\d+\.\d+[^\s]*)", result)
-        if match:
-            return match[1]
+    original = os.environ.get("PATH", "")
+    # Restored afterwards: a leaked ~/.local/bin made mise's claude wrapper run a stale native install.
+    os.environ["PATH"] = os.pathsep.join(paths + [original])
+    try:
+        executable = codex_executable()
+        if executable:
+            result = command([executable, "--version"], timeout=5)
+            match = re.search(r"codex(?:-cli)?\s+(\d+\.\d+\.\d+[^\s]*)", result)
+            if match:
+                return match[1]
+    finally:
+        os.environ["PATH"] = original
     return None
 
 

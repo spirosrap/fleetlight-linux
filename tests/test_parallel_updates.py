@@ -91,6 +91,12 @@ class ParallelUpdates(unittest.TestCase):
         self.assertEqual(self.thread_mock.call_count, 4)
         self.assertEqual(len(c.auto_attempted), 1)
 
+    def test_succeeded_automatic_job_is_not_retried_for_the_same_release(self):
+        c = controller(self.path, [candidate(0)])
+        c.advance_batch()
+        self.finish(c, next(iter(c.active_jobs)))
+        self.assertEqual(c.auto_attempted, {('host0', 'desktop', '1.2.3', '')})
+
     def test_cancellation_keeps_running_installers_and_starts_no_more(self):
         c = controller(self.path, [candidate(i) for i in range(6)])
         c.advance_batch()

@@ -20,6 +20,11 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.7.2
+
+- Automatic updates no longer stall behind one computer whose update keeps reporting success while the next check still lists it. A release that was already installed automatically is not tried again until a newer one appears, so Linux package updates queued after it get their turn.
+- The Claude CLI version is read with the computer's normal `PATH`. The Codex check used to leave `~/.local/bin` in front, so mise's `claude` wrapper ran an older native install there and reported its version.
+
 ## Version 0.7.1
 
 - When the tray disappears, Fleetlight waits 20 seconds for it to come back before showing its window. `omarchy-update` restarts the bar, which used to pop the hidden window up on whichever monitor had focus.

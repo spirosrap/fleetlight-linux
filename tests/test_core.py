@@ -241,3 +241,10 @@ class DistributionNameTest(unittest.TestCase):
         with patch.object(probe, "codex_executable", return_value=wrapper), \
                 patch.object(probe.os.path, "realpath", return_value="/usr/bin/mise"):
             self.assertEqual(probe.codex_installation(), {"method": "mise"})
+
+    def test_codex_version_leaves_path_for_the_claude_check(self):
+        with patch.dict(probe.os.environ, {"PATH": "/usr/bin"}), \
+                patch.object(probe, "codex_executable", return_value="/x/codex"), \
+                patch.object(probe, "command", return_value="codex-cli 1.2.3"):
+            self.assertEqual(probe.codex_version(), "1.2.3")
+            self.assertEqual(probe.os.environ["PATH"], "/usr/bin")

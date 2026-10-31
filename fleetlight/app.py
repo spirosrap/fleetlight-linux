@@ -2413,10 +2413,11 @@ class Fleetlight(Adw.Application):
                 self.pending_restarts[host["id"]] = {"name": host["name"], "boot_id": job.get("boot_id"), "scheduled_at": time.time()}
                 if host["id"] in self.app_updates:
                     self.app_updates[host["id"]]["restart"] = {"state": "scheduled", "detail": "Waiting for new boot"}
-            if state != "succeeded":
-                key = job.get("auto_key")
-                if isinstance(key, list) and len(key) >= 2:
-                    self.auto_attempted.add(tuple(key))
+            # Successes count too: a release the next check still lists would otherwise re-run forever
+            # and starve the kinds queued after it.
+            key = job.get("auto_key")
+            if isinstance(key, list) and len(key) >= 2:
+                self.auto_attempted.add(tuple(key))
             if self.batch and self.batch.get("running"):
                 self.batch.setdefault("results", []).append({"host": job["host"]["name"], "state": state})
                 if state != "succeeded":
