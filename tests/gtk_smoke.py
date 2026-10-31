@@ -102,6 +102,20 @@ def verify():
         app.selected = "fleet"
         app.render_detail()
         local["services"], app.snapshots["local"] = saved_services, saved_snapshot
+        # Activity, pressure and stability sections on a streaming Linux computer.
+        app.selected = "lab"
+        app.render_detail()
+        for title in ("Activity", "Pressure", "Stability"):
+            assert find_widget(app.content, lambda w, t=title: isinstance(w, Adw.PreferencesGroup) and w.get_title() == t), title
+        assert find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "Sunshine stream")
+        assert find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "Crashed programs"
+                           and "python3" in w.get_subtitle())
+        assert "Streaming to Moonlight" in app.host_footnote("lab", app.snapshots["lab"])
+        app.selected = "studio"
+        app.render_detail()
+        assert find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "Memory pressure")
+        app.selected = "fleet"
+        app.render_detail()
         app.selected = "local"
         app.search.set_text("Studio")
         app.populate_hosts()

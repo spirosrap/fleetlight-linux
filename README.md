@@ -20,6 +20,12 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.0
+
+- **Activity**: each computer page says who is using it: the desktop session (locked, unlocked, displays off, idle time where the desktop reports it), a Moonlight client streaming from Sunshine (read from Sunshine's log), VNC, RDP or Screen Sharing viewers, and interactive SSH terminals. Fleetlight's own scripted SSH checks are not counted. The overview card shows it in place of "Healthy", and restart confirmations, single or batch, name computers that are in use.
+- **Stability**: programs that crashed since boot (systemd-coredump on Linux, crash reports on macOS), out-of-memory kills (the kernel's `oom_kill` counter, Jetsam reports on macOS) and error-level journal messages grouped by program. A crash in the last 24 hours and a new out-of-memory kill raise an alert; logged errors are shown but never alerted, since most computers log harmless ones.
+- **Pressure**: Linux pressure stall information (PSI) for CPU, memory and disk I/O, and macOS's memory pressure level. Alerts: memory fully stalled ≥10% of the last minute (thrashing), disk I/O fully stalled ≥30%, CPU waiting ≥80% of the last 5 minutes, or critical memory pressure on a Mac.
+
 ## Version 0.7.2
 
 - Automatic updates no longer stall behind one computer whose update keeps reporting success while the next check still lists it. A release that was already installed automatically is not tried again until a newer one appears, so Linux package updates queued after it get their turn.

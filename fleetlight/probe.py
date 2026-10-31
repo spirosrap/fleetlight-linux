@@ -697,6 +697,275 @@ def package_activity(system):
     return {"at": events[-1][0], "changes": changes[:40], "count": len(changes)}
 
 
+def boot_time(system):
+    """Seconds since the epoch when the computer booted, or None."""
+    if system == "Linux":
+        match = re.search(r"^btime (\d+)", text("/proc/stat"), re.M)
+        return int(match[1]) if match else None
+    if system == "Darwin":
+        match = re.search(r"sec = (\d+)", command(["sysctl", "-n", "kern.boottime"]))
+        return int(match[1]) if match else None
+    return None
+
+
+def remote_terminals():
+    """Interactive logins from another computer (`who` lines ending in "(host)"); scripted SSH has no terminal."""
+    result = []
+    for line in command(["who"]).splitlines():
+        match = re.match(r"^(\S+)\s+(\S+)\s.*\(([^)]+)\)\s*$", line)
+        if match and not match[3].startswith(":"):
+            result.append({"user": match[1][:32], "tty": match[2][:16], "from": match[3][:64]})
+    return result[:8]
+
+
+def established_ports(system, ports):
+    """Local listening ports from `ports` that have an established TCP connection, with the peer address."""
+    found = {}
+    if system == "Linux":
+        for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+            for line in text(name).splitlines()[1:]:
+                parts = line.split()
+                if len(parts) < 4 or parts[3] != "01":
+                    continue
+                try:
+                    port = int(parts[1].rsplit(":", 1)[1], 16)
+                except (IndexError, ValueError):
+                    continue
+                if port in ports:
+                    found.setdefault(port, hex_address(parts[2]))
+    elif system == "Darwin":
+        for line in command(["netstat", "-an", "-p", "tcp"]).splitlines():
+            parts = line.split()
+            if len(parts) >= 6 and parts[5] == "ESTABLISHED":
+                local, peer = parts[3], parts[4]
+                try:
+                    port = int(local.rsplit(".", 1)[1])
+                except (IndexError, ValueError):
+                    continue
+                if port in ports:
+                    found.setdefault(port, peer.rsplit(".", 1)[0])
+    return found
+
+
+def hex_address(field):
+    """Peer address from a /proc/net/tcp row (little-endian hex), as text."""
+    import socket
+    import struct
+    try:
+        raw = field.split(":")[0]
+        if len(raw) == 8:
+            return socket.inet_ntoa(struct.pack("<I", int(raw, 16)))
+        packed = b"".join(struct.pack("<I", int(raw[i:i + 8], 16)) for i in range(0, 32, 8))
+        address = socket.inet_ntop(socket.AF_INET6, packed)
+        return address[7:] if address.startswith("::ffff:") else address
+    except (ValueError, OSError, struct.error):
+        return None
+
+
+def sunshine_stream(system):
+    """Whether a Moonlight client is streaming from Sunshine, from the last connect/disconnect line of its log."""
+    if system != "Linux" or not running_programs({"sunshine"}):
+        return None
+    home = Path.home()
+    logs = [home / ".config/sunshine/sunshine.log", home / ".var/app/dev.lizardbyte.app.Sunshine/config/sunshine/sunshine.log"]
+    latest = None
+    for path in logs:
+        for line in log_tail(str(path), 131072).splitlines():
+            match = re.match(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\.\d+\]: Info: CLIENT (CONNECTED|DISCONNECTED)", line)
+            if match:
+                try:
+                    when = time.mktime(time.strptime(match[1], "%Y-%m-%d %H:%M:%S"))
+                except ValueError:
+                    continue
+                if latest is None or when >= latest[0]:
+                    latest = (when, match[2])
+    if latest is None:
+        return {"streaming": False}
+    return {"streaming": latest[1] == "CONNECTED", "since": latest[0]}
+
+
+def hyprland_state():
+    """Displays powered off by Hyprland's DPMS, read through hyprctl even from an SSH session."""
+    base = "/run/user/" + str(os.getuid()) + "/hypr"
+    sockets = sorted(glob.glob(base + "/*/.socket.sock"), key=lambda path: os.path.getmtime(path), reverse=True)
+    if not sockets or not shutil.which("hyprctl"):
+        return None
+    signature = os.path.basename(os.path.dirname(sockets[0]))
+    try:
+        process = subprocess.run(["hyprctl", "-j", "monitors"], capture_output=True, text=True, timeout=3,
+                                 env={**os.environ, "HYPRLAND_INSTANCE_SIGNATURE": signature})
+        monitors = json.loads(process.stdout) if process.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if not isinstance(monitors, list) or not monitors:
+        return None
+    return {"displays_off": all(isinstance(item, dict) and item.get("dpmsStatus") is False for item in monitors)}
+
+
+def running_programs(names):
+    found = set()
+    for path in glob.glob("/proc/[0-9]*/comm"):
+        name = text(path).strip()
+        if name in names:
+            found.add(name)
+    return found
+
+
+def presence(system):
+    """Who is at the computer: a local desktop session, its lock and idle state, streams and remote sessions.
+
+    Linux reads logind (idle time only where the desktop reports it; Hyprland does not), Hyprland DPMS,
+    screen lockers, Sunshine's log and established VNC/RDP connections. macOS reads the console user,
+    HID idle time and the screen lock flag. Scripted SSH sessions, like this check, are not counted.
+    """
+    result = {"desktop": None, "user": None, "locked": None, "idle_seconds": None, "displays_off": None,
+              "stream": None, "remote_desktop": [], "remote_sessions": [], "terminals": remote_terminals()}
+    if system == "Linux" and shutil.which("loginctl"):
+        own = text("/proc/self/sessionid").strip()
+        for line in command(["loginctl", "list-sessions", "--no-legend"]).splitlines():
+            session = line.split()[0] if line.split() else ""
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", session) or session == own:
+                continue
+            raw = command(["loginctl", "show-session", session, "-p", "Name", "-p", "Type", "-p", "Class", "-p", "State",
+                           "-p", "Remote", "-p", "IdleHint", "-p", "IdleSinceHint", "-p", "LockedHint", "-p", "Service", "-p", "Desktop"])
+            fields = dict(item.split("=", 1) for item in raw.splitlines() if "=" in item)
+            if fields.get("Class") != "user" or fields.get("Type") not in ("wayland", "x11", "mir") or fields.get("State") == "closing":
+                continue
+            if "xrdp" in fields.get("Service", ""):
+                # xrdp keeps the session after the viewer disconnects; a live viewer shows up as a port 3389 connection.
+                result["remote_sessions"].append({"kind": "RDP", "user": fields.get("Name")})
+                continue
+            if result["desktop"]:
+                continue
+            result.update(desktop=fields.get("Desktop") or fields.get("Type"), user=fields.get("Name"),
+                          locked=fields.get("LockedHint") == "yes")
+            since = fields.get("IdleSinceHint", "0")
+            if fields.get("IdleHint") == "yes" and since.isdigit() and int(since):
+                result["idle_seconds"] = max(0, int(time.time() - int(since) / 1e6))
+        if result["desktop"]:
+            if running_programs({"hyprlock", "swaylock", "gtklock", "i3lock", "xsecurelock"}):
+                result["locked"] = True
+            hypr = hyprland_state()
+            if hypr:
+                result["displays_off"] = hypr["displays_off"]
+        result["stream"] = sunshine_stream(system)
+    elif system == "Darwin":
+        user = command(["stat", "-f", "%Su", "/dev/console"])
+        if user and user != "root":
+            result.update(desktop="macOS", user=user, locked=False)
+            raw = command(["ioreg", "-n", "Root", "-d1", "-a"])
+            try:
+                users = plistlib.loads(raw.encode()).get("IOConsoleUsers") or []
+            except (ValueError, plistlib.InvalidFileException, AttributeError):
+                users = []
+            for item in users:
+                if isinstance(item, dict) and item.get("kCGSSessionOnConsoleKey"):
+                    result["locked"] = bool(item.get("CGSSessionScreenIsLocked"))
+        match = re.search(r'"HIDIdleTime" = (\d+)', command(["ioreg", "-c", "IOHIDSystem", "-d", "4"]))
+        if match and result["desktop"]:
+            result["idle_seconds"] = int(match[1]) // 10**9
+    for port, peer in established_ports(system, {5900: "VNC", 3389: "RDP"}).items():
+        result["remote_desktop"].append({"kind": "Screen Sharing" if system == "Darwin" and port == 5900 else
+                                         {5900: "VNC", 3389: "RDP"}[port], "from": peer})
+    return result
+
+
+def crashes(system, since):
+    """Programs that crashed since boot, newest first, with out-of-memory kills.
+
+    Linux: systemd-coredump's list (the user's own and, with journal access, everyone's) and the kernel's
+    oom_kill counter. macOS: crash reports (.ips bug type 309) and JetsamEvent memory kills in DiagnosticReports.
+    """
+    result = {"since": since, "items": [], "oom_kills": None}
+    if not since:
+        return result
+    items = []
+    if system == "Linux":
+        match = re.search(r"^oom_kill (\d+)", text("/proc/vmstat"), re.M)
+        result["oom_kills"] = int(match[1]) if match else None
+        if shutil.which("coredumpctl"):
+            raw = command(["coredumpctl", "--json=short", "--no-pager", "list", "--since=@" + str(int(since))], timeout=6)
+            try:
+                rows = json.loads(raw) if raw else []
+            except ValueError:
+                rows = []
+            for row in rows if isinstance(rows, list) else []:
+                if isinstance(row, dict) and isinstance(row.get("time"), (int, float)):
+                    items.append({"at": row["time"] / 1e6, "name": os.path.basename(str(row.get("exe") or "?"))[:48],
+                                  "signal": row.get("sig") if isinstance(row.get("sig"), int) else None})
+    elif system == "Darwin":
+        jetsam = 0
+        for folder in (Path.home() / "Library/Logs/DiagnosticReports", Path("/Library/Logs/DiagnosticReports")):
+            try:
+                entries = list(os.scandir(folder))
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.name.endswith(".ips"):
+                    continue
+                try:
+                    moment = entry.stat().st_mtime
+                    if moment < since:
+                        continue
+                    with open(entry.path, errors="replace") as stream:
+                        header = json.loads(stream.readline(4096))
+                except (OSError, ValueError):
+                    continue
+                kind = str(header.get("bug_type")) if isinstance(header, dict) else ""
+                if kind == "298":
+                    jetsam += 1
+                elif kind in ("309", "109"):
+                    items.append({"at": moment, "name": str(header.get("app_name") or entry.name.split("-")[0])[:48], "signal": None})
+        result["oom_kills"] = jetsam
+    items.sort(key=lambda item: -item["at"])
+    result["count"] = len(items)
+    result["items"] = items[:20]
+    return result
+
+
+def journal_errors(system):
+    """Error-level journal messages this boot grouped by program; noisy on most computers, so shown, not alerted."""
+    if system != "Linux" or not shutil.which("journalctl"):
+        return None
+    raw = command(["journalctl", "-b", "-p", "3", "-q", "--no-pager", "-n", "2000", "-o", "json",
+                   "--output-fields=SYSLOG_IDENTIFIER,_COMM"], timeout=6)
+    counts = {}
+    total = 0
+    for line in raw.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        name = str(entry.get("SYSLOG_IDENTIFIER") or entry.get("_COMM") or "?")[:40]
+        counts[name] = counts.get(name, 0) + 1
+        total += 1
+    top = sorted(counts.items(), key=lambda item: -item[1])[:5]
+    return {"count": total, "capped": total >= 2000, "top": [list(item) for item in top]}
+
+
+def pressure(system):
+    """Share of time tasks waited on CPU, memory or I/O (Linux PSI), as avg10/avg60/avg300 for "some" and "full".
+
+    macOS has no PSI; it reports the kernel's memory pressure level (normal, warning, critical) instead.
+    """
+    if system == "Linux":
+        result = {}
+        for resource in ("cpu", "memory", "io"):
+            values = {}
+            for line in text("/proc/pressure/" + resource).splitlines():
+                parts = line.split()
+                if parts and parts[0] in ("some", "full"):
+                    values[parts[0]] = {key: float(value) for key, value in
+                                        (item.split("=", 1) for item in parts[1:4] if "=" in item)}
+            if values:
+                result[resource] = values
+        return result or None
+    if system == "Darwin":
+        level = command(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"])
+        return {"memory_level": {"1": "normal", "2": "warning", "4": "critical"}.get(level)} if level else None
+    return None
+
+
 def collect(services=()):
     system = platform.system()
     # Measure CPU over a short quiet window before the slower version lookups run.
@@ -725,6 +994,8 @@ def collect(services=()):
             "cpus": os.cpu_count() or 1, "services": service_states,
             "disks": disks(system), "memory_filesystems": memory_filesystems(system), "processes": processes, "failed_units": failed_units(system),
             "package_activity": package_activity(system),
+            "presence": presence(system), "crashes": crashes(system, boot_time(system)),
+            "journal_errors": journal_errors(system), "pressure": pressure(system),
             "network": network(system), "tailscale": tailscale(system),
             "codex": cli, "claude": claude, "chatgpt": desktop_app(system), "grokbot": grokbot(system)}
 

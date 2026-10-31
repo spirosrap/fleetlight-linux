@@ -50,5 +50,32 @@ def demo_data():
             "grokbot": ({"version": None, "provider": None, "candidate": None, "status": "not detected"} if mac
                         else {"version": "0.75.8", "provider": "pacman", "candidate": "0.75.8", "status": "current in cached repository"}),
             "services": {s: "active" for s in host["services"]}, "package_manager": None if mac else "pacman",
-            **extra}
+            **activity(host["id"], mac), **extra}
     return {"version": 1, "refresh_seconds": 60, "hosts": hosts}, snapshots
+
+
+def activity(ident, mac):
+    """Presence, stability and pressure readings for the demo computers."""
+    now = time.time()
+    boot = now - 2 * 86400
+    quiet = {"some": {"avg10": 0.0, "avg60": 0.1, "avg300": 0.2}, "full": {"avg10": 0.0, "avg60": 0.0, "avg300": 0.0}}
+    presence = {"local": {"desktop": "Hyprland", "user": "alex", "locked": False, "displays_off": False},
+                "studio": {"desktop": "macOS", "user": "alex", "locked": True, "idle_seconds": 5400},
+                "server": {"desktop": None},
+                "lab": {"desktop": "Hyprland", "user": "sam", "locked": False, "displays_off": False,
+                        "stream": {"streaming": True, "since": now - 1500}}}[ident]
+    presence = {"idle_seconds": None, "displays_off": None, "stream": None, "remote_desktop": [], "remote_sessions": [],
+                "terminals": [], **presence}
+    crashes = {"since": boot, "oom_kills": 0, "count": 0, "items": []}
+    if ident == "lab":
+        crashes.update(count=2, items=[{"at": now - 26 * 3600, "name": "python3", "signal": 11},
+                                       {"at": now - 30 * 3600, "name": "jupyter-lab", "signal": 6}])
+    if mac:
+        return {"presence": presence, "crashes": crashes, "pressure": {"memory_level": "normal"}}
+    pressure = {"cpu": quiet, "memory": quiet, "io": quiet}
+    if ident == "lab":
+        pressure = {"cpu": {"some": {"avg10": 38.0, "avg60": 41.5, "avg300": 36.2}, "full": quiet["full"]},
+                    "memory": {"some": {"avg10": 6.1, "avg60": 7.4, "avg300": 3.0}, "full": {"avg10": 4.2, "avg60": 5.3, "avg300": 2.1}},
+                    "io": quiet}
+    return {"presence": presence, "crashes": crashes, "pressure": pressure,
+            "journal_errors": {"count": 12, "capped": False, "top": [["kernel", 7], ["bluetoothd", 3], ["wpa_supplicant", 2]]}}

@@ -16,7 +16,8 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 from . import __version__
 from . import actions, config
 from . import agents as agent_quota
-from .monitor import History, MemoryWatch, ServiceWatch, issues, linux_update_issues, probe_host, refresh, regression_cause, service_label
+from .monitor import (History, MemoryWatch, OomWatch, PRESSURE_LIMITS, ServiceWatch, clock, duration, issues, linux_update_issues,
+                      presence_summary, probe_host, refresh, regression_cause, service_label)
 from .probe import collect_metrics
 from . import sites
 from .tray import Tray
@@ -207,6 +208,21 @@ def chip(text, icon_name=None, css=None):
         holder.append(image)
     holder.append(label(text))
     return holder
+
+
+def presence_icon(presence, in_use):
+    presence = presence if isinstance(presence, dict) else {}
+    if (presence.get("stream") or {}).get("streaming") or presence.get("remote_desktop"):
+        return "video-display-symbolic"
+    if presence.get("locked"):
+        return "system-lock-screen-symbolic"
+    if in_use:
+        return "avatar-default-symbolic"
+    return "preferences-desktop-screensaver-symbolic"
+
+
+def percent_text(value):
+    return f"{value:.1f}%" if value < 10 else f"{value:.0f}%"
 
 
 def icon_button(text, icon_name):
@@ -457,6 +473,7 @@ class Fleetlight(Adw.Application):
         self.history = History() if not demo else History(Path("/nonexistent/fleetlight-demo"))
         self.service_watch = ServiceWatch() if not demo else ServiceWatch(Path("/nonexistent/fleetlight-demo/service-watch.json"))
         self.memory_watch = MemoryWatch()
+        self.oom_watch = OomWatch()
         self.restarting_services = set()
         if demo:
             self.journal_path = Path("/nonexistent/fleetlight-demo/update-controller.json")
@@ -936,7 +953,7 @@ class Fleetlight(Adw.Application):
                 "memory_total", "memory_used", "swap_total", "swap_used", "load", "cpu_percent",
                 "cpu_temperature", "fan", "battery") if key in current}}
         snapshot = {**snapshot, "service_regressions": self.service_watch.observe(snapshot),
-                    "memory_runaways": self.memory_watch.observe(snapshot)}
+                    "memory_runaways": self.memory_watch.observe(snapshot), "oom_events": self.oom_watch.observe(snapshot)}
         pending = self.pending_restarts.get(snapshot["id"])
         if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
             self.pending_restarts.pop(snapshot["id"], None)
@@ -1466,7 +1483,8 @@ class Fleetlight(Adw.Application):
         trouble = issues(data) + linux_update_issues(self.app_updates.get(host_id))
         if trouble:
             return trouble[0]
-        parts = ["Healthy", f"load {data.get('load', '—')}"]
+        presence, _ = presence_summary(data.get("presence"))
+        parts = [presence or "Healthy", f"load {data.get('load', '—')}"]
         if data.get("cpu_temperature") is not None:
             parts.append(f"{data['cpu_temperature']:.0f} °C")
             if fan_text(data.get("fan")):
@@ -1670,6 +1688,9 @@ class Fleetlight(Adw.Application):
                               "battery-good-charging-symbolic" if charging else "battery-symbolic"))
             if fan_text(data.get("fan")):
                 facts.append((fan_text(data["fan"]).capitalize(), "weather-windy-symbolic"))
+            presence, in_use = presence_summary(data.get("presence"))
+            if presence:
+                facts.insert(0, (presence, presence_icon(data.get("presence"), in_use)))
             for text, icon_name in facts:
                 if text:
                     child = Gtk.FlowBoxChild(child=chip(str(text), icon_name), focusable=False, halign=Gtk.Align.START)
@@ -1703,6 +1724,8 @@ class Fleetlight(Adw.Application):
                 gauges.append(self.gauge_card("CHECK TIME", ring, "Last full check" if seconds else "No verified receipt yet")[0])
             self.content.append(gauges)
             self.metric_widgets = widgets
+            self.activity_section(data)
+            self.pressure_section(data)
         elif checked and self.last_seen.get(host["id"]):
             seen = self.last_seen[host["id"]]
             last = self.section("Last seen online", "From the most recent successful check")
@@ -1749,6 +1772,8 @@ class Fleetlight(Adw.Application):
         processes = data.get("processes") if online and isinstance(data.get("processes"), dict) else None
         if processes and (processes.get("cpu") or processes.get("memory")):
             self.content.append(self.process_card(processes))
+        if online:
+            self.stability_section(data)
         installed = data if online else {}
         apps = self.section("Applications", "Installed and available versions")
         self.update_row(apps, host, "cli", "Codex CLI", installed.get("codex"), "utilities-terminal-symbolic")
@@ -2056,6 +2081,10 @@ class Fleetlight(Adw.Application):
             body += "\n\nThis installs all available distribution package upgrades using passwordless sudo. Services may restart during installation. Computers are not automatically rebooted."
         elif kind == "restart":
             pending.sort(key=lambda item: item["host"].get("local", False))
+            busy = [item["host"]["name"] + " (" + text + ")" for item in pending if not item["host"].get("local")
+                    for text, in_use in [presence_summary(self.snapshots.get(item["host"]["id"], {}).get("presence"))] if in_use]
+            if busy:
+                body += "\n\nIn use right now: " + "; ".join(busy) + "."
             body += "\n\nSave your work. Each computer will restart after a one-minute delay. The local controller is scheduled last. Fleetlight verifies a new boot when each computer returns."
         body += "\n\nThe batch stops starting new updates if one fails. Updates already running will finish. You can stop queued updates without interrupting installers."
         dialog = Adw.MessageDialog(transient_for=self.window, heading="Restart required computers?" if kind == "restart" else "Update all " + title + "?", body=body)
@@ -2218,6 +2247,9 @@ class Fleetlight(Adw.Application):
             body = "This computer will restart in one minute. Save your work first. Fleetlight reopens only if you start it again."
         else:
             body = "Active work and services on " + host["name"] + " will be interrupted. It restarts one minute after the request; Fleetlight then verifies that it comes back on a new boot."
+        presence, in_use = presence_summary(self.snapshots.get(host["id"], {}).get("presence"))
+        if in_use and not host.get("local"):
+            body = "Someone may be using it right now: " + presence + ".\n\n" + body
         dialog = Adw.MessageDialog(transient_for=self.window, heading="Restart " + host["name"] + "?", body=body)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("restart", "Restart")
@@ -2922,6 +2954,139 @@ class Fleetlight(Adw.Application):
         note.set_ellipsize(3)
         card.append(note)
         return card, note
+
+    def activity_section(self, data):
+        """Desktop session, streams, remote desktop viewers and SSH terminals from the last full check."""
+        presence = data.get("presence")
+        if not isinstance(presence, dict):
+            return
+        summary, in_use = presence_summary(presence)
+        group = self.section("Activity", "Who is using this computer · " + (summary or "unknown")
+                             + (" · restarts and updates will interrupt them" if in_use else ""))
+        if presence.get("desktop"):
+            state = []
+            state.append("locked" if presence.get("locked") else "unlocked")
+            if presence.get("displays_off"):
+                state.append("displays off")
+            idle = presence.get("idle_seconds")
+            if isinstance(idle, (int, float)):
+                state.append("idle " + duration(idle) if idle >= 60 else "active now")
+            desktop = str(presence["desktop"])
+            name = desktop if desktop not in ("wayland", "x11", "mir") else "Desktop (" + desktop.capitalize() + ")"
+            row = Adw.ActionRow(title=GLib.markup_escape_text(name), subtitle=GLib.markup_escape_text(
+                str(presence.get("user") or "?") + " · " + ", ".join(state)))
+            row.add_prefix(Gtk.Image.new_from_icon_name("system-lock-screen-symbolic" if presence.get("locked") else "computer-symbolic"))
+            group.add(row)
+        else:
+            self.detail_row(group, "Desktop", "No one signed in at the computer", "computer-symbolic")
+        stream = presence.get("stream")
+        if isinstance(stream, dict):
+            since = stream.get("since")
+            if stream.get("streaming"):
+                text = "Client connected" + (" since " + clock(since) if isinstance(since, (int, float)) else "")
+            else:
+                text = "No client" + (" · last stream ended " + time.strftime("%a %H:%M", time.localtime(since)) if isinstance(since, (int, float)) else "")
+            self.detail_row(group, "Sunshine stream", text, "video-display-symbolic", "good" if stream.get("streaming") else "muted")
+        for item in presence.get("remote_desktop") or []:
+            if isinstance(item, dict):
+                self.detail_row(group, str(item.get("kind") or "Remote desktop"), "Viewer connected" + (
+                    " from " + str(item["from"]) if item.get("from") else ""), "preferences-desktop-remote-desktop-symbolic", "good")
+        for item in presence.get("remote_sessions") or []:
+            if isinstance(item, dict) and not presence.get("remote_desktop"):
+                self.detail_row(group, str(item.get("kind") or "Remote") + " session", str(item.get("user") or "?") + " · open, no viewer connected",
+                                "preferences-desktop-remote-desktop-symbolic")
+        for item in presence.get("terminals") or []:
+            if isinstance(item, dict):
+                self.detail_row(group, "SSH terminal", str(item.get("user")) + " on " + str(item.get("tty")) + " from " + str(item.get("from")),
+                                "utilities-terminal-symbolic", "good")
+
+    def pressure_section(self, data):
+        """Linux pressure stall information: how much of the time tasks waited for CPU, memory or disk."""
+        pressure = data.get("pressure")
+        if not isinstance(pressure, dict):
+            return
+        if "memory_level" in pressure:
+            level = pressure.get("memory_level") or "unknown"
+            group = self.section("Pressure", "How hard macOS is working to free memory")
+            self.detail_row(group, "Memory pressure", level.capitalize(), "drive-harddisk-solidstate-symbolic",
+                            "bad" if level == "critical" else "warning" if level == "warning" else "muted")
+            return
+        group = self.section("Pressure", "Share of time tasks were stalled waiting, over the last minute (PSI)")
+        for resource, title, icon_name in (("cpu", "CPU", "speedometer-symbolic"), ("memory", "Memory", "drive-harddisk-solidstate-symbolic"),
+                                           ("io", "Disk I/O", "drive-harddisk-symbolic")):
+            values = pressure.get(resource)
+            if not isinstance(values, dict):
+                continue
+            some, full = values.get("some") or {}, values.get("full") or {}
+            kind, window, limit, _ = PRESSURE_LIMITS[resource]
+            # Rows lead with the value that raises an alert, so the bar and the warning agree.
+            shown = (full if kind == "full" else some).get(window, 0.0)
+            minute = (full if kind == "full" else some).get("avg60", 0.0)
+            parts = [f"{label_} {percent_text(some.get(key, 0.0))}" for label_, key in (("10 s", "avg10"), ("1 min", "avg60"), ("5 min", "avg300"))]
+            subtitle = "Some waiting: " + " · ".join(parts)
+            if full and resource != "cpu":
+                subtitle += "\nAll stalled: " + percent_text(full.get("avg60", 0.0)) + " over 1 min"
+            row = Adw.ActionRow(title=title, subtitle=subtitle)
+            row.set_subtitle_lines(2)
+            row.add_prefix(Gtk.Image.new_from_icon_name(icon_name))
+            css = "bad" if shown >= limit else "warning" if shown >= limit / 2 else None
+            bar = Gtk.ProgressBar(fraction=max(0, min(1, minute / 100)), valign=Gtk.Align.CENTER)
+            bar.set_size_request(150, -1)
+            if css:
+                bar.add_css_class(css)
+            row.add_suffix(bar)
+            amount = label(percent_text(minute), "numeric " + (css or "muted"), xalign=1)
+            amount.set_width_chars(5)
+            amount.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(amount)
+            group.add(row)
+
+    def stability_section(self, data):
+        """Crashes, out-of-memory kills and error-level log messages since the computer booted."""
+        crashes = data.get("crashes")
+        errors = data.get("journal_errors")
+        if not isinstance(crashes, dict) and not isinstance(errors, dict):
+            return
+        since = (crashes or {}).get("since")
+        group = self.section("Stability", "Since boot" + (" on " + time.strftime("%a %d %b %H:%M", time.localtime(since)) if since else ""))
+        if isinstance(crashes, dict):
+            items = [item for item in crashes.get("items") or [] if isinstance(item, dict)]
+            count = crashes.get("count", len(items))
+            names = {}
+            for item in items:
+                names.setdefault(str(item.get("name")), []).append(item.get("at") or 0)
+            lines = [name + (f" ×{len(times)}" if len(times) > 1 else "") + " · last " +
+                     time.strftime("%a %H:%M", time.localtime(max(times))) for name, times in list(names.items())[:5]]
+            row = Adw.ActionRow(title="Crashed programs", subtitle=GLib.markup_escape_text(
+                "\n".join(lines) if lines else "None; no core dumps or crash reports since boot"))
+            row.set_subtitle_lines(6)
+            recent = any(time.time() - (item.get("at") or 0) <= 86400 for item in items)
+            row.add_prefix(status_dot("warning" if recent else "good" if not items else None))
+            amount = label(str(count), "numeric " + ("warning" if recent else "muted"))
+            amount.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(amount)
+            group.add(row)
+            kills = crashes.get("oom_kills")
+            if isinstance(kills, int):
+                events = data.get("oom_events") or []
+                subtitle = ("Last seen at " + clock(max(events)) if events else
+                            "Programs the system killed to free memory" if kills else "None; memory never ran out")
+                row = Adw.ActionRow(title="Out-of-memory kills", subtitle=subtitle)
+                row.add_prefix(status_dot("warning" if events else "good" if not kills else None))
+                amount = label(str(kills), "numeric " + ("warning" if events else "muted"))
+                amount.set_valign(Gtk.Align.CENTER)
+                row.add_suffix(amount)
+                group.add(row)
+        if isinstance(errors, dict):
+            top = ", ".join(f"{name} {amount}" for name, amount in errors.get("top") or [] if isinstance(name, str))
+            row = Adw.ActionRow(title="Logged errors", subtitle=GLib.markup_escape_text(
+                ("Most from " + top if top else "None at error level") + " · usually harmless noise; shown, not alerted"))
+            row.set_subtitle_lines(3)
+            row.add_prefix(Gtk.Image.new_from_icon_name("dialog-information-symbolic"))
+            amount = label(str(errors.get("count", 0)) + ("+" if errors.get("capped") else ""), "numeric muted")
+            amount.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(amount)
+            group.add(row)
 
     def process_card(self, processes):
         """Busiest and largest programs side by side."""

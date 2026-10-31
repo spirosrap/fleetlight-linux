@@ -117,7 +117,142 @@ def issues(snapshot):
         elif state not in ("active", "unsupported") and not (name in snapshot.get("optional_services", []) and state in ("inactive", "not installed")):
             result.append(service_label(name) + ": " + state)
     result.extend(tailscale_issues(snapshot.get("tailscale")))
+    result.extend(crash_issues(snapshot.get("crashes"), snapshot.get("oom_events")))
+    result.extend(pressure_issues(snapshot.get("pressure")))
     return result
+
+
+def clock(timestamp):
+    return time.strftime("%H:%M", time.localtime(timestamp))
+
+
+def duration(seconds):
+    """Short idle or streaming duration: 45 s, 12 min, 3 h, 2 d."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} s"
+    if seconds < 3600:
+        return f"{seconds // 60} min"
+    if seconds < 2 * 86400:
+        return f"{seconds // 3600} h"
+    return f"{seconds // 86400} d"
+
+
+IDLE_AFTER = 600
+
+
+def presence_summary(presence, now=None):
+    """(text, in use) for a computer's presence report: what someone at it or connected to it is doing.
+
+    In use means a stream, a remote desktop viewer, an SSH terminal, or an unlocked desktop with its displays on
+    that is not known to be idle for ten minutes. Hyprland reports no idle time, so its unlocked desktop counts.
+    """
+    if not isinstance(presence, dict):
+        return None, False
+    now = time.time() if now is None else now
+    stream = presence.get("stream") or {}
+    if stream.get("streaming"):
+        since = stream.get("since")
+        return ("Streaming to Moonlight" + (" since " + clock(since) if isinstance(since, (int, float)) else "")), True
+    for item in presence.get("remote_desktop") or []:
+        if isinstance(item, dict):
+            return str(item.get("kind") or "Remote desktop") + " viewer connected" + (
+                " from " + str(item["from"]) if item.get("from") else ""), True
+    terminals = [item for item in presence.get("terminals") or [] if isinstance(item, dict)]
+    desktop = presence.get("desktop")
+    idle = presence.get("idle_seconds")
+    if desktop and not presence.get("locked") and not presence.get("displays_off") and not (
+            isinstance(idle, (int, float)) and idle >= IDLE_AFTER):
+        return ("In use" if isinstance(idle, (int, float)) else "Desktop unlocked"), True
+    if terminals:
+        return "SSH terminal from " + str(terminals[0].get("from")), True
+    if not desktop:
+        sessions = [item for item in presence.get("remote_sessions") or [] if isinstance(item, dict)]
+        if sessions:
+            return "Remote desktop session open, no viewer", False
+        return "No one signed in", False
+    if presence.get("locked"):
+        text = "Locked"
+    elif presence.get("displays_off"):
+        text = "Displays off"
+    else:
+        text = "Idle"
+    if isinstance(idle, (int, float)) and idle >= IDLE_AFTER:
+        text += (" · " if text != "Idle" else " ") + ("idle " if text != "Idle" else "") + duration(idle)
+    return text, False
+
+
+CRASH_WINDOW = 86400
+
+
+def crash_issues(crashes, oom_events=(), now=None):
+    """One line per program that crashed in the last day, newest first, plus out-of-memory kills seen in that day.
+
+    Lines name the latest crash time rather than a count, so a crash ageing out never reads as a new problem.
+    """
+    now = time.time() if now is None else now
+    result = []
+    latest = {}
+    for item in (crashes or {}).get("items") or [] if isinstance(crashes, dict) else []:
+        if isinstance(item, dict) and isinstance(item.get("at"), (int, float)) and now - item["at"] <= CRASH_WINDOW:
+            name = str(item.get("name") or "A program")
+            latest[name] = max(latest.get(name, 0), item["at"])
+    ordered = sorted(latest.items(), key=lambda pair: -pair[1])
+    for name, when in ordered[:3]:
+        result.append(name + " crashed at " + clock(when))
+    if len(ordered) > 3:
+        result.append(str(len(ordered) - 3) + " more programs crashed today")
+    recent = [moment for moment in oom_events or () if now - moment <= CRASH_WINDOW]
+    if recent:
+        result.append("Out of memory: a program was killed at " + clock(max(recent)))
+    return result
+
+
+PRESSURE_LIMITS = {"memory": ("full", "avg60", 10, "Memory is thrashing: tasks stalled {:.0f}% of the last minute"),
+                   "io": ("full", "avg60", 30, "Disk I/O stalled tasks {:.0f}% of the last minute"),
+                   "cpu": ("some", "avg300", 80, "CPU is saturated: tasks waited {:.0f}% of the last 5 minutes")}
+
+
+def pressure_issues(pressure):
+    """Sustained stalls from Linux PSI, and macOS critical memory pressure."""
+    if not isinstance(pressure, dict):
+        return []
+    if pressure.get("memory_level") == "critical":
+        return ["Memory pressure is critical"]
+    result = []
+    for resource, (kind, window, limit, message) in PRESSURE_LIMITS.items():
+        value = ((pressure.get(resource) or {}).get(kind) or {}).get(window)
+        if isinstance(value, (int, float)) and value >= limit:
+            result.append(message.format(value))
+    return result
+
+
+class OomWatch:
+    """When out-of-memory kills happened, from the probe's per-boot counter (kernel oom_kill or macOS Jetsam reports).
+
+    The counter carries no times, so an increase is stamped when it is first seen; kills that were already
+    counted when Fleetlight started are shown on the page but never alerted.
+    """
+    def __init__(self):
+        self.seen = {}
+
+    def observe(self, snapshot, now=None):
+        if snapshot.get("status") != "online":
+            return list(self.seen.get(snapshot.get("id"), {}).get("events", []))
+        now = time.time() if now is None else now
+        crashes = snapshot.get("crashes") if isinstance(snapshot.get("crashes"), dict) else {}
+        count, boot = crashes.get("oom_kills"), crashes.get("since")
+        if not isinstance(count, int):
+            return []
+        entry = self.seen.get(snapshot.get("id"))
+        if entry is None or entry["boot"] != boot or count < entry["count"]:
+            entry = {"boot": boot, "count": count, "events": []}
+        elif count > entry["count"]:
+            entry["events"].append(now)
+            entry["count"] = count
+        entry["events"] = [moment for moment in entry["events"] if now - moment <= CRASH_WINDOW]
+        self.seen[snapshot.get("id")] = entry
+        return list(entry["events"])
 
 
 def gigabytes(size):
