@@ -159,3 +159,15 @@ class MemoryWatchTests(unittest.TestCase):
         self.assertEqual(self.feed(MemoryWatch(), jumpy), [])
         # Large growth on a big machine that stays under 15% of memory is not a runaway either.
         self.assertEqual(self.feed(MemoryWatch(), [int((1 + 0.3 * i) * self.GIB) for i in range(12)], total=64 * self.GIB), [])
+
+
+class ClaudeLookupTests(unittest.TestCase):
+    def test_interactive_shell_path_is_used_when_the_login_shell_misses_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / "claude"
+            binary.write_text("#!/bin/sh\n")
+            binary.chmod(0o755)
+            answers = {"-lc": "", "-ic": "zsh noise\n" + str(binary)}
+            with patch.object(probe, "command", side_effect=lambda args, timeout=4: answers.get(args[1], "")), \
+                    patch.object(probe.shutil, "which", return_value=None):
+                self.assertEqual(probe.claude_executable(), str(binary))

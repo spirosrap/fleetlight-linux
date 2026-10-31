@@ -20,6 +20,10 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.2
+
+- The Claude CLI is found again on computers that add `~/.local/bin` to `PATH` only for interactive shells (the Mac mini's `.zshrc`). The lookup tries the login shell, then the interactive shell, then the native installer's `~/.local/bin/claude`. Since 0.7.2 stopped leaking the Codex check's `PATH`, such computers showed "not detected".
+
 ## Version 0.8.1
 
 - Crash alerts can be dismissed: **Dismiss crashes** in a computer's Needs attention card (or **Dismiss** on its Crashed programs row) acknowledges every crash and out-of-memory kill so far. The dismissal is saved on this computer and survives restarts; any later crash alerts again.

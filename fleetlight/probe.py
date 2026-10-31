@@ -352,11 +352,23 @@ def codex_version():
 
 
 def claude_executable():
+    """The `claude` a terminal would run: login shell first (mise wrappers), then the interactive one.
+
+    The Mac mini adds ~/.local/bin to PATH only in .zshrc, so a login shell misses it; before 0.7.2 the
+    Codex check's leaked PATH hid that. The native installer's link is the last resort.
+    """
     shell = os.environ.get("SHELL", "/bin/sh")
-    found = command([shell, "-lc", "command -v claude"], timeout=3).splitlines()
-    if found and os.path.isfile(found[-1]) and os.access(found[-1], os.X_OK):
-        return found[-1]
-    return shutil.which("claude")
+    for flag in ("-lc", "-ic"):
+        found = command([shell, flag, "command -v claude"], timeout=3).splitlines()
+        if found and os.path.isfile(found[-1]) and os.access(found[-1], os.X_OK):
+            return found[-1]
+    found = shutil.which("claude")
+    if found:
+        return found
+    for path in (Path.home() / ".local/bin/claude", Path.home() / ".claude/local/claude"):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return str(path)
+    return None
 
 
 def claude_version():
