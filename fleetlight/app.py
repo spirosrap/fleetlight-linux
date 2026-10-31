@@ -17,7 +17,7 @@ from . import __version__
 from . import actions, config
 from . import agents as agent_quota
 from .monitor import (History, MemoryWatch, OomWatch, PRESSURE_LIMITS, ServiceWatch, clock, duration, issues, linux_update_issues,
-                      presence_summary, probe_host, refresh, regression_cause, service_label)
+                      has_crash_issues, presence_summary, probe_host, refresh, regression_cause, service_label)
 from .probe import collect_metrics
 from . import sites
 from .tray import Tray
@@ -463,6 +463,15 @@ class Fleetlight(Adw.Application):
         # The last online result of every computer: shown until the first check finishes, and the
         # source of "last seen" facts and the Wake-on-LAN address once a computer is unreachable.
         self.last_seen_path = config.state_path().with_name("last-seen.json")
+        # Per computer, the time up to which crashes were dismissed; later crashes alert again.
+        self.crash_acks_path = config.state_path().with_name("crash-acknowledgements.json")
+        self.crash_acks = {}
+        if not demo:
+            try:
+                saved = json.loads(self.crash_acks_path.read_text())
+                self.crash_acks = {str(k): float(v) for k, v in saved.items() if isinstance(v, (int, float))}
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         if not demo:
             try:
                 saved = json.loads(self.last_seen_path.read_text())
@@ -953,7 +962,8 @@ class Fleetlight(Adw.Application):
                 "memory_total", "memory_used", "swap_total", "swap_used", "load", "cpu_percent",
                 "cpu_temperature", "fan", "battery") if key in current}}
         snapshot = {**snapshot, "service_regressions": self.service_watch.observe(snapshot),
-                    "memory_runaways": self.memory_watch.observe(snapshot), "oom_events": self.oom_watch.observe(snapshot)}
+                    "memory_runaways": self.memory_watch.observe(snapshot), "oom_events": self.oom_watch.observe(snapshot),
+                    "crashes_seen_until": self.crash_acks.get(snapshot["id"], 0)}
         pending = self.pending_restarts.get(snapshot["id"])
         if pending and pending.get("boot_id") and snapshot.get("status") == "online" and snapshot.get("boot_id") and snapshot["boot_id"] != pending.get("boot_id"):
             self.pending_restarts.pop(snapshot["id"], None)
@@ -1698,7 +1708,14 @@ class Fleetlight(Adw.Application):
             words.append(chips)
         self.content.append(hero)
         if trouble:
-            self.content.append(self.alert_card(trouble))
+            alert = self.alert_card(trouble)
+            if online and has_crash_issues(data):
+                dismiss = Gtk.Button(label="Dismiss crashes", halign=Gtk.Align.START)
+                dismiss.set_tooltip_text("Stop alerting about these crashes; a new crash alerts again")
+                dismiss.set_margin_top(4)
+                dismiss.connect("clicked", lambda *_: self.dismiss_crashes(host))
+                alert.append(dismiss)
+            self.content.append(alert)
         if online:
             gauges = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, homogeneous=True)
             widgets = {"host": host["id"], "summary": summary_label, "hostref": host}
@@ -1773,7 +1790,7 @@ class Fleetlight(Adw.Application):
         if processes and (processes.get("cpu") or processes.get("memory")):
             self.content.append(self.process_card(processes))
         if online:
-            self.stability_section(data)
+            self.stability_section(data, host)
         installed = data if online else {}
         apps = self.section("Applications", "Installed and available versions")
         self.update_row(apps, host, "cli", "Codex CLI", installed.get("codex"), "utilities-terminal-symbolic")
@@ -3041,7 +3058,23 @@ class Fleetlight(Adw.Application):
             row.add_suffix(amount)
             group.add(row)
 
-    def stability_section(self, data):
+    def dismiss_crashes(self, host):
+        """Acknowledge every crash and out-of-memory kill seen so far on this computer."""
+        ident = host.get("id")
+        if not ident:
+            return
+        self.crash_acks[ident] = time.time()
+        if ident in self.snapshots:
+            self.snapshots[ident] = dict(self.snapshots[ident], crashes_seen_until=self.crash_acks[ident])
+        if not self.demo:
+            try:
+                config.atomic_json(self.crash_acks_path, self.crash_acks)
+            except OSError:
+                self.toast("Could not save the dismissal")
+        self.populate_hosts()
+        self.render_detail()
+
+    def stability_section(self, data, host):
         """Crashes, out-of-memory kills and error-level log messages since the computer booted."""
         crashes = data.get("crashes")
         errors = data.get("journal_errors")
@@ -3060,8 +3093,18 @@ class Fleetlight(Adw.Application):
             row = Adw.ActionRow(title="Crashed programs", subtitle=GLib.markup_escape_text(
                 "\n".join(lines) if lines else "None; no core dumps or crash reports since boot"))
             row.set_subtitle_lines(6)
-            recent = any(time.time() - (item.get("at") or 0) <= 86400 for item in items)
+            seen_until = data.get("crashes_seen_until") or 0
+            recent = any(time.time() - (item.get("at") or 0) <= 86400 and (item.get("at") or 0) > seen_until for item in items)
+            if seen_until and items and not recent:
+                row.set_subtitle(row.get_subtitle() + GLib.markup_escape_text(
+                    "\nDismissed " + time.strftime("%a %H:%M", time.localtime(seen_until)) + "; a new crash alerts again"))
             row.add_prefix(status_dot("warning" if recent else "good" if not items else None))
+            if recent:
+                dismiss = Gtk.Button(label="Dismiss", valign=Gtk.Align.CENTER)
+                dismiss.set_tooltip_text("Stop alerting about these crashes; a new crash alerts again")
+                dismiss.set_sensitive(not self.demo)
+                dismiss.connect("clicked", lambda *_: self.dismiss_crashes(host))
+                row.add_suffix(dismiss)
             amount = label(str(count), "numeric " + ("warning" if recent else "muted"))
             amount.set_valign(Gtk.Align.CENTER)
             row.add_suffix(amount)

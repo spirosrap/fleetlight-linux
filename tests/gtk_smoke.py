@@ -1,6 +1,7 @@
 """Exercise the native widget tree with fictional data under Xvfb."""
 from pathlib import Path
 import sys
+import time
 import traceback
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fleetlight.app import Adw, Fleetlight, GLib, Gtk
@@ -104,6 +105,7 @@ def verify():
         local["services"], app.snapshots["local"] = saved_services, saved_snapshot
         # Activity, pressure and stability sections on a streaming Linux computer.
         app.selected = "lab"
+        lab_host = next(h for h in app.configuration["hosts"] if h["id"] == "lab")
         app.render_detail()
         for title in ("Activity", "Pressure", "Stability"):
             assert find_widget(app.content, lambda w, t=title: isinstance(w, Adw.PreferencesGroup) and w.get_title() == t), title
@@ -111,6 +113,17 @@ def verify():
         assert find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "Crashed programs"
                            and "python3" in w.get_subtitle())
         assert "Streaming to Moonlight" in app.host_footnote("lab", app.snapshots["lab"])
+        # A crash today alerts until it is dismissed; the dismissal hides it from the alert and the row.
+        saved_lab = dict(app.snapshots["lab"])
+        app.snapshots["lab"] = dict(saved_lab, crashes=dict(saved_lab["crashes"], items=[{"at": time.time() - 60, "name": "python3", "signal": 11}]))
+        app.render_detail()
+        dismiss = find_widget(app.content, lambda w: isinstance(w, Gtk.Button) and w.get_label() == "Dismiss crashes")
+        assert dismiss is not None
+        dismiss.emit("clicked")
+        assert not any("crashed" in item for item in app.host_state(lab_host)[4])
+        assert find_widget(app.content, lambda w: isinstance(w, Gtk.Button) and w.get_label() in ("Dismiss", "Dismiss crashes")) is None
+        app.snapshots["lab"] = saved_lab
+        app.crash_acks.pop("lab", None)
         app.selected = "studio"
         app.render_detail()
         assert find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "Memory pressure")

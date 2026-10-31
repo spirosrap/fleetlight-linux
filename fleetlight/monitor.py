@@ -117,7 +117,7 @@ def issues(snapshot):
         elif state not in ("active", "unsupported") and not (name in snapshot.get("optional_services", []) and state in ("inactive", "not installed")):
             result.append(service_label(name) + ": " + state)
     result.extend(tailscale_issues(snapshot.get("tailscale")))
-    result.extend(crash_issues(snapshot.get("crashes"), snapshot.get("oom_events")))
+    result.extend(crash_issues(snapshot.get("crashes"), snapshot.get("oom_events"), seen_until=snapshot.get("crashes_seen_until") or 0))
     result.extend(pressure_issues(snapshot.get("pressure")))
     return result
 
@@ -185,16 +185,18 @@ def presence_summary(presence, now=None):
 CRASH_WINDOW = 86400
 
 
-def crash_issues(crashes, oom_events=(), now=None):
+def crash_issues(crashes, oom_events=(), now=None, seen_until=0):
     """One line per program that crashed in the last day, newest first, plus out-of-memory kills seen in that day.
 
     Lines name the latest crash time rather than a count, so a crash ageing out never reads as a new problem.
+    Crashes and kills up to `seen_until` were dismissed by the user and no longer count.
     """
     now = time.time() if now is None else now
     result = []
     latest = {}
     for item in (crashes or {}).get("items") or [] if isinstance(crashes, dict) else []:
-        if isinstance(item, dict) and isinstance(item.get("at"), (int, float)) and now - item["at"] <= CRASH_WINDOW:
+        if isinstance(item, dict) and isinstance(item.get("at"), (int, float)) and now - item["at"] <= CRASH_WINDOW \
+                and item["at"] > seen_until:
             name = str(item.get("name") or "A program")
             latest[name] = max(latest.get(name, 0), item["at"])
     ordered = sorted(latest.items(), key=lambda pair: -pair[1])
@@ -202,10 +204,14 @@ def crash_issues(crashes, oom_events=(), now=None):
         result.append(name + " crashed at " + clock(when))
     if len(ordered) > 3:
         result.append(str(len(ordered) - 3) + " more programs crashed today")
-    recent = [moment for moment in oom_events or () if now - moment <= CRASH_WINDOW]
+    recent = [moment for moment in oom_events or () if now - moment <= CRASH_WINDOW and moment > seen_until]
     if recent:
         result.append("Out of memory: a program was killed at " + clock(max(recent)))
     return result
+
+
+def has_crash_issues(snapshot):
+    return bool(crash_issues(snapshot.get("crashes"), snapshot.get("oom_events"), seen_until=snapshot.get("crashes_seen_until") or 0))
 
 
 PRESSURE_LIMITS = {"memory": ("full", "avg60", 10, "Memory is thrashing: tasks stalled {:.0f}% of the last minute"),

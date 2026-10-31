@@ -43,6 +43,16 @@ class CrashIssueTests(unittest.TestCase):
         # Ageing out the older adb crash does not change the line, so no new notification fires.
         self.assertEqual(crash_issues({"items": crashes["items"][:1]}, now=now), found)
 
+    def test_dismissed_crashes_stop_alerting_until_a_new_one(self):
+        now = 1_800_000_000
+        crashes = {"items": [{"at": now - 600, "name": "CodexBarWidget"}, {"at": now - 1200, "name": "adb"}]}
+        self.assertEqual(crash_issues(crashes, [now - 900], now=now, seen_until=now - 300), [])
+        later = {"items": [{"at": now - 60, "name": "CodexBarWidget"}] + crashes["items"]}
+        self.assertEqual(len(crash_issues(later, now=now, seen_until=now - 300)), 1)
+        recent = {"items": [{"at": time.time() - 600, "name": "adb"}]}
+        self.assertEqual(len(issues({"status": "online", "crashes": recent})), 1)
+        self.assertEqual(issues({"status": "online", "crashes": recent, "crashes_seen_until": time.time() - 60}), [])
+
     def test_many_programs_collapse(self):
         now = 1_800_000_000
         items = [{"at": now - index, "name": "p%d" % index} for index in range(5)]

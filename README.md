@@ -20,6 +20,10 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.1
+
+- Crash alerts can be dismissed: **Dismiss crashes** in a computer's Needs attention card (or **Dismiss** on its Crashed programs row) acknowledges every crash and out-of-memory kill so far. The dismissal is saved on this computer and survives restarts; any later crash alerts again.
+
 ## Version 0.8.0
 
 - **Activity**: each computer page says who is using it: the desktop session (locked, unlocked, displays off, idle time where the desktop reports it), a Moonlight client streaming from Sunshine (read from Sunshine's log), VNC, RDP or Screen Sharing viewers, and interactive SSH terminals. Fleetlight's own scripted SSH checks are not counted. The overview card shows it in place of "Healthy", and restart confirmations, single or batch, name computers that are in use.
