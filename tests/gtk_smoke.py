@@ -177,14 +177,17 @@ def verify():
         refreshed.set_expanded(False)
         app.receive_updates("local", app.app_updates["local"])
         assert not find_history(app.content).get_expanded()
+        # One choice for every computer: opening it here opens it on the next page too, and closing it there sticks.
         find_history(app.content).set_expanded(True)
         app.last_jobs["studio"] = dict(receipt)
         app.selected = "studio"
         app.render_detail()
-        assert not find_history(app.content).get_expanded()
+        assert find_history(app.content).get_expanded()
+        find_history(app.content).set_expanded(False)
         app.selected = "local"
         app.render_detail()
-        assert find_history(app.content).get_expanded()
+        assert not find_history(app.content).get_expanded()
+        find_history(app.content).set_expanded(True)
         app.last_jobs["local"] = dict(receipt, id="c" * 32)
         app.render_detail()
         assert find_history(app.content).get_expanded()
@@ -197,6 +200,15 @@ def verify():
             with patch.dict(os.environ, {"XDG_STATE_HOME": directory}):
                 restored = Fleetlight()
             assert restored.last_jobs["local"]["dismissed"] is True
+            assert restored.what_changed_expanded is None
+            app.demo = False
+            app.ui_state_path = state / "ui-state.json"
+            find_history(app.content).set_expanded(False)
+            find_history(app.content).set_expanded(True)
+            find_history(app.content).set_expanded(False)
+            app.demo = True
+            with patch.dict(os.environ, {"XDG_STATE_HOME": directory}):
+                assert Fleetlight().what_changed_expanded is False
             assert restored.last_jobs["local"]["log"] == receipt["log"]
             assert restored.last_jobs["local"]["state"] == "failed"
             history = Gtk.Box()

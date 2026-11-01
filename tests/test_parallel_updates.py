@@ -20,7 +20,7 @@ def candidate(i, local=False):
 
 def controller(path, pending=(), kind='desktop', automatic=True):
     c = SimpleNamespace(active_jobs={}, job_polls=set(), last_jobs={}, snapshots={},
-                        app_updates={}, auto_attempted=set(), update_history_expanded={},
+                        app_updates={}, auto_attempted=set(),
                         pending_restarts={}, busy=False, update_checks_running=False,
                         journal_path=path, refresh_button=Mock(), spinner=Mock(),
                         toast=Mock(), render_detail=Mock(), render_batch=Mock(),

@@ -20,6 +20,10 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.3
+
+- "What changed" remembers whether you closed it. The choice applies to every computer's page and survives restarts (`~/.local/state/fleetlight/ui-state.json`); a finished update no longer reopens it. Until you toggle it, it opens only when there are changes to list.
+
 ## Version 0.8.2
 
 - The Claude CLI is found again on computers that add `~/.local/bin` to `PATH` only for interactive shells (the Mac mini's `.zshrc`). The lookup tries the login shell, then the interactive shell, then the native installer's `~/.local/bin/claude`. Since 0.7.2 stopped leaking the Codex check's `PATH`, such computers showed "not detected".

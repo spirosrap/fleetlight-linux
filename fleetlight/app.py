@@ -393,7 +393,9 @@ class Fleetlight(Adw.Application):
         self.active_jobs = {}
         self.job_polls = set()
         self.last_jobs = {}
-        self.update_history_expanded = {}
+        # Whether "What changed" is open: one choice for every computer, kept across restarts.
+        # None until the user toggles it, so pages open it only when there are changes to show.
+        self.what_changed_expanded = None
         self.batch = None
         self.pending_restarts = {}
         self.agent_usage = {}
@@ -466,6 +468,14 @@ class Fleetlight(Adw.Application):
         # Per computer, the time up to which crashes were dismissed; later crashes alert again.
         self.crash_acks_path = config.state_path().with_name("crash-acknowledgements.json")
         self.crash_acks = {}
+        self.ui_state_path = config.state_path().with_name("ui-state.json")
+        if not demo:
+            try:
+                saved = json.loads(self.ui_state_path.read_text()).get("what_changed_expanded")
+                if isinstance(saved, bool):
+                    self.what_changed_expanded = saved
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         if not demo:
             try:
                 saved = json.loads(self.crash_acks_path.read_text())
@@ -2294,10 +2304,19 @@ class Fleetlight(Adw.Application):
             self.toast("Restart could not start")
         return False
 
-    def remember_history(self, key, widget):
+    def remember_history(self, widget):
         if self.rebuilding_detail or widget.get_parent() is None:
             return
-        self.update_history_expanded[key] = widget.get_expanded()
+        expanded = widget.get_expanded()
+        if expanded == self.what_changed_expanded:
+            return
+        self.what_changed_expanded = expanded
+        if self.demo:
+            return
+        try:
+            config.atomic_json(self.ui_state_path, {"what_changed_expanded": expanded})
+        except OSError:
+            pass
 
     def install_records(self, host):
         active = self.job_for_host(host["id"])
@@ -2330,9 +2349,9 @@ class Fleetlight(Adw.Application):
         total = sum(len(changes) for _, changes in listed)
         title = "What changed · " + str(total) if total else "What changed"
         expander = Gtk.Expander(label=title)
-        history_key = (host["id"], "install-history")
-        expander.set_expanded(self.update_history_expanded.get(history_key, bool(total)))
-        expander.connect("notify::expanded", lambda widget, _: self.remember_history(history_key, widget))
+        preferred = self.what_changed_expanded
+        expander.set_expanded(bool(total) if preferred is None else preferred)
+        expander.connect("notify::expanded", lambda widget, _: self.remember_history(widget))
         details = box(True, 6)
         for record, changes in listed[:12]:
             when = record.get("finished_at") or record.get("started_at")
@@ -2476,7 +2495,6 @@ class Fleetlight(Adw.Application):
                         self.batch["pending"] = []
                         self.batch["stopped"] = "Stopped after " + job["host"]["name"] + ": " + receipt.get("phase", state)
             self.last_jobs[job["host"]["id"]] = dict(job)
-            self.update_history_expanded[(job["host"]["id"], "install-history")] = True
             self.refresh_install_history(job["host"])
             self.toast(receipt.get("phase", "Update completed"))
             self.active_jobs.pop(ident)
