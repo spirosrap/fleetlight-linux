@@ -15,6 +15,36 @@ from fleetlight.monitor import issues, linux_update_issues
 
 
 class UpdateTests(unittest.TestCase):
+    def test_restart_receipt_comes_back_on_the_starting_connection(self):
+        # The next login is refused once the restart is scheduled, so "start" must carry the result.
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            receipt = update_job.handle({"operation": "start", "id": uuid.uuid4().hex, "kind": "restart", "target": "0.0.0",
+                                         "script": "echo FLEETLIGHT_RESTART\necho VERIFY:ok\n",
+                                         "worker_source": (Path(update_job.__file__)).read_text()})
+        self.assertEqual(receipt["state"], "succeeded")
+
+    def test_other_jobs_return_at_once_without_waiting_for_the_installer(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            ident = uuid.uuid4().hex
+            receipt = update_job.handle({"operation": "start", "id": ident, "kind": "system", "target": "0.0.0",
+                                         "script": "sleep 3\necho FLEETLIGHT_SYSTEM_UPDATE\n",
+                                         "worker_source": (Path(update_job.__file__)).read_text()})
+            self.assertEqual(receipt["state"], "queued")
+            state_file = Path(home) / ".local/state/fleetlight/update-jobs" / ident / "state.json"
+            for _ in range(100):
+                if json.loads(state_file.read_text())["state"] not in ("queued", "running"):
+                    break
+                time.sleep(0.1)
+
+    def test_only_a_long_silent_restart_is_given_up_on(self):
+        job = {"kind": "restart", "started_at": 1000}
+        silent = {"state": "disconnected"}
+        self.assertFalse(updates.restart_unanswered(job, silent, now=1000 + updates.RESTART_RECEIPT_SECONDS))
+        self.assertTrue(updates.restart_unanswered(job, silent, now=1001 + updates.RESTART_RECEIPT_SECONDS))
+        self.assertFalse(updates.restart_unanswered(job, {"state": "running"}, now=99999))
+        self.assertFalse(updates.restart_unanswered({"kind": "system", "started_at": 1000}, silent, now=99999))
+        self.assertFalse(updates.restart_unanswered({"kind": "restart"}, silent, now=99999))
+
     def test_transient_auto_failures_retry_with_backoff_then_stop(self):
         attempted, retries, key = set(), {}, ("tb", "system", "0.0.0", "omarchy 1 -> 2")
         network = update_job.ERRORS["network-failed"]

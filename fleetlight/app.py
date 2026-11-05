@@ -2429,7 +2429,7 @@ class Fleetlight(Adw.Application):
         ident = uuid.uuid4().hex
         self.active_jobs[ident] = {"id": ident, "host": dict(host), "kind": kind, "target": checked["latest"],
                            "boot_id": self.snapshots.get(host["id"], {}).get("boot_id"),
-                           "state": "queued", "phase": "Starting " + ACTION_NAMES[kind],
+                           "state": "queued", "phase": "Starting " + ACTION_NAMES[kind], "started_at": time.time(),
                            "auto_key": list(updates.auto_target_key(host, kind, checked))}
         try:
             self.persist_jobs()
@@ -2476,6 +2476,8 @@ class Fleetlight(Adw.Application):
         if receipt.get("id", ident) != ident:
             GLib.timeout_add_seconds(3, self.watch_job, ident)
             return GLib.SOURCE_REMOVE
+        if updates.restart_unanswered(job, receipt):
+            receipt = {"state": "interrupted", "phase": job["host"]["name"] + " has not answered since the restart request. Check the computer."}
         job.update({k:v for k,v in receipt.items() if k not in ("host", "id", "kind")})
         state = receipt.get("state")
         if state in ("succeeded", "failed", "busy", "interrupted", "unknown"):

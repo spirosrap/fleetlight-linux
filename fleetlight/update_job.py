@@ -369,6 +369,18 @@ def worker(directory, lock_fd):
     save(state_file, state)
 
 
+def await_finish(state_file, initial, timeout=15):
+    """Wait for a quick job's final state; give back what is known if it takes longer."""
+    deadline = time.time() + timeout
+    state = initial
+    while time.time() < deadline:
+        state = json.loads(state_file.read_text())
+        if state.get("state") not in ("queued", "running"):
+            break
+        time.sleep(0.1)
+    return state
+
+
 def handle(request):
     ident = request.get("id", "")
     if not re.fullmatch(r"[a-f0-9]{32}", ident):
@@ -420,6 +432,10 @@ def handle(request):
                          stdin=subprocess.DEVNULL, stdout=output, stderr=output,
                          start_new_session=True, pass_fds=(lock.fileno(),))
     lock.close()
+    if request["kind"] == "restart":
+        # Scheduling a restart creates /run/nologin at once, so sshd refuses every later status
+        # check until the new boot. This connection is the only one that can carry the receipt.
+        return await_finish(state_file, initial)
     return initial
 
 

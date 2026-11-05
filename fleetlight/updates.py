@@ -408,6 +408,17 @@ def batch_candidates(hosts, snapshots, checks, kind, now=None):
     return eligible, skipped
 
 
+# A restart takes a minute to begin and a few to come back; past this nobody is answering.
+RESTART_RECEIPT_SECONDS = 600
+
+
+def restart_unanswered(job, receipt, now=None):
+    """A restart job with no receipt must not hold every other job and check back forever."""
+    now = time.time() if now is None else now
+    return (job.get("kind") == "restart" and receipt.get("state") == "disconnected"
+            and now - job.get("started_at", now) > RESTART_RECEIPT_SECONDS)
+
+
 def restart_superseded(checked, snapshot):
     """A restart request observed on an earlier boot is satisfied once the computer is online on a new one."""
     if not isinstance(checked, dict) or not isinstance(snapshot, dict):

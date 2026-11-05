@@ -20,6 +20,11 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.5
+
+- A restart no longer sits on "Updating" until the computer is back, blocking every check and every other restart in the meantime. Scheduling a restart makes the computer refuse new SSH logins (`/run/nologin`), so the receipt now comes back on the connection that requested it.
+- A restart job that gets no answer for 10 minutes is closed with a message instead of holding up the fleet indefinitely.
+
 ## Version 0.8.4
 
 - Automatic updates that fail because of the network or a stalled mirror (`failed retrieving file`, `Operation too slow`, apt/dnf fetch errors, repository refresh failures) are retried after 30 minutes, 2 hours and 6 hours. Installer failures are still not repeated until Fleetlight restarts or automatic updates are toggled.
