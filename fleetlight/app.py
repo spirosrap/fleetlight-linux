@@ -407,6 +407,7 @@ class Fleetlight(Adw.Application):
         self.metric_widgets = None
         self.overview_widgets = {}
         self.auto_attempted = set()
+        self.auto_retries = {}
         self.auto_holdoff_until = 0
         self.last_seen = {}
         self.live = {}
@@ -1010,7 +1011,8 @@ class Fleetlight(Adw.Application):
         self.populate_hosts()
         if warning:
             self.toast(warning)
-        if self.force_update_check or time.time() - self.last_update_check > 900:
+        if (self.force_update_check or time.time() - self.last_update_check > 900
+                or updates.packages_changed_since_check(self.snapshots, self.app_updates)):
             self.check_application_updates()
         return GLib.SOURCE_REMOVE
 
@@ -2156,7 +2158,8 @@ class Fleetlight(Adw.Application):
         if time.time() < self.auto_holdoff_until:
             return
         kind, pending = updates.next_auto_batch(
-            self.configuration["hosts"], self.snapshots, self.app_updates, self.auto_attempted)
+            self.configuration["hosts"], self.snapshots, self.app_updates,
+            updates.auto_skipped(self.auto_attempted, self.auto_retries))
         if pending:
             self.begin_batch(kind, pending, automatic=True)
 
@@ -2485,7 +2488,7 @@ class Fleetlight(Adw.Application):
             # and starve the kinds queued after it.
             key = job.get("auto_key")
             if isinstance(key, list) and len(key) >= 2:
-                self.auto_attempted.add(tuple(key))
+                updates.record_auto_result(self.auto_attempted, self.auto_retries, key, state, receipt.get("phase"))
             if self.batch and self.batch.get("running"):
                 self.batch.setdefault("results", []).append({"host": job["host"]["name"], "state": state})
                 if state != "succeeded":
@@ -2803,6 +2806,7 @@ class Fleetlight(Adw.Application):
             Adw.StyleManager.get_default().set_color_scheme(SCHEMES[config.appearance(candidate)])
             if enabling:
                 self.auto_attempted.clear()
+                self.auto_retries.clear()
                 self.auto_holdoff_until = 0
             self.snapshots = {k:v for k,v in self.snapshots.items() if k in {h["id"] for h in candidate["hosts"]}}
             self.site_status = {k:v for k,v in self.site_status.items()

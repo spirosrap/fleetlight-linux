@@ -20,6 +20,12 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.4
+
+- Automatic updates that fail because of the network or a stalled mirror (`failed retrieving file`, `Operation too slow`, apt/dnf fetch errors, repository refresh failures) are retried after 30 minutes, 2 hours and 6 hours. Installer failures are still not repeated until Fleetlight restarts or automatic updates are toggled.
+- A computer's update check is re-run as soon as its package manager has finished a transaction that came after the last check (for example a manual `omarchy-update`), instead of waiting up to 15 minutes.
+- "Restart required" now detects a replaced kernel on Arch systems with `kernel-modules-hook`, which keeps the running kernel's modules directory: the directory no longer belongs to the installed kernel package.
+
 ## Version 0.8.3
 
 - "What changed" remembers whether you closed it. The choice applies to every computer's page and survives restarts (`~/.local/state/fleetlight/ui-state.json`); a finished update no longer reopens it. Until you toggle it, it opens only when there are changes to list.

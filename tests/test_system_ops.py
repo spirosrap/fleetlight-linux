@@ -97,7 +97,7 @@ class SystemTests(unittest.TestCase):
         checked = {'state': 'available', 'packages': ['aether'], 'manager': 'pacman'}
         verified = {'state': 'current', 'packages': [], 'manager': 'pacman', 'restart': {'required': False}}
         with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
-                patch.object(system_ops.subprocess, 'call', return_value=0) as install:
+                patch.object(system_ops, 'call_watching', return_value=(0, False)) as install:
             self.assertEqual(system_ops.update(), 0)
         install.assert_called_once_with(
             ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'])
@@ -106,7 +106,7 @@ class SystemTests(unittest.TestCase):
         checked = {'state': 'available', 'packages': ['linux-generic'], 'manager': 'apt', 'changes': ['linux-generic 6.8.0-139.139 -> 6.8.0-142.142']}
         verified = {'state': 'current', 'packages': [], 'manager': 'apt', 'restart': {'required': False}}
         with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
-                patch.object(system_ops.subprocess, 'call', return_value=0) as install:
+                patch.object(system_ops, 'call_watching', return_value=(0, False)) as install:
             self.assertEqual(system_ops.update(), 0)
         self.assertEqual(install.call_args.args[0][-1], 'full-upgrade')
 
@@ -116,7 +116,7 @@ class SystemTests(unittest.TestCase):
         with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
                 patch.object(system_ops, 'run', return_value=result()), \
                 patch.dict(system_ops.os.environ, {'PATH': '/usr/bin'}, clear=True), \
-                patch.object(system_ops.subprocess, 'call', return_value=0) as install:
+                patch.object(system_ops, 'call_watching', return_value=(0, False)) as install:
             self.assertEqual(system_ops.update(), 0)
         install.assert_called_once()
         self.assertEqual(install.call_args.args[0], ['omarchy-update', '-y'])
@@ -239,7 +239,7 @@ class SystemTests(unittest.TestCase):
         verified = {'state': 'current', 'packages': [], 'manager': 'apt', 'restart': {'required': False}}
         with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
                 patch.object(system_ops, 'install_sidecars', return_value=0) as sidecars, \
-                patch.object(system_ops.subprocess, 'call') as install:
+                patch.object(system_ops, 'call_watching') as install:
             self.assertEqual(system_ops.update(), 0)
         install.assert_not_called()
         sidecars.assert_called_once()
@@ -251,7 +251,7 @@ class SystemTests(unittest.TestCase):
                     'changes': ['brave-bin 1:1.97.59-1 -> 1:1.98.60-1'], 'restart': {'required': False}}
         with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
                 patch.object(system_ops, 'run', return_value=result()), \
-                patch.object(system_ops.subprocess, 'call', return_value=0):
+                patch.object(system_ops, 'call_watching', return_value=(0, False)):
             self.assertEqual(system_ops.update(), 0)
 
     def test_update_fails_when_a_requested_package_is_still_pending(self):
@@ -259,12 +259,55 @@ class SystemTests(unittest.TestCase):
         verified = {'state': 'available', 'packages': ['claude-desktop'], 'manager': 'omarchy', 'restart': {'required': False}}
         with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
                 patch.object(system_ops, 'run', return_value=result()), \
-                patch.object(system_ops.subprocess, 'call', return_value=0):
+                patch.object(system_ops, 'call_watching', return_value=(0, False)):
             self.assertEqual(system_ops.update(), 1)
         self.assertFalse(system_ops.installed_everything({'packages': ['a']}, {'state': 'unknown', 'packages': []}))
 
+    def test_installer_network_failure_is_reported_as_retryable(self):
+        checked = {'state': 'available', 'packages': ['omarchy'], 'manager': 'omarchy'}
+        with patch.object(system_ops, 'check', return_value=checked), \
+                patch.object(system_ops, 'run', return_value=result()), \
+                patch.object(system_ops, 'call_watching', return_value=(1, True)), \
+                patch('builtins.print') as printed:
+            self.assertEqual(system_ops.update(), 1)
+        self.assertIn('UPDATE:network-failed', ' '.join(str(c.args[0]) for c in printed.call_args_list))
+        self.assertEqual(update_job.parse_result('system', '', '', 1, ['UPDATE:network-failed', 'VERIFY:failed'])[1],
+                         update_job.ERRORS['network-failed'])
+        with patch.object(system_ops, 'check', return_value=checked), \
+                patch.object(system_ops, 'run', return_value=result()), \
+                patch.object(system_ops, 'call_watching', return_value=(1, False)), \
+                patch('builtins.print') as printed:
+            self.assertEqual(system_ops.update(), 1)
+        self.assertIn('UPDATE:install-failed', ' '.join(str(c.args[0]) for c in printed.call_args_list))
+
+    def test_call_watching_passes_output_through_and_spots_mirror_stalls(self):
+        import io, sys
+        buffer = io.BytesIO()
+        fake = SimpleNamespace(buffer=buffer, flush=lambda: None)
+        script = "print('ok'); print(\"error: failed retrieving file 'omarchy.db' : Operation too slow\"); raise SystemExit(1)"
+        with patch.object(system_ops.sys, 'stdout', fake):
+            code, network = system_ops.call_watching([sys.executable, '-c', script])
+        self.assertEqual((code, network), (1, True))
+        self.assertIn(b'failed retrieving file', buffer.getvalue())
+        with patch.object(system_ops.sys, 'stdout', SimpleNamespace(buffer=io.BytesIO(), flush=lambda: None)):
+            self.assertEqual(system_ops.call_watching([sys.executable, '-c', "print('error: conflicting files')"]), (0, False))
+
+    def test_kernel_kept_by_modules_hook_still_counts_as_replaced(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            modules = system_ops.Path(root)
+            self.assertTrue(system_ops.running_kernel_replaced(modules, '7.2.8-9-omarchy'))  # directory gone
+            kept = modules / '7.2.8-9-omarchy'
+            kept.mkdir()
+            self.assertFalse(system_ops.running_kernel_replaced(modules, '7.2.8-9-omarchy'))  # custom kernel, no pkgbase
+            (kept / 'pkgbase').write_text('linux-omarchy\n')
+            installed = lambda name: name == 'linux-omarchy'
+            self.assertTrue(system_ops.running_kernel_replaced(modules, '7.2.8-9-omarchy', owned=lambda p: False, installed=installed))
+            self.assertFalse(system_ops.running_kernel_replaced(modules, '7.2.8-9-omarchy', owned=lambda p: True, installed=installed))
+            self.assertFalse(system_ops.running_kernel_replaced(modules, '7.2.8-9-omarchy', owned=lambda p: False, installed=lambda n: False))
+
     def test_no_update_when_protected(self):
-        with patch.object(system_ops, 'check', return_value={'state':'protected'}), patch.object(system_ops.subprocess, 'call') as install:
+        with patch.object(system_ops, 'check', return_value={'state':'protected'}), patch.object(system_ops, 'call_watching') as install:
             self.assertEqual(system_ops.update(), 1)
             install.assert_not_called()
 

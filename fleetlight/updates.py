@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from . import net
 from .config import validate
 from .monitor import python_command, run_process
-from .update_job import version, history_report, visible_installs
+from .update_job import ERRORS, version, history_report, visible_installs
 
 net.install()
 ROOT = Path(__file__).parent
@@ -333,6 +333,46 @@ def auto_target_key(host, kind, checked):
         token = ",".join(str(item) for item in releases) if isinstance(releases, list) else str(releases)
         return (ident, kind, token or str(checked.get("detail") or "system"))
     return (ident, kind, str(checked.get("latest") or ""), str(checked.get("build") or ""))
+
+
+# Failures worth retrying: the network or a mirror, not the installer. Delays after the 1st, 2nd and 3rd try.
+TRANSIENT_FAILURES = frozenset(ERRORS[code] for code in ("network-failed", "refresh-failed", "feed-failed", "download-failed"))
+AUTO_RETRY_DELAYS = (1800, 7200, 21600)
+
+
+def record_auto_result(attempted, retries, key, state, phase, now=None):
+    """Remember a finished automatic job: transient failures wait and retry, everything else is not repeated."""
+    key = tuple(key)
+    now = time.time() if now is None else now
+    if state == "failed" and phase in TRANSIENT_FAILURES:
+        tries = retries.get(key, {}).get("tries", 0)
+        if tries < len(AUTO_RETRY_DELAYS):
+            retries[key] = {"tries": tries + 1, "after": now + AUTO_RETRY_DELAYS[tries]}
+            return
+    retries.pop(key, None)
+    attempted.add(key)
+
+
+def auto_skipped(attempted, retries, now=None):
+    """Keys the automatic queue leaves alone right now."""
+    now = time.time() if now is None else now
+    return set(attempted) | {key for key, item in retries.items() if item.get("after", 0) > now}
+
+
+def packages_changed_since_check(snapshots, checks, now=None, settle=120):
+    """Hosts whose last package transaction (settled for `settle` seconds) came after their system update check,
+    e.g. a manual omarchy-update, so the saved verdict is stale."""
+    now = time.time() if now is None else now
+    stale = []
+    for ident, snapshot in snapshots.items():
+        activity = snapshot.get("package_activity") if isinstance(snapshot, dict) else None
+        at = activity.get("at") if isinstance(activity, dict) else None
+        checked = (checks.get(ident) or {}).get("system") if isinstance(checks.get(ident), dict) else None
+        if not isinstance(at, (int, float)) or not isinstance(checked, dict) or snapshot.get("status") != "online":
+            continue
+        if checked.get("checked_at", 0) < at <= now - settle:
+            stale.append(ident)
+    return stale
 
 
 def next_auto_batch(hosts, snapshots, checks, attempted=(), now=None):

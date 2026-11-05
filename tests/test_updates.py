@@ -15,6 +15,33 @@ from fleetlight.monitor import issues, linux_update_issues
 
 
 class UpdateTests(unittest.TestCase):
+    def test_transient_auto_failures_retry_with_backoff_then_stop(self):
+        attempted, retries, key = set(), {}, ("tb", "system", "0.0.0", "omarchy 1 -> 2")
+        network = update_job.ERRORS["network-failed"]
+        for tries, delay in enumerate(updates.AUTO_RETRY_DELAYS, 1):
+            updates.record_auto_result(attempted, retries, list(key), "failed", network, now=1000)
+            self.assertEqual(retries[key], {"tries": tries, "after": 1000 + delay})
+            self.assertIn(key, updates.auto_skipped(attempted, retries, now=1000))
+            self.assertNotIn(key, updates.auto_skipped(attempted, retries, now=1000 + delay))
+        updates.record_auto_result(attempted, retries, key, "failed", network, now=1000)
+        self.assertEqual((attempted, retries), ({key}, {}))
+
+    def test_installer_failures_and_successes_are_not_retried(self):
+        attempted, retries = set(), {("a",): {"tries": 1, "after": 0}}
+        updates.record_auto_result(attempted, retries, ["a"], "failed", update_job.ERRORS["install-failed"], now=0)
+        updates.record_auto_result(attempted, retries, ["b"], "succeeded", "System packages verified", now=0)
+        self.assertEqual((attempted, retries), ({("a",), ("b",)}, {}))
+
+    def test_package_change_after_the_check_marks_it_stale(self):
+        snapshots = {"tb": {"status": "online", "package_activity": {"at": 2000}},
+                     "mini": {"status": "online"},
+                     "off": {"status": "offline", "package_activity": {"at": 2000}},
+                     "done": {"status": "online", "package_activity": {"at": 2000}}}
+        checks = {"tb": {"system": {"checked_at": 1500}}, "off": {"system": {"checked_at": 1500}},
+                  "done": {"system": {"checked_at": 2100}}}
+        self.assertEqual(updates.packages_changed_since_check(snapshots, checks, now=2200), ["tb"])
+        self.assertEqual(updates.packages_changed_since_check(snapshots, checks, now=2050), [])  # still settling
+
     def test_batch_filters_and_freezes_reviewed_releases(self):
         hosts = [{"id": str(i), "name": "Host " + str(i), "local": True} for i in range(5)]
         snapshots = {h["id"]: {"status": "online"} for h in hosts}

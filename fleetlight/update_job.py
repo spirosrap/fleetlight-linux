@@ -34,6 +34,7 @@ ERRORS = {
     "install-failed": "The package manager reported a failure. Inspect the update log before retrying.",
     "feed-failed": "The official release feed could not be fetched.",
     "refresh-failed": "Package repository metadata could not be refreshed.",
+    "network-failed": "Package downloads failed (network or mirror problem). Automatic updates retry later.",
     "download-failed": "The application download failed.",
     "missing": "The application is no longer installed.",
 }

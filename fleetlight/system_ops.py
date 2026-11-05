@@ -34,6 +34,21 @@ def reboot_status():
     return status
 
 
+def running_kernel_replaced(modules=Path('/usr/lib/modules'), release=None, owned=None, installed=None):
+    """On Arch, the running kernel's modules directory either vanishes or, with kernel-modules-hook,
+    is kept as an unowned copy; both mean the package now holds a different kernel."""
+    directory = modules / (release or platform.release())
+    if not directory.exists():
+        return True
+    try:
+        pkgbase = (directory / 'pkgbase').read_text().strip()
+    except OSError:
+        return False  # not a packaged kernel (custom build): no verdict
+    owned = owned or (lambda path: run(['pacman', '-Qqo', str(path)]).returncode == 0)
+    installed = installed or (lambda name: run(['pacman', '-Qq', name]).returncode == 0)
+    return bool(pkgbase) and installed(pkgbase) and not owned(directory / 'vmlinuz')
+
+
 def reboot_requirement():
     marker = Path.home() / '.local/state/fleetlight/system-restart.json'
     try:
@@ -44,10 +59,8 @@ def reboot_requirement():
         pass
     if Path('/run/reboot-required').exists():
         return {'required': True, 'reason': 'The operating system requests a restart'}
-    # On Arch, a replaced running kernel loses its modules directory.
-    if shutil.which('pacman') and Path('/usr/lib/modules').is_dir():
-        if not (Path('/usr/lib/modules') / platform.release()).exists():
-            return {'required': True, 'reason': 'The running kernel was replaced'}
+    if shutil.which('pacman') and Path('/usr/lib/modules').is_dir() and running_kernel_replaced():
+        return {'required': True, 'reason': 'The running kernel was replaced'}
     if shutil.which('needs-restarting'):
         result = run(['needs-restarting', '-r'])
         if result.returncode == 1:
@@ -318,6 +331,25 @@ def check():
     return result
 
 
+# Download and mirror failures from pacman, apt and dnf: the update can simply be retried later.
+NETWORK_FAILURE = re.compile(
+    r"failed retrieving file|failed to synchronize all databases|Operation too slow|Could not resolve host"
+    r"|Connection timed out|Failed to connect to|Temporary failure resolving|Could not connect to|Failed to fetch"
+    r"|Curl error|Cannot download", re.I)
+
+
+def call_watching(argv, env=None):
+    """Run an installer with its output passed through unchanged; also report whether it hit a network failure."""
+    sys.stdout.flush()
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+    network = False
+    for raw in iter(process.stdout.readline, b''):
+        sys.stdout.buffer.write(raw)
+        sys.stdout.buffer.flush()
+        network = network or bool(NETWORK_FAILURE.search(raw.decode('utf-8', 'replace')))
+    return process.wait(), network
+
+
 def omarchy_env():
     env = dict(os.environ, LC_ALL='C', OMARCHY_UPDATE_LOGGED='1')
     env.setdefault('OMARCHY_PATH', '/usr/share/omarchy')
@@ -345,14 +377,14 @@ def update():
                 if run(['sudo', '-n', 'true']).returncode != 0:
                     print('UPDATE:permission-required\nVERIFY:failed')
                     return 1
-                code = subprocess.call(['omarchy-update', '-y'], env=omarchy_env())
+                code, network = call_watching(['omarchy-update', '-y'], env=omarchy_env())
             else:
                 commands = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
                             'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'full-upgrade'],
                             'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}
-                code = subprocess.call(commands[checked['manager']])
+                code, network = call_watching(commands[checked['manager']])
             if code != 0:
-                print('UPDATE:install-failed\nVERIFY:failed')
+                print('UPDATE:' + ('network-failed' if network else 'install-failed') + '\nVERIFY:failed')
                 return 1
         if sidecars:
             print('PHASE:Installing snap and Flatpak updates', flush=True)
