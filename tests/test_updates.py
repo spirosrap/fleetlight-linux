@@ -364,6 +364,43 @@ Unpacking hello (1.0)…
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('UPDATE:current', result.stdout)
 
+    def test_cli_mise_retries_directly_when_versions_host_lags(self):
+        script = Path(updates.ROOT / 'updaters/cli.sh').read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            shims = Path(directory) / 'mise/shims'
+            shims.mkdir(parents=True)
+            installed = Path(directory) / 'installed'
+            installed.write_text('1.2.2\n')
+            codex = shims / 'codex'
+            codex.write_text(f'#!/bin/sh\necho codex-cli $(cat {installed})\n')
+            codex.chmod(0o700)
+            mise = shims / 'mise'
+            mise.write_text('#!/bin/sh\n'
+                            '[ "$1" = reshim ] && exit 0\n'
+                            '[ "$MISE_USE_VERSIONS_HOST" = false ] || exit 1\n'
+                            f'echo 1.2.3 > {installed}\n')
+            mise.chmod(0o700)
+            env = dict(os.environ, PATH=str(shims) + os.pathsep + os.environ['PATH'], SHELL='/bin/sh', FLEETLIGHT_EXPECTED_VERSION='1.2.3')
+            result = subprocess.run(['/bin/sh', '-c', script], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('directly from GitHub', result.stdout)
+            self.assertIn('ACTIVE_VERSION:1.2.3', result.stdout)
+            self.assertIn('UPDATE:ok', result.stdout)
+
+    def test_cli_mise_failing_both_ways_is_a_transient_failure(self):
+        script = Path(updates.ROOT / 'updaters/cli.sh').read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            shims = Path(directory) / 'mise/shims'
+            shims.mkdir(parents=True)
+            for name, body in (('codex', 'echo codex-cli 1.2.2'), ('mise', 'exit 1')):
+                (shims / name).write_text(f'#!/bin/sh\n{body}\n')
+                (shims / name).chmod(0o700)
+            env = dict(os.environ, PATH=str(shims) + os.pathsep + os.environ['PATH'], SHELL='/bin/sh', FLEETLIGHT_EXPECTED_VERSION='1.2.3')
+            result = subprocess.run(['/bin/sh', '-c', script], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn('UPDATE:download-failed', result.stdout)
+            self.assertIn(update_job.ERRORS['download-failed'], updates.TRANSIENT_FAILURES)
+
     def test_standalone_update_pins_the_checked_release(self):
         script = Path(updates.ROOT / 'updaters/cli.sh').read_text()
         self.assertIn('CODEX_RELEASE="$target_version"', script)

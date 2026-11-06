@@ -46,6 +46,13 @@ case "$mode" in
   mise)
     "$shell_bin" -ic "MISE_MINIMUM_RELEASE_AGE=0 mise use --global --yes claude@$target_version && mise reshim"
     status=$?
+    if [ "$status" -ne 0 ]; then
+      # mise's versions host can lag a new GitHub release by hours and answers 404 for it.
+      printf 'PHASE:Installing Claude CLI using mise, directly from GitHub\n'
+      "$shell_bin" -ic "MISE_USE_VERSIONS_HOST=false MISE_MINIMUM_RELEASE_AGE=0 mise use --global --yes claude@$target_version && mise reshim" \
+        || { printf 'UPDATE:download-failed\nVERIFY:failed\n'; exit 1; } # Automatic updates retry this later.
+      status=0
+    fi
     ;;
   npm)
     "$shell_bin" -lc "npm install --global @anthropic-ai/claude-code@$target_version --registry=https://registry.npmjs.org"

@@ -20,6 +20,10 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.6
+
+- Codex and Claude CLI updates on mise installations no longer fail while mise's versions host lags a new GitHub release. When mise can't find the release that way, the update retries directly from GitHub. If that fails too, automatic updates try again later instead of waiting for Fleetlight to restart.
+
 ## Version 0.8.5
 
 - A restart no longer sits on "Updating" until the computer is back, blocking every check and every other restart in the meantime. Scheduling a restart makes the computer refuse new SSH logins (`/run/nologin`), so the receipt now comes back on the connection that requested it.
