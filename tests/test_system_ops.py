@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
-from fleetlight import system_ops, update_job
+from fleetlight import system_ops, update_job, updates
 
 
 def result(code=0, output=''):
@@ -267,7 +267,7 @@ class SystemTests(unittest.TestCase):
         checked = {'state': 'available', 'packages': ['omarchy'], 'manager': 'omarchy'}
         with patch.object(system_ops, 'check', return_value=checked), \
                 patch.object(system_ops, 'run', return_value=result()), \
-                patch.object(system_ops, 'call_watching', return_value=(1, True)), \
+                patch.object(system_ops, 'call_watching', return_value=(1, 'network')), \
                 patch('builtins.print') as printed:
             self.assertEqual(system_ops.update(), 1)
         self.assertIn('UPDATE:network-failed', ' '.join(str(c.args[0]) for c in printed.call_args_list))
@@ -275,7 +275,7 @@ class SystemTests(unittest.TestCase):
                          update_job.ERRORS['network-failed'])
         with patch.object(system_ops, 'check', return_value=checked), \
                 patch.object(system_ops, 'run', return_value=result()), \
-                patch.object(system_ops, 'call_watching', return_value=(1, False)), \
+                patch.object(system_ops, 'call_watching', return_value=(1, '')), \
                 patch('builtins.print') as printed:
             self.assertEqual(system_ops.update(), 1)
         self.assertIn('UPDATE:install-failed', ' '.join(str(c.args[0]) for c in printed.call_args_list))
@@ -287,10 +287,46 @@ class SystemTests(unittest.TestCase):
         script = "print('ok'); print(\"error: failed retrieving file 'omarchy.db' : Operation too slow\"); raise SystemExit(1)"
         with patch.object(system_ops.sys, 'stdout', fake):
             code, network = system_ops.call_watching([sys.executable, '-c', script])
-        self.assertEqual((code, network), (1, True))
+        self.assertEqual((code, network), (1, 'network'))
         self.assertIn(b'failed retrieving file', buffer.getvalue())
         with patch.object(system_ops.sys, 'stdout', SimpleNamespace(buffer=io.BytesIO(), flush=lambda: None)):
-            self.assertEqual(system_ops.call_watching([sys.executable, '-c', "print('error: conflicting files')"]), (0, False))
+            self.assertEqual(system_ops.call_watching([sys.executable, '-c', "print('error: conflicting files')"]), (0, ''))
+
+    def test_call_watching_spots_a_download_that_fails_its_checksum(self):
+        import io, sys
+        corrupt = ("print(':: File /var/cache/pacman/pkg/yt-dlp-2026.10.26-1-any.pkg.tar.zst is corrupted "
+                   "(invalid or corrupted package (checksum)).'); raise SystemExit(1)")
+        stalled = corrupt.replace("raise", "print('error: failed retrieving file'); raise")
+        with patch.object(system_ops.sys, 'stdout', SimpleNamespace(buffer=io.BytesIO(), flush=lambda: None)):
+            self.assertEqual(system_ops.call_watching([sys.executable, '-c', corrupt]), (1, 'corrupt'))
+            # A mirror that also stalls is left to the slower network retry.
+            self.assertEqual(system_ops.call_watching([sys.executable, '-c', stalled]), (1, 'network'))
+
+    def test_corrupted_download_is_fetched_again_once_then_reported_as_retryable(self):
+        checked = {'state': 'available', 'packages': ['yt-dlp'], 'manager': 'omarchy'}
+        verified = {'state': 'current', 'packages': [], 'manager': 'omarchy', 'restart': {'required': False}}
+        with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
+                patch.object(system_ops, 'run', return_value=result()), \
+                patch.object(system_ops, 'call_watching', side_effect=[(1, 'corrupt'), (0, '')]) as install:
+            self.assertEqual(system_ops.update(), 0)
+        self.assertEqual(install.call_count, 2)
+        self.assertEqual(install.call_args_list[0], install.call_args_list[1])
+        with patch.object(system_ops, 'check', return_value=checked), \
+                patch.object(system_ops, 'run', return_value=result()), \
+                patch.object(system_ops, 'call_watching', return_value=(1, 'corrupt')) as install, \
+                patch('builtins.print') as printed:
+            self.assertEqual(system_ops.update(), 1)
+        self.assertEqual(install.call_count, 2)
+        self.assertIn('UPDATE:package-corrupted', ' '.join(str(c.args[0]) for c in printed.call_args_list))
+        phase = update_job.parse_result('system', '', '', 1, ['UPDATE:package-corrupted', 'VERIFY:failed'])[1]
+        self.assertEqual(phase, update_job.ERRORS['package-corrupted'])
+        self.assertIn(phase, updates.TRANSIENT_FAILURES)
+        for failure in ('network', ''):
+            with patch.object(system_ops, 'check', return_value=checked), \
+                    patch.object(system_ops, 'run', return_value=result()), \
+                    patch.object(system_ops, 'call_watching', return_value=(1, failure)) as install:
+                self.assertEqual(system_ops.update(), 1)
+            self.assertEqual(install.call_count, 1)
 
     def test_kernel_kept_by_modules_hook_still_counts_as_replaced(self):
         import tempfile

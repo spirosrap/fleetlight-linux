@@ -35,6 +35,7 @@ ERRORS = {
     "feed-failed": "The official release feed could not be fetched.",
     "refresh-failed": "Package repository metadata could not be refreshed.",
     "network-failed": "Package downloads failed (network or mirror problem). Automatic updates retry later.",
+    "package-corrupted": "A downloaded package failed its integrity check, also on a second download. Automatic updates retry later.",
     "download-failed": "The application download failed.",
     "missing": "The application is no longer installed.",
 }

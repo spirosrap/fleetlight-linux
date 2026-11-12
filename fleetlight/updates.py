@@ -335,8 +335,9 @@ def auto_target_key(host, kind, checked):
     return (ident, kind, str(checked.get("latest") or ""), str(checked.get("build") or ""))
 
 
-# Failures worth retrying: the network or a mirror, not the installer. Delays after the 1st, 2nd and 3rd try.
-TRANSIENT_FAILURES = frozenset(ERRORS[code] for code in ("network-failed", "refresh-failed", "feed-failed", "download-failed"))
+# Failures worth retrying: the network, a mirror or a bad download, not the installer. Delays after the 1st, 2nd and 3rd try.
+TRANSIENT_FAILURES = frozenset(ERRORS[code] for code in (
+    "network-failed", "refresh-failed", "feed-failed", "download-failed", "package-corrupted"))
 AUTO_RETRY_DELAYS = (1800, 7200, 21600)
 
 

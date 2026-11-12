@@ -338,16 +338,40 @@ NETWORK_FAILURE = re.compile(
     r"|Curl error|Cannot download", re.I)
 
 
+# A downloaded package that fails its checksum or signature: usually the repository replaced the file (a rebuild
+# under the same version, a mirror in mid-sync). pacman deletes the bad file, so running the installer again fetches a fresh copy.
+CORRUPT_DOWNLOAD = re.compile(r"invalid or corrupted (package|database)|Hash Sum mismatch", re.I)
+
+
 def call_watching(argv, env=None):
-    """Run an installer with its output passed through unchanged; also report whether it hit a network failure."""
+    """Run an installer with its output passed through unchanged; also report a retryable failure it hit:
+    'network' (download or mirror), 'corrupt' (a download failed its integrity check) or '' for neither."""
     sys.stdout.flush()
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-    network = False
-    for raw in iter(process.stdout.readline, b''):
-        sys.stdout.buffer.write(raw)
-        sys.stdout.buffer.flush()
-        network = network or bool(NETWORK_FAILURE.search(raw.decode('utf-8', 'replace')))
-    return process.wait(), network
+    network = corrupt = False
+    with process.stdout:
+        for raw in iter(process.stdout.readline, b''):
+            sys.stdout.buffer.write(raw)
+            sys.stdout.buffer.flush()
+            line = raw.decode('utf-8', 'replace')
+            network = network or bool(NETWORK_FAILURE.search(line))
+            corrupt = corrupt or bool(CORRUPT_DOWNLOAD.search(line))
+    return process.wait(), 'network' if network else 'corrupt' if corrupt else ''
+
+
+def install_distribution(manager):
+    """Run the distribution's upgrade; a corrupted download gets one immediate second run, which re-downloads it."""
+    if manager == 'omarchy':
+        argv, options = ['omarchy-update', '-y'], {'env': omarchy_env()}
+    else:
+        argv, options = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
+                         'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'full-upgrade'],
+                         'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}[manager], {}
+    code, failure = call_watching(argv, **options)
+    if code != 0 and failure == 'corrupt':
+        print('PHASE:Downloading a corrupted package again', flush=True)
+        code, failure = call_watching(argv, **options)
+    return code, failure
 
 
 def omarchy_env():
@@ -373,18 +397,12 @@ def update():
         distro = [package for package in checked['packages'] if not package.startswith(('snap:', 'flatpak:'))]
         sidecars = [package for package in checked['packages'] if package.startswith(('snap:', 'flatpak:'))]
         if distro:
-            if checked['manager'] == 'omarchy':
-                if run(['sudo', '-n', 'true']).returncode != 0:
-                    print('UPDATE:permission-required\nVERIFY:failed')
-                    return 1
-                code, network = call_watching(['omarchy-update', '-y'], env=omarchy_env())
-            else:
-                commands = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
-                            'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'full-upgrade'],
-                            'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}
-                code, network = call_watching(commands[checked['manager']])
+            if checked['manager'] == 'omarchy' and run(['sudo', '-n', 'true']).returncode != 0:
+                print('UPDATE:permission-required\nVERIFY:failed')
+                return 1
+            code, failure = install_distribution(checked['manager'])
             if code != 0:
-                print('UPDATE:' + ('network-failed' if network else 'install-failed') + '\nVERIFY:failed')
+                print('UPDATE:' + {'network': 'network-failed', 'corrupt': 'package-corrupted'}.get(failure, 'install-failed') + '\nVERIFY:failed')
                 return 1
         if sidecars:
             print('PHASE:Installing snap and Flatpak updates', flush=True)
