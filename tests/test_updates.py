@@ -45,7 +45,7 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(updates.restart_unanswered({"kind": "system", "started_at": 1000}, silent, now=99999))
         self.assertFalse(updates.restart_unanswered({"kind": "restart"}, silent, now=99999))
 
-    def test_transient_auto_failures_retry_with_backoff_then_stop(self):
+    def test_transient_auto_failures_retry_with_backoff_then_daily(self):
         attempted, retries, key = set(), {}, ("tb", "system", "0.0.0", "omarchy 1 -> 2")
         network = update_job.ERRORS["network-failed"]
         for tries, delay in enumerate(updates.AUTO_RETRY_DELAYS, 1):
@@ -53,14 +53,29 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual(retries[key], {"tries": tries, "after": 1000 + delay})
             self.assertIn(key, updates.auto_skipped(attempted, retries, now=1000))
             self.assertNotIn(key, updates.auto_skipped(attempted, retries, now=1000 + delay))
+        # Past the listed delays the last one repeats: the update is never given up for good.
         updates.record_auto_result(attempted, retries, key, "failed", network, now=1000)
-        self.assertEqual((attempted, retries), ({key}, {}))
+        self.assertEqual(retries[key]["after"], 1000 + updates.AUTO_RETRY_DELAYS[-1])
+        self.assertEqual(attempted, set())
 
-    def test_installer_failures_and_successes_are_not_retried(self):
-        attempted, retries = set(), {("a",): {"tries": 1, "after": 0}}
-        updates.record_auto_result(attempted, retries, ["a"], "failed", update_job.ERRORS["install-failed"], now=0)
+    def test_installer_failures_retry_slowly_and_successes_are_not_repeated(self):
+        attempted, retries = set(), {("b",): {"tries": 2, "after": 0}}
+        failed = update_job.ERRORS["install-failed"]
+        updates.record_auto_result(attempted, retries, ["a"], "failed", failed, now=0)
+        self.assertEqual(retries[("a",)], {"tries": 1, "after": updates.AUTO_SLOW_RETRY_DELAYS[0]})
+        updates.record_auto_result(attempted, retries, ["a"], "failed", failed, now=0)
+        updates.record_auto_result(attempted, retries, ["a"], "failed", failed, now=0)
+        self.assertEqual(retries[("a",)], {"tries": 3, "after": updates.AUTO_SLOW_RETRY_DELAYS[-1]})
         updates.record_auto_result(attempted, retries, ["b"], "succeeded", "System packages verified", now=0)
-        self.assertEqual((attempted, retries), ({("a",), ("b",)}, {}))
+        self.assertEqual((attempted, set(retries)), ({("b",)}, {("a",)}))
+        # Another installer was running: soon, not in six hours.
+        updates.record_auto_result(attempted, retries, ["c"], "busy", "Another update is running", now=0)
+        self.assertEqual(retries[("c",)]["after"], updates.AUTO_RETRY_DELAYS[0])
+
+    def test_failures_only_a_person_can_fix_are_not_retried(self):
+        attempted, retries = set(), {}
+        updates.record_auto_result(attempted, retries, ["a"], "failed", update_job.ERRORS["rollback-failed"], now=0)
+        self.assertEqual((attempted, retries), ({("a",)}, {}))
 
     def test_package_change_after_the_check_marks_it_stale(self):
         snapshots = {"tb": {"status": "online", "package_activity": {"at": 2000}},

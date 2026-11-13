@@ -20,6 +20,12 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.8
+
+- An AUR package that can't be installed no longer fails the whole system update or leaves the computer on "needs attention". This happens on Omarchy when the AUR, which follows Arch, asks for a package that Omarchy's stable repositories don't carry yet (first seen with `python312` needing `openssl-3`). The check now looks up each pending AUR package's dependencies and holds back the ones nothing can supply. The computer's page lists them under Linux updates with the reason, and they are installed by themselves once the dependency arrives.
+- An AUR package that fails to build during an update is set aside and the update runs once more without it, so the other packages and Omarchy's boot check still complete. It is tried again after 1, 2, 4 and then every 7 days, or as soon as the AUR publishes a new version.
+- A failed automatic update is never abandoned until Fleetlight restarts. Network and download failures still retry after 30 minutes, 2 hours and 6 hours, then daily; other failures retry after 6 hours, then daily. Only failures a person has to fix (a modified ChatGPT installation, an unsupported installation, a failed rollback) are left alone.
+
 ## Version 0.8.7
 
 - A system update that fails because a downloaded package doesn't pass its integrity check (`invalid or corrupted package`, apt `Hash Sum mismatch`) runs the installer once more straight away. This happens when a repository republishes a package under the same version: pacman removes the bad file, so the second run downloads the new one. If that fails as well, automatic updates try again after 30 minutes, 2 hours and 6 hours instead of waiting for Fleetlight to restart.

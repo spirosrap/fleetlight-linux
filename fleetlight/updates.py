@@ -335,21 +335,29 @@ def auto_target_key(host, kind, checked):
     return (ident, kind, str(checked.get("latest") or ""), str(checked.get("build") or ""))
 
 
-# Failures worth retrying: the network, a mirror or a bad download, not the installer. Delays after the 1st, 2nd and 3rd try.
+# Failures that usually pass on the next try: the network, a mirror or a bad download, not the installer.
+# Delays after the 1st, 2nd and 3rd try; from then on once a day.
 TRANSIENT_FAILURES = frozenset(ERRORS[code] for code in (
     "network-failed", "refresh-failed", "feed-failed", "download-failed", "package-corrupted"))
-AUTO_RETRY_DELAYS = (1800, 7200, 21600)
+AUTO_RETRY_DELAYS = (1800, 7200, 21600, 86400)
+# Anything else the installer reported is tried again too, only far less often: every failure that once sat
+# on "needs attention" until Fleetlight was restarted turned out to pass on a later run.
+AUTO_SLOW_RETRY_DELAYS = (21600, 86400)
+# Only a person can fix these; running the job again changes nothing.
+MANUAL_FAILURES = frozenset(ERRORS[code] for code in (
+    "installation-invalid", "unsupported-installation", "unsupported-architecture", "rollback-failed"))
 
 
 def record_auto_result(attempted, retries, key, state, phase, now=None):
-    """Remember a finished automatic job: transient failures wait and retry, everything else is not repeated."""
+    """Remember a finished automatic job: a success is not repeated, a failure waits and is tried again,
+    with the last delay repeating for as long as it keeps failing."""
     key = tuple(key)
     now = time.time() if now is None else now
-    if state == "failed" and phase in TRANSIENT_FAILURES:
+    if state != "succeeded" and phase not in MANUAL_FAILURES:
+        delays = AUTO_RETRY_DELAYS if state != "failed" or phase in TRANSIENT_FAILURES else AUTO_SLOW_RETRY_DELAYS
         tries = retries.get(key, {}).get("tries", 0)
-        if tries < len(AUTO_RETRY_DELAYS):
-            retries[key] = {"tries": tries + 1, "after": now + AUTO_RETRY_DELAYS[tries]}
-            return
+        retries[key] = {"tries": tries + 1, "after": now + delays[min(tries, len(delays) - 1)]}
+        return
     retries.pop(key, None)
     attempted.add(key)
 
@@ -459,6 +467,10 @@ def check_system(host):
         system = {"state": value["state"], "latest": "0.0.0", "checked_at": time.time(),
                   "detail": value.get("detail", ""), "provider": value.get("manager"), "packages": value.get("packages", []),
                   "changes": [str(change)[:200] for change in value.get("changes") or [] if isinstance(change, str)][:200]}
+        held = [{key: str(item.get(key) or "")[:200] for key in ("name", "change", "reason")}
+                for item in value.get("held") or [] if isinstance(item, dict) and item.get("name")][:20]
+        if held:
+            system["held"] = held
         restart = value.get("restart", {})
         reboot = {"state": "available" if restart.get("required") is True else "unknown" if restart.get("required") is None else "current",
                   "latest": "0.0.0", "checked_at": time.time(), "detail": restart.get("reason", "Restart requirement unknown")}

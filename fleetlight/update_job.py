@@ -134,7 +134,9 @@ def installation_changes(receipt):
             found.insert(0, version_line)
     elif after and not found:
         found.append(kind + " " + after)
-    return found[:80]
+    # Packages the update set aside (HELD:name reason) were listed as pending but not installed.
+    held = {line[5:].split()[0] for line in log.splitlines() if line.startswith("HELD:") and line[5:].split()}
+    return [item for item in found if item.split()[0] not in held][:80]
 
 
 def leading_version(text):
@@ -299,6 +301,9 @@ def parse_result(kind, target, build, code, lines):
         marker = "FLEETLIGHT_SYSTEM_UPDATE" if kind == "system" else "FLEETLIGHT_RESTART"
         if code == 0 and marker in lines and "VERIFY:ok" in lines:
             detail = "Restart scheduled in one minute; return not yet verified" if kind == "restart" else "System packages verified"
+            held = [line[5:].split()[0] for line in lines if line.startswith("HELD:") and line[5:].split()]
+            if held:
+                detail += " · held back: " + ", ".join(held[:5])
             if "REBOOT:required" in lines:
                 detail += " · Restart required"
             return "succeeded", detail, ""
@@ -356,7 +361,7 @@ def worker(directory, lock_fd):
                     item = line.split(":", 1)[1].strip()[:200]
                     if item and item not in changes and len(changes) < 80:
                         changes.append(item)
-                if line.startswith(("FLEETLIGHT_", "ACTIVE_VERSION:", "AFTER_VERSION:", "AFTER_BUILD:", "BEFORE_VERSION:", "VERIFY:", "UPDATE:", "RELAUNCH:", "REBOOT:", "CHANGED:")):
+                if line.startswith(("FLEETLIGHT_", "ACTIVE_VERSION:", "AFTER_VERSION:", "AFTER_BUILD:", "BEFORE_VERSION:", "VERIFY:", "UPDATE:", "RELAUNCH:", "REBOOT:", "CHANGED:", "HELD:")):
                     lines.append(line)
                 if line.startswith("PHASE:"):
                     state["phase"] = line[6:][:200]

@@ -89,7 +89,8 @@ class ParallelUpdates(unittest.TestCase):
         self.finish(c, next(iter(c.active_jobs)), 'failed')
         self.assertEqual(len(c.active_jobs), 3)
         self.assertEqual(self.thread_mock.call_count, 4)
-        self.assertEqual(len(c.auto_attempted), 1)
+        # The failed update is not abandoned: it waits for a later try.
+        self.assertEqual((len(c.auto_attempted), len(c.auto_retries)), (0, 1))
 
     def test_succeeded_automatic_job_is_not_retried_for_the_same_release(self):
         c = controller(self.path, [candidate(0)])

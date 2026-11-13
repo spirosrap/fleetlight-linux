@@ -1,3 +1,6 @@
+from pathlib import Path
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -354,6 +357,157 @@ class SystemTests(unittest.TestCase):
         with patch.object(system_ops, 'reboot_status', return_value={'required':True}), patch.object(system_ops, 'run', return_value=result()) as run:
             self.assertEqual(system_ops.restart(), 0)
             run.assert_called_once_with(['sudo','-n','shutdown','-r','+1'])
+
+    # --- AUR packages that cannot be installed --------------------------------------------------
+
+    YAY_MISSING_DEPENDENCY = (
+        ":: Searching AUR for updates...\n"
+        " -> No AUR package found for openssl-3 (required by: python312)\n"
+        ":: 1 package to upgrade/install.\n"
+        "1  aur/python312  3.12.16-1 -> 3.12.16-2 [4m]\n"
+        " -> could not find all required packages: openssl-3 \n")
+
+    def holds_file(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = patch.object(system_ops, 'HELD_FILE', Path(directory.name) / 'held-packages.json')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_yay_failures_name_the_package_and_the_reason(self):
+        self.assertEqual(system_ops.aur_failures(self.YAY_MISSING_DEPENDENCY),
+                         {'python312': 'needs openssl-3, which the repositories here do not have yet'})
+        build = (" -> error making: zoom-bin-exit status 4\n"
+                 " -> Failed to install the following packages. Manual intervention is required:\n"
+                 "zoom-bin - exit status 4\n")
+        self.assertEqual(system_ops.aur_failures(build), {'zoom-bin': 'did not build'})
+        self.assertEqual(system_ops.aur_failures(" -> error downloading sources: \x1b[36mfoo\x1b[0m \n\t context: exit status 1"),
+                         {'foo': 'its sources could not be downloaded'})
+        self.assertEqual(system_ops.aur_failures("error: failed to commit transaction (conflicting files)"), {})
+
+    def test_aur_package_whose_dependency_no_repository_has_is_held_back(self):
+        self.holds_file()
+        rpc = {('info', 'arg%5B%5D=python312&arg%5B%5D=yay-pkg'): [
+                   {'Name': 'python312', 'Depends': ['bzip2', 'openssl-3'], 'MakeDepends': ['tk']},
+                   {'Name': 'yay-pkg', 'Depends': ['glibc', 'aur-only-lib']}],
+               ('info', 'arg%5B%5D=aur-only-lib&arg%5B%5D=openssl-3'): [{'Name': 'aur-only-lib'}],
+               ('search/openssl-3', 'by=provides'): []}
+        runs = []
+
+        def run(args, env=None):
+            runs.append(args)
+            if args[:2] == ['pacman', '-T']:
+                return result(127, 'openssl-3\naur-only-lib\ntk\n')
+            return result(0 if args[-1] == 'tk' else 1)  # only tk is in a repository
+        lines = ['python312 3.12.16-1 -> 3.12.16-2', 'yay-pkg 1 -> 2']
+        with patch.object(system_ops, 'aur_rpc', side_effect=lambda path, query='': rpc[(path, query)]), \
+                patch.object(system_ops, 'run', side_effect=run):
+            installable, held = system_ops.held_updates(lines, '/tmp/fresh-db')
+        self.assertEqual(installable, ['yay-pkg 1 -> 2'])
+        self.assertEqual(held, [{'name': 'python312', 'change': 'python312 3.12.16-1 -> 3.12.16-2',
+                                 'reason': 'needs openssl-3, which the repositories here do not have yet'}])
+        self.assertIn(['pacman', '--dbpath', '/tmp/fresh-db', '-Sddp', '--print-format', '%n', '--noconfirm', 'openssl-3'], runs)
+
+    def test_unreachable_aur_holds_nothing_back(self):
+        self.holds_file()
+        with patch.object(system_ops, 'aur_rpc', return_value=None), patch.object(system_ops, 'run') as run:
+            self.assertEqual(system_ops.held_updates(['python312 1 -> 2']), (['python312 1 -> 2'], []))
+        run.assert_not_called()
+
+    def test_failed_aur_build_is_set_aside_longer_each_time_and_released_by_a_new_version(self):
+        self.holds_file()
+        checked = {'aur': ['zoom-bin'], 'changes': ['linux 1 -> 2', 'zoom-bin 6.1-1 -> 6.2-1']}
+        blocked = {'zoom-bin': 'did not build', 'not-pending': 'did not build'}
+        self.assertEqual(system_ops.hold_failed(blocked, checked, now=1000), ['zoom-bin'])
+        self.assertEqual(system_ops.hold_failed({'linux': 'did not build'}, checked, now=1000), [])
+        with patch.object(system_ops, 'missing_dependencies', return_value={}):
+            line = 'zoom-bin 6.1-1 -> 6.2-1'
+            self.assertEqual(system_ops.held_updates([line], now=1001),
+                             ([], [{'name': 'zoom-bin', 'change': line, 'reason': 'did not build'}]))
+            # The wait is over: it is offered again, and a second failure waits twice as long.
+            self.assertEqual(system_ops.held_updates([line], now=1000 + system_ops.HOLD_DELAYS[0]), ([line], []))
+            system_ops.hold_failed(blocked, checked, now=5000)
+            self.assertEqual(system_ops.load_holds()['zoom-bin']['after'], 5000 + system_ops.HOLD_DELAYS[1])
+            # A new AUR version is tried straight away.
+            newer = 'zoom-bin 6.1-1 -> 6.3-1'
+            self.assertEqual(system_ops.held_updates([newer], now=5001), ([newer], []))
+            self.assertEqual(system_ops.load_holds(), {})
+
+    def test_check_reports_held_packages_without_calling_them_updates(self):
+        held = [{'name': 'python312', 'change': 'python312 1 -> 2', 'reason': 'needs openssl-3'}]
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=lambda name: '/bin/' + name if name in ('omarchy-update', 'pacman', 'checkupdates') else None), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', return_value=result(2)), \
+                patch.object(system_ops, 'aur_updates', return_value=['python312 1 -> 2', 'yay-pkg 1 -> 2']), \
+                patch.object(system_ops, 'held_updates', return_value=(['yay-pkg 1 -> 2'], held)), \
+                patch.object(system_ops, 'omarchy_extra_updates', return_value=([], [])):
+            checked = system_ops.check()
+            self.assertEqual((checked['state'], checked['packages'], checked['aur'], checked['held']),
+                             ('available', ['yay-pkg'], ['yay-pkg'], held))
+            self.assertEqual(checked['detail'], '1 package updates · 1 held back')
+        with patch.object(system_ops.platform, 'system', return_value='Linux'), \
+                patch.object(system_ops.shutil, 'which', side_effect=lambda name: '/bin/' + name if name in ('omarchy-update', 'pacman', 'checkupdates') else None), \
+                patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
+                patch.object(system_ops, 'run', return_value=result(2)), \
+                patch.object(system_ops, 'aur_updates', return_value=['python312 1 -> 2']), \
+                patch.object(system_ops, 'held_updates', return_value=([], held)), \
+                patch.object(system_ops, 'omarchy_extra_updates', return_value=([], [])):
+            self.assertEqual(system_ops.check()['state'], 'current')
+
+    def test_update_finishes_without_an_aur_package_that_fails_to_build(self):
+        self.holds_file()
+        checked = {'state': 'available', 'packages': ['linux', 'zoom-bin'], 'aur': ['zoom-bin'], 'manager': 'omarchy',
+                   'changes': ['linux 1 -> 2', 'zoom-bin 6.1-1 -> 6.2-1']}
+        verified = {'state': 'current', 'packages': [], 'manager': 'omarchy', 'restart': {'required': False},
+                    'held': [{'name': 'zoom-bin'}]}
+        environments = []
+
+        def install(argv, env=None, blocked=None):
+            environments.append(env['PATH'])
+            if blocked is not None:
+                blocked['zoom-bin'] = 'did not build'
+                return 1, ''
+            wrapper = Path(env['PATH'].split(':')[0]) / 'yay'
+            self.assertEqual(wrapper.read_text(), '#!/bin/sh\nexec /usr/bin/yay "$@" --ignore zoom-bin\n')
+            return 0, ''
+        with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
+                patch.object(system_ops, 'run', return_value=result()), \
+                patch.object(system_ops, 'state_directory', return_value=None), \
+                patch.object(system_ops.shutil, 'which', return_value='/usr/bin/yay'), \
+                patch.object(system_ops, 'call_watching', side_effect=install), \
+                patch('builtins.print') as printed:
+            self.assertEqual(system_ops.update(), 0)
+        output = [str(call.args[0]) for call in printed.call_args_list]
+        self.assertIn('HELD:zoom-bin did not build', output)
+        self.assertEqual(len(environments), 2)
+        self.assertEqual(system_ops.load_holds()['zoom-bin']['version'], '6.2-1')
+        lines = ['FLEETLIGHT_SYSTEM_UPDATE', 'CHANGED:linux 1 -> 2', 'CHANGED:zoom-bin 6.1-1 -> 6.2-1', 'HELD:zoom-bin did not build', 'VERIFY:ok']
+        self.assertEqual(update_job.parse_result('system', '0.0.0', '', 0, lines)[1], 'System packages verified · held back: zoom-bin')
+        self.assertEqual(update_job.installation_changes({'kind': 'system', 'log': '\n'.join(lines)}), ['linux 1 → 2'])
+
+    def test_update_skips_packages_the_check_already_holds_back(self):
+        checked = {'state': 'available', 'packages': ['linux'], 'aur': [], 'manager': 'omarchy',
+                   'held': [{'name': 'python312', 'change': 'python312 1 -> 2', 'reason': 'needs openssl-3'}]}
+        verified = dict(checked, state='current', packages=[], restart={'required': False})
+
+        def install(argv, env=None, blocked=None):
+            self.assertIn('--ignore python312', (Path(env['PATH'].split(':')[0]) / 'yay').read_text())
+            return 0, ''
+        with patch.object(system_ops, 'check', side_effect=[checked, verified]), \
+                patch.object(system_ops, 'run', return_value=result()), \
+                patch.object(system_ops, 'state_directory', return_value=None), \
+                patch.object(system_ops.shutil, 'which', return_value='/usr/bin/yay'), \
+                patch.object(system_ops, 'call_watching', side_effect=install) as installer:
+            self.assertEqual(system_ops.update(), 0)
+        installer.assert_called_once()
+
+    def test_call_watching_collects_the_aur_packages_a_failed_run_blames(self):
+        script = "import sys; sys.stdout.write(%r); sys.exit(1)" % self.YAY_MISSING_DEPENDENCY
+        blocked = {}
+        with patch.object(system_ops.sys, 'stdout'):
+            self.assertEqual(system_ops.call_watching([sys.executable, '-c', script], blocked=blocked), (1, ''))
+        self.assertEqual(list(blocked), ['python312'])
 
     def test_restart_receipt_does_not_claim_reboot_verified(self):
         status, detail, _ = update_job.parse_result('restart','0.0.0','',0,['FLEETLIGHT_RESTART','VERIFY:ok'])

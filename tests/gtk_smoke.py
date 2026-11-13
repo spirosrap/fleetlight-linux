@@ -177,6 +177,19 @@ def verify():
         refreshed.set_expanded(False)
         app.receive_updates("local", app.app_updates["local"])
         assert not find_history(app.content).get_expanded()
+        # A package the update check holds back is listed under Linux updates with its reason.
+        previous_system = app.app_updates["local"].get("system")
+        app.app_updates["local"]["system"] = {"state": "current", "detail": "0 package updates · 1 held back", "held": [
+            {"name": "python312", "change": "python312 3.12.16-1 -> 3.12.16-2", "reason": "needs openssl-3, which the repositories here do not have yet"}]}
+        app.render_detail()
+        held_row = find_widget(app.content, lambda w: isinstance(w, Adw.ActionRow) and "held back" in (w.get_title() or ""))
+        assert held_row is not None and held_row.get_title().startswith("python312 3.12.16-1 → 3.12.16-2")
+        assert held_row.get_subtitle().startswith("Needs openssl-3")
+        if previous_system is None:
+            del app.app_updates["local"]["system"]
+        else:
+            app.app_updates["local"]["system"] = previous_system
+        app.render_detail()
         # One choice for every computer: opening it here opens it on the next page too, and closing it there sticks.
         find_history(app.content).set_expanded(True)
         app.last_jobs["studio"] = dict(receipt)

@@ -1824,6 +1824,15 @@ class Fleetlight(Adw.Application):
                 status = checked_updates.get(kind, {})
                 self.detail_row(system_card, title, status.get("detail", "Checking…"), icon_name,
                                 "warning" if status.get("state") in ("available", "protected", "unknown") else "muted")
+                # Not a fault of this computer and nothing to do: the package is picked up once it can be installed.
+                for item in status.get("held") or [] if kind == "system" else []:
+                    change = str(item.get("change") or item.get("name") or "").replace(" -> ", " → ")
+                    reason = str(item.get("reason") or "It cannot be installed yet").rstrip(".")
+                    row = Adw.ActionRow(title=GLib.markup_escape_text(change + " · held back"),
+                                        subtitle=GLib.markup_escape_text(reason[:1].upper() + reason[1:] + ". Fleetlight installs it as soon as it can."))
+                    row.set_subtitle_lines(3)
+                    row.add_prefix(Gtk.Image.new_from_icon_name("media-playback-pause-symbolic"))
+                    attach(system_card, row)
         services = self.section("Services", "Units, launchd jobs, ports and web addresses checked on this computer")
         states = data.get("services", {}) if online else {}
         regressions = data.get("service_regressions") or {}
@@ -2687,7 +2696,7 @@ class Fleetlight(Adw.Application):
         looks.add(scheme)
         page.add(looks)
 
-        automatic = Adw.PreferencesGroup(title="Automatic updates", description="A failed computer is skipped and the same update is not retried until you restart Fleetlight or a different set of packages appears. Keep Fleetlight open.")
+        automatic = Adw.PreferencesGroup(title="Automatic updates", description="A failed update is tried again later: after 30 minutes, 2 hours and 6 hours when the network or a download was the cause, after 6 hours otherwise, then once a day. An AUR package that cannot be installed yet is held back so the rest still updates. Keep Fleetlight open.")
         auto_toggle = Adw.SwitchRow(title="Automatically install all available updates", subtitle="Codex CLI, Claude CLI, ChatGPT and Linux packages. Computers are never restarted automatically.")
         auto_toggle.set_active(initial["auto_updates"])
         automatic.add(auto_toggle)

@@ -4,12 +4,14 @@ import os
 from pathlib import Path
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -100,6 +102,143 @@ def aur_updates():
     if completed.returncode not in (0, 1):
         return []
     return [description for _, description in upgrade_lines(completed.stdout)]
+
+
+AUR_RPC = 'https://aur.archlinux.org/rpc/v5/'
+STATE = Path.home() / '.local/state/fleetlight'
+HELD_FILE = STATE / 'held-packages.json'
+# How long an AUR package that failed to build waits for its next try. A new AUR version is tried at once.
+HOLD_DELAYS = (86400, 2 * 86400, 4 * 86400, 7 * 86400)
+PACKAGE_NAME = r'[A-Za-z0-9@_+][A-Za-z0-9@._+-]*'
+
+
+def aur_rpc(path, query=''):
+    """Results of one AUR request; None when the AUR cannot be reached or answers nonsense."""
+    try:
+        request = urllib.request.Request(AUR_RPC + path + ('?' + query if query else ''), headers={'User-Agent': 'Fleetlight'})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode())
+    except (OSError, ValueError, urllib.error.URLError, TimeoutError):
+        return None
+    results = data.get('results') if isinstance(data, dict) else None
+    return results if isinstance(results, list) else None
+
+
+def missing_dependencies(names, dbpath=None):
+    """{AUR package: [dependencies that nothing can supply]} for packages about to be upgraded.
+
+    A dependency counts as available when it is installed, when a repository configured on this computer has
+    it (or something providing it), or when the AUR does. The usual cause of a gap: the AUR follows Arch,
+    while Omarchy's stable repositories trail it by days or weeks. Anything unknown counts as available,
+    so the installer still gets to decide."""
+    info = aur_rpc('info', urllib.parse.urlencode([('arg[]', name) for name in names]))
+    if not info:
+        return {}
+    wanted = {}
+    for item in info:
+        if isinstance(item, dict) and item.get('Name') in names:
+            wanted[item['Name']] = [dep for field in ('Depends', 'MakeDepends', 'CheckDepends')
+                                    for dep in item.get(field) or [] if isinstance(dep, str) and dep.strip()]
+    every = sorted({dep for deps in wanted.values() for dep in deps})
+    if not every:
+        return {}
+    # pacman -T prints the dependencies no installed package satisfies.
+    absent = [line.strip() for line in run(['pacman', '-T'] + every).stdout.splitlines() if line.strip() in every]
+    database = ['--dbpath', dbpath] if dbpath else []
+    absent = [dep for dep in absent
+              if run(['pacman'] + database + ['-Sddp', '--print-format', '%n', '--noconfirm', dep]).returncode != 0]
+    if not absent:
+        return {}
+    plain = {dep: re.split(r'[<>=]', dep)[0] for dep in absent}
+    found = aur_rpc('info', urllib.parse.urlencode([('arg[]', name) for name in sorted(set(plain.values()))]))
+    if found is None:
+        return {}
+    in_aur = {item.get('Name') for item in found if isinstance(item, dict)}
+    gone = []
+    for dep in absent:
+        if plain[dep] in in_aur:
+            continue
+        providers = aur_rpc('search/' + urllib.parse.quote(plain[dep], safe='') , 'by=provides')
+        if providers is None:
+            return {}
+        if not providers:
+            gone.append(dep)
+    return {name: [dep for dep in deps if dep in gone] for name, deps in wanted.items() if any(dep in gone for dep in deps)}
+
+
+def load_holds():
+    try:
+        data = json.loads(HELD_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {name: item for name, item in data.items() if isinstance(item, dict)} if isinstance(data, dict) else {}
+
+
+def save_holds(holds):
+    try:
+        HELD_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HELD_FILE.write_text(json.dumps(holds))
+    except OSError:
+        pass
+
+
+def held_updates(lines, dbpath=None, now=None):
+    """Split pending AUR upgrades ("name old -> new") into the installable ones and the ones held back.
+
+    Held back: a package whose dependencies nothing can supply yet (checked afresh every time, so it is
+    released the moment they appear), and a package that recently failed to build (see hold_failed).
+    One such package would otherwise fail every system update of this computer at its AUR step."""
+    now = time.time() if now is None else now
+    pending = {line.split()[0]: line for line in lines}
+    holds = load_holds()
+    # A hold belongs to one version of one pending package.
+    kept = {name: item for name, item in holds.items() if name in pending and item.get('version') == pending[name].split()[-1]}
+    if lines and kept != holds:
+        save_holds(kept)
+    held = [{'name': name, 'change': pending[name], 'reason': str(item.get('reason') or 'did not build')}
+            for name, item in kept.items() if item.get('after', 0) > now]
+    names = {item['name'] for item in held}
+    missing = missing_dependencies([name for name in pending if name not in names], dbpath) if len(pending) > len(names) else {}
+    for name, deps in missing.items():
+        held.append({'name': name, 'change': pending[name],
+                     'reason': 'needs ' + ', '.join(deps) + ', which the repositories here do not have yet'})
+        names.add(name)
+    return [line for name, line in pending.items() if name not in names], held
+
+
+AUR_FAILURE = re.compile(r'No AUR package found for|error making:|error downloading sources:|exit status \d+')
+
+
+def aur_failures(text):
+    """{package: reason} for the AUR packages yay names as the cause of a failed run."""
+    text = re.sub(r'\x1b\[[0-9;]*m', '', str(text or ''))
+    found = {}
+    for dep, owners in re.findall(r'No AUR package found for (\S+) \(required by: ([^)]+)\)', text):
+        for name in re.split(r'[,\s]+', owners.strip()):
+            if name:
+                found.setdefault(name, 'needs ' + dep + ', which the repositories here do not have yet')
+    for name in re.findall(r'error downloading sources: (' + PACKAGE_NAME + ')', text):
+        found.setdefault(name, 'its sources could not be downloaded')
+    for name in re.findall(r'(?:error making: |^\s*)(' + PACKAGE_NAME + r'?)\s?-\s?exit status \d+', text, re.M):
+        found.setdefault(name, 'did not build')
+    return found
+
+
+def hold_failed(blocked, checked, now=None):
+    """Set aside the pending AUR packages a failed run blamed, each for longer than the last time. Returns their names."""
+    now = time.time() if now is None else now
+    versions = {change.split()[0]: change.split()[-1] for change in checked.get('changes') or [] if change.split()}
+    names = [name for name in blocked if name in (checked.get('aur') or []) and name in versions]
+    if not names:
+        return []
+    holds = load_holds()
+    for name in names:
+        previous = holds.get(name, {})
+        tries = previous.get('tries', 0) if previous.get('version') == versions[name] else 0
+        holds[name] = {'version': versions[name], 'reason': blocked[name], 'tries': tries + 1,
+                       'after': now + HOLD_DELAYS[min(tries, len(HOLD_DELAYS) - 1)]}
+    save_holds(holds)
+    return names
 
 
 def cursor_platform():
@@ -217,6 +356,7 @@ def install_sidecars():
 def check():
     manager = linux_manager()
     result = {'manager': manager, 'packages': [], 'state': 'unknown', 'restart': reboot_status()}
+    held = []
     if platform.system() != 'Linux' or not manager:
         result.update(state='unsupported', detail='Unsupported operating system or package manager')
         return result
@@ -224,31 +364,39 @@ def check():
         if not shutil.which('checkupdates'):
             result['detail'] = 'Install pacman-contrib to check updates'
             return result
-        for attempt in range(3):
-            # A single mirror stall must not fail the check; retry with a clean database.
-            with tempfile.TemporaryDirectory(prefix='fleetlight-system-check-') as directory:
-                completed = run(['checkupdates', '--nocolor'], {'CHECKUPDATES_DB': directory + '/db'})
-            if completed.returncode in (0, 2) or attempt == 2:
-                break
-            time.sleep(3)
-        if completed.returncode not in (0, 2):
-            result['detail'] = 'Package metadata refresh failed'
-            return result
-        upgrades = upgrade_lines(completed.stdout)
-        changes = [description for _, description in upgrades]
-        packages = [name for name, _ in upgrades]
-        protected = bool(packages) and run(['pacman', '-Q', 'openai-codex-desktop']).returncode == 0 and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
-        if manager == 'omarchy' and not protected:
-            for line in aur_updates():
-                name = line.split()[0]
-                if name not in packages:
-                    packages.append(name)
-                    changes.append(line)
-            extra, extra_changes = omarchy_extra_updates()
-            for name, detail in zip(extra, extra_changes):
-                if name not in packages:
-                    packages.append(name)
-                    changes.append(detail)
+        scratch = tempfile.TemporaryDirectory(prefix='fleetlight-system-check-')
+        try:
+            for attempt in range(3):
+                # A single mirror stall must not fail the check; retry with a clean database.
+                database = scratch.name + '/db' + str(attempt)
+                completed = run(['checkupdates', '--nocolor'], {'CHECKUPDATES_DB': database})
+                if completed.returncode in (0, 2) or attempt == 2:
+                    break
+                time.sleep(3)
+            if completed.returncode not in (0, 2):
+                result['detail'] = 'Package metadata refresh failed'
+                return result
+            upgrades = upgrade_lines(completed.stdout)
+            changes = [description for _, description in upgrades]
+            packages = [name for name, _ in upgrades]
+            protected = bool(packages) and run(['pacman', '-Q', 'openai-codex-desktop']).returncode == 0 and run(['pacman', '-Qkk', 'openai-codex-desktop']).returncode != 0
+            if manager == 'omarchy' and not protected:
+                # The database checkupdates just downloaded knows about packages the system's own copy may not list yet.
+                installable, held = held_updates(aur_updates(), database)
+                result['aur'] = []
+                for line in installable:
+                    name = line.split()[0]
+                    if name not in packages:
+                        packages.append(name)
+                        changes.append(line)
+                        result['aur'].append(name)
+                extra, extra_changes = omarchy_extra_updates()
+                for name, detail in zip(extra, extra_changes):
+                    if name not in packages:
+                        packages.append(name)
+                        changes.append(detail)
+        finally:
+            scratch.cleanup()
     elif manager == 'apt':
         for attempt in range(3):
             # Keep this comfortably inside the controller's remote-check timeout.
@@ -328,6 +476,10 @@ def check():
             changes.append(detail)
     result.update(packages=packages, changes=changes, state='protected' if protected else 'available' if packages else 'current',
                   detail='ChatGPT has local modifications; review system upgrades manually' if protected else str(len(packages)) + ' package updates')
+    if held:
+        result['held'] = held
+        if not protected:
+            result['detail'] += ' · ' + str(len(held)) + ' held back'
     return result
 
 
@@ -343,12 +495,14 @@ NETWORK_FAILURE = re.compile(
 CORRUPT_DOWNLOAD = re.compile(r"invalid or corrupted (package|database)|Hash Sum mismatch", re.I)
 
 
-def call_watching(argv, env=None):
+def call_watching(argv, env=None, blocked=None):
     """Run an installer with its output passed through unchanged; also report a retryable failure it hit:
-    'network' (download or mirror), 'corrupt' (a download failed its integrity check) or '' for neither."""
+    'network' (download or mirror), 'corrupt' (a download failed its integrity check) or '' for neither.
+    `blocked`, when given, collects {AUR package: reason} for the packages yay could not build."""
     sys.stdout.flush()
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     network = corrupt = False
+    suspicious = []
     with process.stdout:
         for raw in iter(process.stdout.readline, b''):
             sys.stdout.buffer.write(raw)
@@ -356,17 +510,31 @@ def call_watching(argv, env=None):
             line = raw.decode('utf-8', 'replace')
             network = network or bool(NETWORK_FAILURE.search(line))
             corrupt = corrupt or bool(CORRUPT_DOWNLOAD.search(line))
-    return process.wait(), 'network' if network else 'corrupt' if corrupt else ''
+            if blocked is not None and AUR_FAILURE.search(line):
+                suspicious.append(line)
+    code = process.wait()
+    if blocked is not None and code != 0:
+        blocked.update(aur_failures(''.join(suspicious)))
+    return code, 'network' if network else 'corrupt' if corrupt else ''
 
 
-def install_distribution(manager):
-    """Run the distribution's upgrade; a corrupted download gets one immediate second run, which re-downloads it."""
+def install_distribution(manager, held=(), blocked=None):
+    """Run the distribution's upgrade; a corrupted download gets one immediate second run, which re-downloads it.
+    On Omarchy the AUR packages in `held` are left out, and `blocked` collects the ones that failed to build."""
     if manager == 'omarchy':
-        argv, options = ['omarchy-update', '-y'], {'env': omarchy_env()}
+        options = {} if blocked is None else {'blocked': blocked}
+        if not held:
+            return install_with_one_redownload(['omarchy-update', '-y'], dict(options, env=omarchy_env()))
+        with tempfile.TemporaryDirectory(prefix='yay-', dir=state_directory()) as directory:
+            return install_with_one_redownload(['omarchy-update', '-y'], dict(options, env=omarchy_env(held, directory)))
     else:
         argv, options = {'pacman': ['sudo', '-n', 'env', 'OMARCHY_ALLOW_DIRECT_PACMAN=1', 'pacman', '-Syu', '--noconfirm'],
                          'apt': ['sudo', '-n', 'env', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-y', '-o', 'Dpkg::Options::=--force-confold', 'full-upgrade'],
                          'dnf': ['sudo', '-n', 'dnf', '-y', 'upgrade']}[manager], {}
+    return install_with_one_redownload(argv, options)
+
+
+def install_with_one_redownload(argv, options):
     code, failure = call_watching(argv, **options)
     if code != 0 and failure == 'corrupt':
         print('PHASE:Downloading a corrupted package again', flush=True)
@@ -374,10 +542,26 @@ def install_distribution(manager):
     return code, failure
 
 
-def omarchy_env():
+def state_directory():
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        return str(STATE)
+    except OSError:
+        return None
+
+
+def omarchy_env(held=(), directory=None):
     env = dict(os.environ, LC_ALL='C', OMARCHY_UPDATE_LOGGED='1')
     env.setdefault('OMARCHY_PATH', '/usr/share/omarchy')
     env['PATH'] = env['OMARCHY_PATH'] + '/bin:' + env.get('PATH', '/usr/bin:/bin')
+    yay = shutil.which('yay', path=env['PATH']) if held and directory else None
+    if yay:
+        # omarchy-update cannot be told to skip an AUR package, and one that cannot be built fails the whole
+        # update before its boot check. For this run only, yay is reached through a wrapper that ignores them.
+        wrapper = Path(directory) / 'yay'
+        wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(yay) + ' "$@" --ignore ' + shlex.quote(','.join(held)) + '\n')
+        wrapper.chmod(0o700)
+        env['PATH'] = directory + ':' + env['PATH']
     return env
 
 
@@ -400,7 +584,16 @@ def update():
             if checked['manager'] == 'omarchy' and run(['sudo', '-n', 'true']).returncode != 0:
                 print('UPDATE:permission-required\nVERIFY:failed')
                 return 1
-            code, failure = install_distribution(checked['manager'])
+            held = [item['name'] for item in checked.get('held') or []]
+            blocked = {}
+            code, failure = install_distribution(checked['manager'], held, blocked)
+            aside = hold_failed(blocked, checked) if code != 0 else []
+            if aside:
+                # The rest of the update, its boot check included, must not wait for one AUR package.
+                for name in aside:
+                    print('HELD:' + name + ' ' + blocked[name], flush=True)
+                print('PHASE:Finishing the update without ' + ', '.join(aside), flush=True)
+                code, failure = install_distribution(checked['manager'], held + aside)
             if code != 0:
                 print('UPDATE:' + {'network': 'network-failed', 'corrupt': 'package-corrupted'}.get(failure, 'install-failed') + '\nVERIFY:failed')
                 return 1
