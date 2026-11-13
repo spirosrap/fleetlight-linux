@@ -457,8 +457,9 @@ class SystemTests(unittest.TestCase):
 
     def test_update_finishes_without_an_aur_package_that_fails_to_build(self):
         self.holds_file()
-        checked = {'state': 'available', 'packages': ['linux', 'zoom-bin'], 'aur': ['zoom-bin'], 'manager': 'omarchy',
-                   'changes': ['linux 1 -> 2', 'zoom-bin 6.1-1 -> 6.2-1']}
+        # Not a core package: update() records a restart request in the real state directory for those.
+        checked = {'state': 'available', 'packages': ['brave-bin', 'zoom-bin'], 'aur': ['zoom-bin'], 'manager': 'omarchy',
+                   'changes': ['brave-bin 1 -> 2', 'zoom-bin 6.1-1 -> 6.2-1']}
         verified = {'state': 'current', 'packages': [], 'manager': 'omarchy', 'restart': {'required': False},
                     'held': [{'name': 'zoom-bin'}]}
         environments = []
@@ -482,12 +483,12 @@ class SystemTests(unittest.TestCase):
         self.assertIn('HELD:zoom-bin did not build', output)
         self.assertEqual(len(environments), 2)
         self.assertEqual(system_ops.load_holds()['zoom-bin']['version'], '6.2-1')
-        lines = ['FLEETLIGHT_SYSTEM_UPDATE', 'CHANGED:linux 1 -> 2', 'CHANGED:zoom-bin 6.1-1 -> 6.2-1', 'HELD:zoom-bin did not build', 'VERIFY:ok']
+        lines = ['FLEETLIGHT_SYSTEM_UPDATE', 'CHANGED:brave-bin 1 -> 2', 'CHANGED:zoom-bin 6.1-1 -> 6.2-1', 'HELD:zoom-bin did not build', 'VERIFY:ok']
         self.assertEqual(update_job.parse_result('system', '0.0.0', '', 0, lines)[1], 'System packages verified · held back: zoom-bin')
-        self.assertEqual(update_job.installation_changes({'kind': 'system', 'log': '\n'.join(lines)}), ['linux 1 → 2'])
+        self.assertEqual(update_job.installation_changes({'kind': 'system', 'log': '\n'.join(lines)}), ['brave-bin 1 → 2'])
 
     def test_update_skips_packages_the_check_already_holds_back(self):
-        checked = {'state': 'available', 'packages': ['linux'], 'aur': [], 'manager': 'omarchy',
+        checked = {'state': 'available', 'packages': ['brave-bin'], 'aur': [], 'manager': 'omarchy',
                    'held': [{'name': 'python312', 'change': 'python312 1 -> 2', 'reason': 'needs openssl-3'}]}
         verified = dict(checked, state='current', packages=[], restart={'required': False})
 
