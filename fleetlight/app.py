@@ -258,6 +258,14 @@ def cpu_share(data):
     return None
 
 
+def battery_text(battery):
+    """Charge, state and, where the computer reports it, the pack's temperature."""
+    parts = [f"{battery['percent']}%", battery.get("state") or "battery"]
+    if isinstance(battery.get("temperature"), (int, float)):
+        parts.append(f"{battery['temperature']:.0f} °C")
+    return " · ".join(parts)
+
+
 def host_icon(host, data):
     if data.get("battery"):
         return "computer-symbolic"
@@ -1706,7 +1714,7 @@ class Fleetlight(Adw.Application):
             battery = data.get("battery") or {}
             if battery.get("percent") is not None:
                 charging = battery.get("state") in ("charging", "charged", "full", "ac attached", "finishing charge")
-                facts.append((f"{battery['percent']}% · {battery.get('state') or 'battery'}",
+                facts.append((battery_text(battery),
                               "battery-good-charging-symbolic" if charging else "battery-symbolic"))
             if fan_text(data.get("fan")):
                 facts.append((fan_text(data["fan"]).capitalize(), "weather-windy-symbolic"))

@@ -125,7 +125,28 @@ def battery_cached(system):
     return _battery_last["value"]
 
 
-def battery(system, root="/sys"):
+BATTERY_TEMPERATURE_DIR = "/run/battery-temperature"
+
+
+def battery_temperature(supply, published=BATTERY_TEMPERATURE_DIR):
+    """Temperature of a battery pack in Celsius, or None when nothing reports it.
+
+    The kernel's own `temp` attribute comes first. Some laptops keep the value
+    only in the embedded controller, which needs root to read; there a helper
+    can publish it in a file named after the battery, in the same unit
+    (tenths of a degree).
+    """
+    for source in (supply / "temp", Path(published, supply.name)):
+        try:
+            value = int(text(source).strip()) / 10
+        except ValueError:
+            continue
+        if -40 < value < 100:
+            return round(value, 1)
+    return None
+
+
+def battery(system, root="/sys", published=BATTERY_TEMPERATURE_DIR):
     """Charge of the first battery, or None for computers without one."""
     if system == "Linux":
         for supply in sorted(Path(root, "class/power_supply").glob("BAT*")):
@@ -133,8 +154,12 @@ def battery(system, root="/sys"):
                 percent = int(text(supply / "capacity").strip())
             except ValueError:
                 continue
-            return {"percent": max(0, min(100, percent)),
-                    "state": text(supply / "status").strip().lower() or "unknown"}
+            reading = {"percent": max(0, min(100, percent)),
+                       "state": text(supply / "status").strip().lower() or "unknown"}
+            temperature = battery_temperature(supply, published)
+            if temperature is not None:
+                reading["temperature"] = temperature
+            return reading
         return None
     if system == "Darwin":
         match = re.search(r"(\d+)%;\s*([A-Za-z ]+);", command(["pmset", "-g", "batt"]))

@@ -11,7 +11,7 @@ def demo_data():
              {"id": "lab", "name": "Lab Workstation", "alias": "lab", "services": []}]
     details = {
         "local": {"hostname": "laptop", "cpu_percent": 18, "cpus": 8, "memory_total": 16 * GIB, "cpu_temperature": 47.0,
-                  "battery": {"percent": 86, "state": "discharging"}, "disk_total": 512 * GIB,
+                  "battery": {"percent": 86, "state": "discharging", "temperature": 31.5}, "disk_total": 512 * GIB,
                   "processes": {"cpu": [["firefox", 34], ["gnome-shell", 9], ["code", 6]],
                                 "memory": [["firefox", int(2.4 * GIB), 14], ["code", int(1.3 * GIB), 9],
                                            ["gnome-shell", int(0.6 * GIB), 1], ["dockerd", int(0.3 * GIB), 1]]}},

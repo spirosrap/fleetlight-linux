@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from fleetlight import actions, agents, config, net, probe
-from fleetlight.app import plan_wordings, reset_wordings
+from fleetlight.app import battery_text, plan_wordings, reset_wordings
 from fleetlight.monitor import History
 
 
@@ -68,6 +68,11 @@ class DashboardMetricsTests(unittest.TestCase):
             self.assertEqual(probe.battery_cached('Linux'), {'percent': 75})
             self.assertEqual(probe.battery_cached('Linux'), {'percent': 74})
             self.assertEqual(read.call_count, 2)
+
+    def test_battery_chip_adds_the_temperature_only_when_reported(self):
+        self.assertEqual(battery_text({'percent': 81, 'state': 'not charging'}), '81% · not charging')
+        self.assertEqual(battery_text({'percent': 81, 'state': 'not charging', 'temperature': 47.2}), '81% · not charging · 47 °C')
+        self.assertEqual(battery_text({'percent': 100, 'state': ''}), '100% · battery')
 
     def test_storage_deduplicates_devices_and_excludes_virtual_mounts(self):
         mounts = '/dev/a / btrfs rw 0 0\n/dev/a /var btrfs rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n/dev/b /srv/media ext4 rw 0 0\n'

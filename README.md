@@ -20,6 +20,10 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.10
+
+- A laptop's page shows the battery's temperature beside its charge, for example "81% · not charging · 47 °C". A lithium pack refuses to charge when it gets too hot (about 45 °C), which otherwise looks like a charger fault. The value comes from the kernel's `temp` attribute of the battery. Laptops whose firmware keeps it only in the embedded controller can publish it, in the same unit (tenths of a degree Celsius), in `/run/battery-temperature/<battery name>`, for example `/run/battery-temperature/BAT0`.
+
 ## Version 0.8.9
 
 - Flatpak updates are installed automatically every time, not only the first time. Flatpak runtimes have no version number, so after one build of a runtime had been installed automatically, every later build looked like the one already done and was left as "1 package updates" until Fleetlight restarted (first seen with `org.gnome.Platform`, which Flathub rebuilds almost daily). The check now reads each Flatpak update's build, which also appears under What changed.
