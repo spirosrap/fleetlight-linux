@@ -326,7 +326,9 @@ def sidecar_updates():
                 details.append(name + ' ' + parts[1] if len(parts) > 1 else name)
     if shutil.which('flatpak'):
         for scope in ('--user', '--system'):
-            completed = run(['flatpak', 'remote-ls', '--updates', scope, '--columns=application,version'])
+            # The commit comes before the version because runtimes have no version. It tells one build from
+            # the next: without it every later build looked like the one already installed automatically.
+            completed = run(['flatpak', 'remote-ls', '--updates', scope, '--columns=application,commit,version'])
             if completed.returncode:
                 continue
             for line in completed.stdout.splitlines():
@@ -337,7 +339,7 @@ def sidecar_updates():
                 if name in names:
                     continue
                 names.append(name)
-                details.append(name + ' ' + parts[1] if len(parts) > 1 else name)
+                details.append(' '.join([name] + parts[2:3] + parts[1:2]))
     return names, details
 
 

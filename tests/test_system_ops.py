@@ -231,9 +231,13 @@ class SystemTests(unittest.TestCase):
                 patch.object(system_ops.shutil, 'which', side_effect=which), \
                 patch.object(system_ops, 'reboot_status', return_value={'required': False}), \
                 patch.object(system_ops, 'run', side_effect=[
-                    result(), result(), result(0, 'com.brave.Browser\n'), result(0, 'org.gnome.Platform\n')]):
+                    result(), result(), result(0, 'com.brave.Browser\tfc9015396c43\t1.84.2\n'),
+                    result(0, 'org.gnome.Platform\tf48b9eb43a30\n')]):
             checked = system_ops.check()
         self.assertEqual(checked['packages'], ['flatpak:com.brave.Browser', 'flatpak:org.gnome.Platform'])
+        # A runtime has no version, so its build is what makes the next one a new automatic target.
+        self.assertEqual(checked['changes'], ['flatpak:com.brave.Browser 1.84.2 fc9015396c43',
+                                              'flatpak:org.gnome.Platform f48b9eb43a30'])
         self.assertEqual(checked['state'], 'available')
         self.assertIn('2 package updates', checked['detail'])
 

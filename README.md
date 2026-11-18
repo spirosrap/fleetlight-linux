@@ -20,6 +20,10 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.9
+
+- Flatpak updates are installed automatically every time, not only the first time. Flatpak runtimes have no version number, so after one build of a runtime had been installed automatically, every later build looked like the one already done and was left as "1 package updates" until Fleetlight restarted (first seen with `org.gnome.Platform`, which Flathub rebuilds almost daily). The check now reads each Flatpak update's build, which also appears under What changed.
+
 ## Version 0.8.8
 
 - An AUR package that can't be installed no longer fails the whole system update or leaves the computer on "needs attention". This happens on Omarchy when the AUR, which follows Arch, asks for a package that Omarchy's stable repositories don't carry yet (first seen with `python312` needing `openssl-3`). The check now looks up each pending AUR package's dependencies and holds back the ones nothing can supply. The computer's page lists them under Linux updates with the reason, and they are installed by themselves once the dependency arrives.
