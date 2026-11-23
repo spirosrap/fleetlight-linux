@@ -129,7 +129,7 @@ class MobileFeedTests(unittest.TestCase):
         self.assertFalse([item for item in feed["timingComparisons"] if item["hostId"] == "desk"])
 
     def test_redaction(self):
-        self.assertEqual(mobile_feed.redact("fetch https://example.org/x from 192.0.2.7 as me@example.org in /home/alex/src"),
+        self.assertEqual(mobile_feed.redact("fetch https://example.org/x from 192.0.2.7 as me@example.org in /home/user/src"),
                          "fetch [url] from [address] as [account] in /home/[user]/src")
 
     def test_configuration(self):
