@@ -58,6 +58,11 @@ def notifications_enabled(configuration):
     return isinstance(configuration, dict) and configuration.get("notifications", True) is True
 
 
+def mobile_feed_enabled(configuration):
+    """The feed for the Android companion is published only when asked for."""
+    return isinstance(configuration, dict) and configuration.get("mobile_feed") is True
+
+
 def validate(config):
     if not isinstance(config, dict) or config.get("version") != 1:
         raise ValueError("Expected configuration version 1")
@@ -68,6 +73,8 @@ def validate(config):
         raise ValueError("auto_updates must be true or false")
     if "notifications" in config and type(config["notifications"]) is not bool:
         raise ValueError("notifications must be true or false")
+    if "mobile_feed" in config and type(config["mobile_feed"]) is not bool:
+        raise ValueError("mobile_feed must be true or false")
     if "appearance" in config and config["appearance"] not in APPEARANCES:
         raise ValueError("appearance must be auto, dark or light")
     if "claude_billing_day" in config and config["claude_billing_day"] is not None and (
@@ -92,6 +99,9 @@ def validate(config):
             raise ValueError("Computer names must contain 1–80 characters")
         if type(host.get("local", False)) is not bool:
             raise ValueError("local must be true or false")
+        if "feed_id" in host and (not isinstance(host["feed_id"], str)
+                                  or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", host["feed_id"])):
+            raise ValueError("feed_id must use letters, numbers, dots or dashes")
         if not host.get("local"):
             alias = host.get("alias", "")
             if not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,200}", alias):

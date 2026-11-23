@@ -20,6 +20,11 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.9.0
+
+- Fleetlight can publish the fleet's status for the [Android companion](https://github.com/spirosrap/fleetlight-android), in the same feed format as the Fleetlight Mac observer, so the phone no longer needs a Mac running. Turn on Settings › Monitoring › Publish a feed for the phone app (or `"mobile_feed": true`), then see [Phone feed](#phone-feed). The phone already uses whichever of its configured observers answers with the newest snapshot, so a Linux computer and the Macs can stand in for one another.
+- A dismissed crash no longer writes a status event on every check. The event history compared the bare check results with what the window shows, so a computer with dismissed crashes logged the same line once a minute.
+
 ## Version 0.8.11
 
 - A Mac no longer reports "Out of memory: a program was killed" every night. macOS gives some of its own background helpers a small memory limit of their own and ends them when they pass it; Spotlight's nightly indexers (`knowledgeconstructiond`, `spotlightknowledged.updater`) do so at 17 to 40 MB with gigabytes free, and macOS files the same report as for a real shortage. Fleetlight now reads why each program was ended and counts only the kills made because the computer was short of memory.
@@ -247,6 +252,18 @@ System updates can overwrite local application repairs. Confirmed terminal updat
 `notifications` controls desktop notifications for status changes and low agent quota (default `true`). They use the desktop's notification service and never leave this computer.
 
 History is stored locally in `$XDG_STATE_HOME/fleetlight/history.json`, with detailed checks for two hours, five-minute averages up to one day, fifteen-minute averages up to one week, and the last 100 events. It contains computer IDs, metrics and state changes. Diagnostics copied to the clipboard include computer names and should be reviewed before sharing.
+
+## Phone feed
+
+With `"mobile_feed": true` Fleetlight serves a read-only snapshot at `http://127.0.0.1:8787/fleetlight/mobile-feed.json` after every check: each computer's state, findings, services, package updates, recent status changes and a day of history. It listens on this computer only, and addresses, account names and home folders are removed from the text it carries. The phone app accepts HTTPS addresses only, so put a proxy in front. With Tailscale:
+
+```sh
+tailscale serve --bg --set-path /fleetlight http://127.0.0.1:8787/fleetlight
+```
+
+and add `https://<this-computer>.<tailnet>.ts.net/fleetlight/mobile-feed.json` under Settings › Feed endpoints in the phone app. The feed is as old as the last check, and it stops when Fleetlight is closed; the phone then shows another observer, or its last snapshot marked as cached. Updates and restarts cannot be started from the phone through this feed.
+
+A computer keeps its own order and comparisons on the phone by its ID. When another observer knows the same computer under a different ID, give it that ID here with `"feed_id"` in its entry.
 
 ## Application updates
 

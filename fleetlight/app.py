@@ -14,7 +14,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
 
 from . import __version__
-from . import actions, config
+from . import actions, config, mobile_feed
 from . import agents as agent_quota
 from .monitor import (History, MemoryWatch, OomWatch, PRESSURE_LIMITS, ServiceWatch, clock, duration, issues, linux_update_issues,
                       has_crash_issues, presence_summary, probe_host, refresh, regression_cause, service_label)
@@ -502,6 +502,9 @@ class Fleetlight(Adw.Application):
         self.service_watch = ServiceWatch() if not demo else ServiceWatch(Path("/nonexistent/fleetlight-demo/service-watch.json"))
         self.memory_watch = MemoryWatch()
         self.oom_watch = OomWatch()
+        self.feed_server = mobile_feed.FeedServer()
+        self.check_started = None
+        self.last_refresh_ms = None
         self.restarting_services = set()
         if demo:
             self.journal_path = Path("/nonexistent/fleetlight-demo/update-controller.json")
@@ -512,6 +515,7 @@ class Fleetlight(Adw.Application):
         """History is written every few minutes while running; write the rest on the way out."""
         if self.demo:
             return
+        self.feed_server.stop()
         try:
             self.history.save()
             config.atomic_json(self.last_seen_path, self.last_seen, indent=None)
@@ -639,6 +643,7 @@ class Fleetlight(Adw.Application):
         self.timer = GLib.timeout_add_seconds(self.configuration.get("refresh_seconds", 60), self.auto_check)
         if not self.demo:
             GLib.timeout_add_seconds(2, self.check_local_metrics)
+            self.sync_feed_server()
         if self.demo:
             self.refresh_button.set_sensitive(False)
             self.app_updates = {h["id"]: {kind: updates.plan("1.0.0", "1.1.0" if kind == "cli" else "1.0.0", "standalone" if kind == "cli" else "native" if kind == "claude" else "macos-appcast") for kind in ("cli", "claude", "desktop")} for h in self.configuration["hosts"]}
@@ -892,6 +897,7 @@ class Fleetlight(Adw.Application):
             return
         self.force_update_check = force_updates
         self.busy = True
+        self.check_started = time.monotonic()
         self.refresh_button.set_sensitive(False)
         self.refresh_button.set_label("Checking…")
         self.spinner.start()
@@ -924,15 +930,10 @@ class Fleetlight(Adw.Application):
             if site_check:
                 site_check.join()
             history_check.join()
-            warning = None
-            try:
-                self.history.record(results, previous)
-            except OSError:
-                warning = "History could not be saved; live checks are still available"
             GLib.idle_add(self.receive_agents, usage)
             GLib.idle_add(self.receive_sites, site_results)
             GLib.idle_add(self.receive_install_histories, histories)
-            GLib.idle_add(self.finished, warning)
+            GLib.idle_add(self.finished, None, list(results), previous)
         threading.Thread(target=work, daemon=True).start()
 
     def check_local_metrics(self):
@@ -1005,8 +1006,17 @@ class Fleetlight(Adw.Application):
         self.populate_hosts(soon=True)
         return GLib.SOURCE_REMOVE
 
-    def finished(self, warning):
+    def finished(self, warning, checked=(), previous=None):
         self.busy = False
+        if self.check_started is not None:
+            self.last_refresh_ms = round(1000 * (time.monotonic() - self.check_started))
+            self.check_started = None
+        # Recorded here, after every result went through receive(): the history compares what is shown
+        # (dismissed crashes, service regressions), not the bare probe results.
+        try:
+            self.history.record({ident: self.snapshots[ident] for ident in checked if ident in self.snapshots}, previous or {})
+        except OSError:
+            warning = warning or "History could not be saved; live checks are still available"
         self.refresh_button.set_sensitive(True)
         self.refresh_button.set_label("Check now")
         self.spinner.stop()
@@ -1017,12 +1027,37 @@ class Fleetlight(Adw.Application):
         except OSError:
             pass
         self.populate_hosts()
+        self.publish_feed()
         if warning:
             self.toast(warning)
         if (self.force_update_check or time.time() - self.last_update_check > 900
                 or updates.packages_changed_since_check(self.snapshots, self.app_updates)):
             self.check_application_updates()
         return GLib.SOURCE_REMOVE
+
+    def sync_feed_server(self):
+        """Start or stop the loopback feed for the Android companion to match the setting."""
+        if self.demo:
+            return
+        if not config.mobile_feed_enabled(self.configuration):
+            self.feed_server.stop()
+        elif not self.feed_server.running:
+            if self.feed_server.start():
+                self.publish_feed()
+            else:
+                self.toast(f"The phone feed could not start: port {mobile_feed.PORT} is in use")
+
+    def publish_feed(self):
+        """Hand the server a new snapshot. Only this session's checks count, so nothing stale is passed off as live."""
+        if self.demo or not self.feed_server.running or not self.snapshots:
+            return
+        try:
+            self.feed_server.publish(mobile_feed.encode(mobile_feed.document(
+                self.configuration, self.snapshots, self.app_updates, self.history, __version__,
+                refresh_ms=self.last_refresh_ms, last_seen=self.last_seen)))
+        except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+            # A malformed saved result must not stop the checks; the previous feed stays up and ages.
+            pass
 
     def receive_agents(self, usage):
         usage = usage if isinstance(usage, dict) else {}
@@ -2053,6 +2088,7 @@ class Fleetlight(Adw.Application):
         self.render_detail()
         if not self.save_application_checks():
             self.toast("Checks completed, but the local receipt could not be saved")
+        self.publish_feed()
         self.maybe_auto_update()
         return GLib.SOURCE_REMOVE
 
@@ -2680,6 +2716,7 @@ class Fleetlight(Adw.Application):
                    "appearance": config.appearance(self.configuration),
                    "notifications": config.notifications_enabled(self.configuration),
                    "auto_updates": config.auto_updates_enabled(self.configuration),
+                   "mobile_feed": config.mobile_feed_enabled(self.configuration),
                    "agents": config.enabled_agents(self.configuration),
                    "claude_billing_day": config.claude_billing_day(self.configuration)}
 
@@ -2695,6 +2732,9 @@ class Fleetlight(Adw.Application):
         start = Adw.SwitchRow(title="Open Fleetlight when I log in", subtitle="Adds a user autostart entry; useful with automatic updates")
         start.set_active(actions.autostart_path().exists())
         monitoring.add(start)
+        feed = Adw.SwitchRow(title="Publish a feed for the phone app", subtitle=f"Serves the fleet's status to the Android companion at http://127.0.0.1:{mobile_feed.PORT}/fleetlight/mobile-feed.json on this computer only; put an HTTPS proxy such as tailscale serve in front of it")
+        feed.set_active(initial["mobile_feed"])
+        monitoring.add(feed)
         page.add(monitoring)
 
         looks = Adw.PreferencesGroup(title="Appearance")
@@ -2803,6 +2843,7 @@ class Fleetlight(Adw.Application):
                 chosen = {"refresh_seconds": int(interval.get_value()), "notifications": notify.get_active(),
                           "appearance": config.APPEARANCES[scheme.get_selected()],
                           "auto_updates": auto_toggle.get_active(),
+                          "mobile_feed": feed.get_active(),
                           "agents": {name: toggle.get_active() for name, toggle in agent_toggles.items()},
                           "claude_billing_day": int(billing_day.get_value()) or None}
                 for key, value in chosen.items():
@@ -2813,6 +2854,8 @@ class Fleetlight(Adw.Application):
                         candidate[key] = value
                 if candidate.get("claude_billing_day") is None:
                     candidate.pop("claude_billing_day", None)
+                if candidate.get("mobile_feed") is False:
+                    candidate.pop("mobile_feed", None)
                 candidate = config.validate(candidate)
                 config.atomic_json(self.config_file or config.config_path(), candidate)
                 if start.get_active() != actions.autostart_path().exists():
@@ -2833,6 +2876,7 @@ class Fleetlight(Adw.Application):
             if self.timer:
                 GLib.source_remove(self.timer)
             self.timer = GLib.timeout_add_seconds(candidate.get("refresh_seconds", 60), self.auto_check)
+            self.sync_feed_server()
             dialog.close()
             if self.selected not in {h["id"] for h in candidate["hosts"]} | {s["id"] for s in sites.configured(candidate)} | {OVERVIEW}:
                 self.selected = OVERVIEW

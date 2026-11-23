@@ -110,15 +110,22 @@ def issues(snapshot):
     for item in snapshot.get("memory_runaways") or []:
         result.append(item["name"] + " memory grew from " + gigabytes(item["from"]) + " to " + gigabytes(item["to"])
                       + " in " + str(item["minutes"]) + " min")
+    result.extend(service_issues(snapshot))
+    result.extend(tailscale_issues(snapshot.get("tailscale")))
+    result.extend(crash_issues(snapshot.get("crashes"), snapshot.get("oom_events"), seen_until=snapshot.get("crashes_seen_until") or 0))
+    result.extend(pressure_issues(snapshot.get("pressure")))
+    return result
+
+
+def service_issues(snapshot):
+    """One line per watched service that is not running, naming the change it stopped after when known."""
+    result = []
     regressions = snapshot.get("service_regressions") or {}
-    for name, state in snapshot.get("services", {}).items():
+    for name, state in (snapshot.get("services") or {}).items():
         if name in regressions and state not in ("active", "unsupported"):
             result.append(service_label(name) + ": " + state + " since " + regression_cause(regressions[name]))
         elif state not in ("active", "unsupported") and not (name in snapshot.get("optional_services", []) and state in ("inactive", "not installed")):
             result.append(service_label(name) + ": " + state)
-    result.extend(tailscale_issues(snapshot.get("tailscale")))
-    result.extend(crash_issues(snapshot.get("crashes"), snapshot.get("oom_events"), seen_until=snapshot.get("crashes_seen_until") or 0))
-    result.extend(pressure_issues(snapshot.get("pressure")))
     return result
 
 
