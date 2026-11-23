@@ -20,6 +20,10 @@ All screenshots use fictional demo data. The parallel update view shows three si
 
 ![Three computers updating concurrently, with their phases and the Stop queued updates control](docs/screenshot-parallel-updates.png)
 
+## Version 0.8.11
+
+- A Mac no longer reports "Out of memory: a program was killed" every night. macOS gives some of its own background helpers a small memory limit of their own and ends them when they pass it; Spotlight's nightly indexers (`knowledgeconstructiond`, `spotlightknowledged.updater`) do so at 17 to 40 MB with gigabytes free, and macOS files the same report as for a real shortage. Fleetlight now reads why each program was ended and counts only the kills made because the computer was short of memory.
+
 ## Version 0.8.10
 
 - A laptop's page shows the battery's temperature beside its charge, for example "81% · not charging · 47 °C". A lithium pack refuses to charge when it gets too hot (about 45 °C), which otherwise looks like a charger fault. The value comes from the kernel's `temp` attribute of the battery. Laptops whose firmware keeps it only in the embedded controller can publish it, in the same unit (tenths of a degree Celsius), in `/run/battery-temperature/<battery name>`, for example `/run/battery-temperature/BAT0`.

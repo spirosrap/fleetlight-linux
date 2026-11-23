@@ -907,11 +907,26 @@ def presence(system):
     return result
 
 
+# Reasons macOS gives for a kill that say nothing about the computer's memory: the program went over a limit
+# set for it alone (Spotlight's nightly indexers do, at 17-40 MB), or was idle, or files or disk space ran short.
+JETSAM_OWN_LIMITS = {"per-process-limit", "highwater", "idle-exit", "long-idle-exit", "vnode-limit", "disk-space-shortage"}
+
+
+def jetsam_shortage(report):
+    """True when a macOS JetsamEvent report records a kill made because the computer was short of memory.
+
+    A report without any readable reason counts too, so an unknown layout still alerts.
+    """
+    reasons = set(re.findall(r'"reason"\s*:\s*"([^"]*)"', report))
+    return not reasons or bool(reasons - JETSAM_OWN_LIMITS)
+
+
 def crashes(system, since):
     """Programs that crashed since boot, newest first, with out-of-memory kills.
 
     Linux: systemd-coredump's list (the user's own and, with journal access, everyone's) and the kernel's
-    oom_kill counter. macOS: crash reports (.ips bug type 309) and JetsamEvent memory kills in DiagnosticReports.
+    oom_kill counter. macOS: crash reports (.ips bug type 309) and JetsamEvent reports in DiagnosticReports,
+    counting only the kills made because memory ran short.
     """
     result = {"since": since, "items": [], "oom_kills": None}
     if not since:
@@ -946,11 +961,12 @@ def crashes(system, since):
                         continue
                     with open(entry.path, errors="replace") as stream:
                         header = json.loads(stream.readline(4096))
+                        kind = str(header.get("bug_type")) if isinstance(header, dict) else ""
+                        report = stream.read(8 << 20) if kind == "298" else ""
                 except (OSError, ValueError):
                     continue
-                kind = str(header.get("bug_type")) if isinstance(header, dict) else ""
                 if kind == "298":
-                    jetsam += 1
+                    jetsam += jetsam_shortage(report)
                 elif kind in ("309", "109"):
                     items.append({"at": moment, "name": str(header.get("app_name") or entry.name.split("-")[0])[:48], "signal": None})
         result["oom_kills"] = jetsam

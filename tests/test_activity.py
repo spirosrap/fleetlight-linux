@@ -1,6 +1,9 @@
 import json
+import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fleetlight import probe
@@ -123,6 +126,28 @@ class ProbeParsingTests(unittest.TestCase):
             found = probe.crashes("Linux", 1_792_000_000)
         self.assertEqual(found["oom_kills"], 2)
         self.assertEqual(found["items"], [{"at": 1_793_000_000.0, "name": "light-locker", "signal": 11}])
+
+    def test_mac_kills_for_a_programs_own_limit_are_not_out_of_memory(self):
+        def report(name, reason):
+            return ('{"bug_type":"298","timestamp":"2026-11-23 01:43:55.00 +0200"}\n{\n  "processes" : [\n  {\n'
+                    '    "name" : "Finder",\n    "rpages" : 900\n  },\n  {\n    "name" : "' + name + '",\n'
+                    '    "reason" : "' + reason + '",\n    "rpages" : 1125\n  }\n]\n}\n')
+
+        self.assertFalse(probe.jetsam_shortage(report("knowledgeconstructiond", "per-process-limit")))
+        self.assertTrue(probe.jetsam_shortage(report("Brave Browser", "vm-pageshortage")))
+        self.assertTrue(probe.jetsam_shortage('{\n  "processes" : [ ]\n}\n'))
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            reports = home / "Library/Logs/DiagnosticReports"
+            reports.mkdir(parents=True)
+            (reports / "JetsamEvent-2026-11-23-014355.ips").write_text(report("knowledgeconstructiond", "per-process-limit"))
+            (reports / "JetsamEvent-2026-11-23-020000.ips").write_text(report("spotlightknowledged.updater", "highwater"))
+            scandir = os.scandir
+            with patch.object(probe.Path, "home", return_value=home), \
+                    patch.object(probe.os, "scandir", side_effect=lambda place: scandir(place) if str(place).startswith(str(home)) else iter(())):
+                self.assertEqual(probe.crashes("Darwin", 1)["oom_kills"], 0)
+                (reports / "JetsamEvent-2026-11-23-030000.ips").write_text(report("Brave Browser", "vm-compressor-space-shortage"))
+                self.assertEqual(probe.crashes("Darwin", 1)["oom_kills"], 1)
 
 
 if __name__ == "__main__":
