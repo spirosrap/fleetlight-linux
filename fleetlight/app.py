@@ -22,11 +22,11 @@ from .probe import collect_metrics
 from . import sites
 from .tray import Tray
 from . import updates
-from .update_job import installation_changes, history_report
+from .update_job import APP_KINDS, CLI_KINDS, JOB_KINDS, KIND_NAMES, installation_changes, history_report
 from .widgets import AvailabilityStrip, FittingLabel, FleetRing, MiniBars, Ring, TrendChart
 
 
-ACTION_NAMES = {"cli": "Codex CLI", "claude": "Claude CLI", "desktop": "ChatGPT", "system": "Linux packages", "restart": "required restarts"}
+ACTION_NAMES = {**KIND_NAMES, "restart": "required restarts"}
 OVERVIEW = "fleet"
 WEBSITE = "https://github.com/spirosrap/fleetlight-linux"
 # History chart choices: field in the saved history, title, unit and axis limit (None scales to the data).
@@ -438,7 +438,7 @@ class Fleetlight(Adw.Application):
                 self.batch = journal.get("batch")
                 self.pending_restarts = journal.get("pending_restarts", {})
                 if self.batch:
-                    if self.batch["kind"] not in ("cli", "claude", "desktop", "system", "restart") or not isinstance(self.batch["pending"], list) or len(self.batch["pending"]) > 32:
+                    if self.batch["kind"] not in JOB_KINDS or not isinstance(self.batch["pending"], list) or len(self.batch["pending"]) > 32:
                         raise ValueError("Invalid saved batch")
                     for item in self.batch["pending"]:
                         config.validate({"version": 1, "hosts": [item["host"]]})
@@ -646,7 +646,7 @@ class Fleetlight(Adw.Application):
             self.sync_feed_server()
         if self.demo:
             self.refresh_button.set_sensitive(False)
-            self.app_updates = {h["id"]: {kind: updates.plan("1.0.0", "1.1.0" if kind == "cli" else "1.0.0", "standalone" if kind == "cli" else "native" if kind == "claude" else "macos-appcast") for kind in ("cli", "claude", "desktop")} for h in self.configuration["hosts"]}
+            self.app_updates = {h["id"]: {kind: updates.plan("1.0.0", "1.1.0" if kind == "cli" else "1.0.0", "standalone" if kind == "cli" else "native" if kind in CLI_KINDS else "macos-appcast") for kind in CLI_KINDS + ("desktop",)} for h in self.configuration["hosts"]}
             for h in self.configuration["hosts"]:
                 self.app_updates[h["id"]]["grokbot"] = updates.grokbot_plan({"status": "online", **self.snapshots.get(h["id"], {})}, {"grokbot": {"version": "0.77.0"}})
             self.agent_usage = agent_quota.demo_usage()
@@ -764,8 +764,8 @@ class Fleetlight(Adw.Application):
                               min_children_per_line=1, max_children_per_line=3,
                               column_spacing=8, row_spacing=6)
         self.batch_buttons = {}
-        for kind, title in (("cli", "Update all Codex CLI"), ("claude", "Update all Claude CLI"), ("desktop", "Update all ChatGPT"), ("system", "Update all Linux packages"), ("restart", "Restart required computers")):
-            button = Gtk.Button(label=title)
+        for kind in JOB_KINDS:
+            button = Gtk.Button(label="Restart required computers" if kind == "restart" else "Update all " + ACTION_NAMES[kind])
             button.connect("clicked", lambda _, selected=kind: self.request_batch(selected))
             buttons.insert(button, -1)
             self.batch_buttons[kind] = button
@@ -1595,7 +1595,7 @@ class Fleetlight(Adw.Application):
             trouble = sites.issues(self.site_status.get(site["id"]))
             if trouble:
                 trouble_by_id[site["id"]] = (site["name"], trouble)
-        available = sum(len(updates.batch_candidates(hosts, self.snapshots, self.app_updates, kind)[0]) for kind in ("cli", "claude", "desktop", "system"))
+        available = sum(len(updates.batch_candidates(hosts, self.snapshots, self.app_updates, kind)[0]) for kind in updates.AUTO_UPDATE_KINDS)
         restarts = len(updates.batch_candidates(hosts, self.snapshots, self.app_updates, "restart")[0])
         self.page_title.set_title("Fleet overview")
         self.page_title.set_subtitle(f"{online} of {len(hosts)} online")
@@ -1850,9 +1850,16 @@ class Fleetlight(Adw.Application):
         apps = self.section("Applications", "Installed and available versions")
         self.update_row(apps, host, "cli", "Codex CLI", installed.get("codex"), "utilities-terminal-symbolic")
         self.update_row(apps, host, "claude", "Claude CLI", installed.get("claude"), "utilities-terminal-symbolic")
+        self.update_row(apps, host, "agy", "Antigravity CLI", installed.get("agy"), "utilities-terminal-symbolic")
+        self.update_row(apps, host, "opencode", "OpenCode", installed.get("opencode"), "utilities-terminal-symbolic")
         desktop = installed.get("chatgpt", {})
         self.update_row(apps, host, "desktop", "ChatGPT", desktop.get("version"), "web-browser-symbolic")
-        self.package_row(apps, host, "grokbot", "Grok Bot", installed.get("grokbot"), "web-browser-symbolic")
+        grokbot = installed.get("grokbot") if isinstance(installed.get("grokbot"), dict) else {}
+        if grokbot.get("provider") == "macOS app":
+            # A Mac's app is installed by Fleetlight; the Linux package arrives with the Linux packages.
+            self.update_row(apps, host, "grokbot", "Grok Bot", grokbot.get("version"), "web-browser-symbolic")
+        else:
+            self.package_row(apps, host, "grokbot", "Grok Bot", grokbot, "web-browser-symbolic")
         active = self.job_for_host(host["id"])
         if active:
             progress = Gtk.ProgressBar()
@@ -2006,7 +2013,7 @@ class Fleetlight(Adw.Application):
         checked = self.app_updates.get(host["id"], {}).get(kind, {})
         state = checked.get("state", "checking" if self.update_checks_running else "unknown")
         latest = checked.get("latest")
-        versions = (installed or checked.get("installed") or "Not detected") + (" → " + latest if state == "available" else "")
+        versions = (installed or checked.get("installed") or "Not detected") + (" → " + latest if state in ("available", "packaged") and latest else "")
         detail = checked.get("detail", "Checking for updates…" if self.update_checks_running else "Press Check now to check releases")
         if state == "current":
             detail = "Up to date" + (" · " + checked["provider"] if checked.get("provider") else "")
@@ -2127,7 +2134,7 @@ class Fleetlight(Adw.Application):
                 text += " · Awaiting restart verification: " + ", ".join(item["name"] for item in self.pending_restarts.values())
             self.batch_label.set_text(text)
         elif config.auto_updates_enabled(self.configuration):
-            self.batch_label.set_text("Automatic updates are on · Codex CLI, Claude CLI, ChatGPT and Linux packages install when checks find them. Computers are not restarted.")
+            self.batch_label.set_text("Automatic updates are on · command-line tools, ChatGPT, Grok Bot and Linux packages install when checks find them. Computers are not restarted.")
         else:
             self.batch_label.set_text("Fleet-wide updates · only computers with available releases are included")
         if running and self.active_jobs:
@@ -2152,13 +2159,15 @@ class Fleetlight(Adw.Application):
         title = ACTION_NAMES[kind]
         body = ("Restart these computers one at a time:\n\n" if kind == "restart" else
                 "Update " + title + " on up to three computers at a time:\n\n")
-        body += "\n".join(item["host"]["name"] + (" → " + item["checked"]["latest"] if kind in ("cli", "claude", "desktop") else " · " + item["checked"].get("detail", "")) for item in pending)
+        body += "\n".join(item["host"]["name"] + (" → " + item["checked"]["latest"] if kind in CLI_KINDS + APP_KINDS else " · " + item["checked"].get("detail", "")) for item in pending)
         if skipped:
             body += "\n\nSkipped: " + "; ".join(item["name"] + " (" + item["reason"] + ")" for item in skipped)
         if kind == "desktop":
             body += "\n\nChatGPT may close and reopen. Finish active work first."
             if any(item["checked"].get("provider") == "linux-pacman" for item in pending):
                 body += " Arch computers require a full system upgrade, including other packages."
+        if kind == "grokbot":
+            body += "\n\nGrok Bot closes and reopens where it is open. Finish active work first."
         if kind == "system":
             body += "\n\nThis installs all available distribution package upgrades using passwordless sudo. Services may restart during installation. Computers are not automatically rebooted."
         elif kind == "restart":
@@ -2274,13 +2283,14 @@ class Fleetlight(Adw.Application):
         if checked.get("state") != "available" or time.time() - checked.get("checked_at", 0) > 1800:
             self.toast("Run Check now before updating")
             return
-        if kind in ("cli", "claude"):
+        if kind in CLI_KINDS:
             self.begin_update(host, kind, checked)
             return
-        body = "Install ChatGPT " + checked["latest"] + " on " + host["name"] + "? The app may close and reopen after verification. Finish any active work first."
+        name = ACTION_NAMES[kind]
+        body = "Install " + name + " " + checked["latest"] + " on " + host["name"] + "? The app may close and reopen after verification. Finish any active work first."
         if checked.get("provider") == "linux-pacman":
             body += "\n\nArch requires a full system upgrade. Other system packages will also be updated. Locally modified ChatGPT files block this update."
-        dialog = Adw.MessageDialog(transient_for=self.window, heading="Update ChatGPT?", body=body)
+        dialog = Adw.MessageDialog(transient_for=self.window, heading="Update " + name + "?", body=body)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("update", "Update and reopen")
         dialog.set_response_appearance("update", Adw.ResponseAppearance.SUGGESTED)

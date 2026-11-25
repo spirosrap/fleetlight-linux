@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from . import net
 from .config import validate
 from .monitor import python_command, run_process
-from .update_job import ERRORS, version, history_report, visible_installs
+from .update_job import APP_KINDS, CLI_KINDS, ERRORS, JOB_KINDS, KIND_NAMES, version, history_report, visible_installs
 
 net.install()
 ROOT = Path(__file__).parent
@@ -23,6 +23,12 @@ CLAUDE_REGISTRY = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"
 APPCAST = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
 # Grok Bot is built on Cursor's update service; "sand" is its internal product name.
 GROKBOT_RELEASE = "https://api2.cursor.sh/updates/api/download/stable/linux-x64/sand"
+# Google publishes the Antigravity CLI (agy) here; mise and the program's own updater serve the same releases.
+# The page address is read rather than the API, whose hourly allowance mise already shares.
+AGY_RELEASE = "https://github.com/google-antigravity/antigravity-cli/releases/latest"
+# OpenCode 2 ships as this npm package, which its own installer and upgrade command read too.
+# (GitHub's "latest release" and the opencode-ai package are still OpenCode 1.)
+OPENCODE_REGISTRY = "https://registry.npmjs.org/@opencode/cli/latest"
 
 
 MAX_PARALLEL_UPDATES = 3
@@ -108,18 +114,68 @@ def releases():
         result["grokbot"] = {"version": data["version"]}
     except Exception:
         result["grokbot"] = {"error": "Could not check the official Grok Bot release"}
+    try:
+        request = urllib.request.Request(AGY_RELEASE, method="HEAD", headers={"User-Agent": "Fleetlight/0.2"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result["agy"] = {"version": parse_agy_release(response.geturl())}
+    except Exception:
+        result["agy"] = {"error": "Could not check the official Antigravity CLI release"}
+    try:
+        request = urllib.request.Request(OPENCODE_REGISTRY, headers={"User-Agent": "Fleetlight/0.2"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read(1_000_000))
+        if not version(data.get("version")):
+            raise ValueError("Invalid OpenCode version")
+        result["opencode"] = {"version": data["version"]}
+    except Exception:
+        result["opencode"] = {"error": "Could not check the official OpenCode release"}
+    return result
+
+
+def parse_agy_release(address):
+    """Version from the address GitHub's "latest release" link lands on."""
+    match = re.fullmatch(r"https://github\.com/google-antigravity/antigravity-cli/releases/tag/v?(\d+\.\d+\.\d+)", str(address))
+    if not match:
+        raise ValueError("Invalid Antigravity CLI release")
+    return match[1]
+
+
+def tool_plan(kind, snapshot, official):
+    """An installed command-line agent (agy, opencode) against its latest release. Updated where it exists, never installed."""
+    name = KIND_NAMES[kind]
+    info = snapshot.get(kind + "_installation") if isinstance(snapshot.get(kind + "_installation"), dict) else {}
+    release = official.get(kind) or {}
+    method = info.get("method")
+    result = plan(snapshot.get(kind), release.get("version"), method, release.get("error", "Official " + name + " release"))
+    if result["state"] == "missing":
+        # mise can list a tool without having fetched it: the command is there, the program is not.
+        result["detail"] = "Not installed · mise downloads it on first use" if method == "mise" else "Not installed"
+    elif result["state"] == "available" and method == "pacman":
+        result.update(state="packaged", detail="Update available · installs with Linux packages")
+    elif result["state"] == "available" and method not in ("native", "mise"):
+        result.update(state="unsupported", detail="This installation method requires a manual update")
+    if snapshot.get("status") != "online":
+        result.update(state="offline", detail="Computer is offline")
     return result
 
 
 def grokbot_plan(snapshot, official):
-    """Installed Grok Bot package against the official x.ai release, noting whether Omarchy has packaged it yet."""
+    """Installed Grok Bot against the official x.ai release.
+
+    A Mac's app is installed by Fleetlight from that release. The Linux package arrives with the Linux
+    packages, so there the plan notes whether Omarchy has packaged the release yet.
+    """
     app = snapshot.get("grokbot") if isinstance(snapshot.get("grokbot"), dict) else {}
     release = official.get("grokbot") or {}
     installed, latest, candidate = app.get("version"), release.get("version"), app.get("candidate")
-    result = plan(installed, latest, app.get("provider"), release.get("error", "Official Grok Bot release"))
+    mac = app.get("provider") == "macOS app"
+    result = plan(installed, latest, app.get("provider"), release.get("error", "Official Grok Bot release"),
+                  protected=mac and not app.get("writable", True))
     result["candidate"] = candidate
     result["packaged"] = bool(version(candidate) and version(latest) and version(candidate) >= version(latest))
-    if result["state"] == "available":
+    if result["state"] == "protected":
+        result["detail"] = "This account cannot replace " + str(app.get("path") or "the application")
+    elif result["state"] == "available" and not mac:
         if result["packaged"]:
             result["detail"] = "Update available · installs with Linux packages"
         else:
@@ -175,6 +231,7 @@ def check_host(host, snapshot, official):
         cli.update(state="offline", detail="Computer is offline")
         return {"cli": cli, "desktop": {**cli, "installed": None, "latest": None},
                 "claude": {**cli, "installed": snapshot.get("claude"), "latest": (official.get("claude") or {}).get("version")},
+                "agy": tool_plan("agy", snapshot, official), "opencode": tool_plan("opencode", snapshot, official),
                 "grokbot": grokbot_plan(snapshot, official)}
     app = snapshot.get("chatgpt", {})
     if snapshot.get("os") == "Darwin":
@@ -203,7 +260,8 @@ def check_host(host, snapshot, official):
         claude.update(state="unsupported", detail="This installation method requires a manual update")
     if snapshot.get("status") != "online":
         claude.update(state="offline", detail="Computer is offline")
-    result = {"cli": cli, "desktop": desktop, "claude": claude, "grokbot": grokbot_plan(snapshot, official)}
+    result = {"cli": cli, "desktop": desktop, "claude": claude, "agy": tool_plan("agy", snapshot, official),
+              "opencode": tool_plan("opencode", snapshot, official), "grokbot": grokbot_plan(snapshot, official)}
     if snapshot.get("os") == "Linux":
         result.update(check_system(host))
     return result
@@ -218,7 +276,7 @@ def check_all(hosts, snapshots, callback):
             try:
                 value = future.result()
             except Exception:
-                value = {kind: plan(None, None, None, "Update check failed") for kind in ("cli", "desktop", "claude", "grokbot")}
+                value = {kind: plan(None, None, None, "Update check failed") for kind in CLI_KINDS + APP_KINDS}
             callback(ident, value)
 
 
@@ -249,7 +307,7 @@ def parse_install_history(output):
         return []
     records = []
     for item in data[:12]:
-        if not isinstance(item, dict) or item.get("kind") not in ("cli", "desktop", "claude", "system", "restart"):
+        if not isinstance(item, dict) or item.get("kind") not in JOB_KINDS:
             continue
         changes = [change.strip()[:200] for change in item.get("changes", []) if isinstance(change, str) and change.strip()]
         records.append({
@@ -302,7 +360,7 @@ def job_request(host, request):
 
 
 def start_job(host, kind, checked, ident=None):
-    if kind not in ("cli", "desktop", "claude", "system", "restart") or not version(checked.get("latest")):
+    if kind not in JOB_KINDS or not version(checked.get("latest")):
         raise ValueError("A verified release check is required")
     if checked.get("state") not in ("available", "current"):
         raise ValueError("This installation is protected or unavailable")
@@ -310,8 +368,14 @@ def start_job(host, kind, checked, ident=None):
     if kind in ("system", "restart"):
         operation = "update" if kind == "system" else "reboot" if checked.get("manual") else "restart"
         script = python_command((ROOT / "system_ops.py").read_text(), operation)
+    elif kind in ("agy", "opencode"):
+        # One script serves both; its first line says which tool this job is for.
+        script = "tool=" + kind + "\n" + (ROOT / "updaters/cli_tool.sh").read_text()
     else:
-        script = (ROOT / {"cli": "updaters/cli.sh", "desktop": "updaters/desktop.sh", "claude": "updaters/claude.sh"}[kind]).read_text()
+        if kind == "grokbot" and checked.get("provider") != "macOS app":
+            raise ValueError("Grok Bot on Linux is updated with the Linux packages")
+        script = (ROOT / {"cli": "updaters/cli.sh", "desktop": "updaters/desktop.sh", "claude": "updaters/claude.sh",
+                          "grokbot": "updaters/grokbot_mac.sh"}[kind]).read_text()
     return job_request(host, {"operation": "start", "id": ident, "kind": kind,
                               "target": checked["latest"], "build": checked.get("build") or "",
                               "script": script})
@@ -321,7 +385,7 @@ def job_status(host, ident):
     return job_request(host, {"operation": "status", "id": ident})
 
 
-AUTO_UPDATE_KINDS = ("cli", "claude", "desktop", "system")
+AUTO_UPDATE_KINDS = CLI_KINDS + APP_KINDS + ("system",)
 
 
 def auto_target_key(host, kind, checked):
@@ -385,7 +449,7 @@ def packages_changed_since_check(snapshots, checks, now=None, settle=120):
 
 
 def next_auto_batch(hosts, snapshots, checks, attempted=(), now=None):
-    """Next unattended Codex, ChatGPT or Linux-package batch; never automatic restarts."""
+    """Next unattended command-line tool, application or Linux-package batch; never automatic restarts."""
     skipped = set(tuple(item) for item in attempted)
     for kind in AUTO_UPDATE_KINDS:
         pending, _ = batch_candidates(hosts, snapshots, checks, kind, now=now)
@@ -397,7 +461,7 @@ def next_auto_batch(hosts, snapshots, checks, attempted=(), now=None):
 
 def batch_candidates(hosts, snapshots, checks, kind, now=None):
     """Freeze only online, supported, fresh, available releases for review."""
-    if kind not in ("cli", "desktop", "claude", "system", "restart"):
+    if kind not in JOB_KINDS:
         raise ValueError("Unknown application")
     now = time.time() if now is None else now
     eligible, skipped = [], []
@@ -410,6 +474,9 @@ def batch_candidates(hosts, snapshots, checks, kind, now=None):
             reason = "boot identity unavailable"
         elif now - checked.get("checked_at", 0) > 1800:
             reason = "check again"
+        elif kind == "grokbot" and reason == "available" and checked.get("provider") != "macOS app":
+            # Only a Mac's app has an installer of its own.
+            reason = "updates with Linux packages"
         elif reason == "available" and version(checked.get("latest")):
             eligible.append({"host": dict(host), "checked": dict(checked)})
             continue
@@ -450,7 +517,7 @@ def relevant_job(last, checks):
     checked = checks.get(last.get("kind"), {}) if isinstance(checks, dict) else {}
     if checked.get("state") == "current":
         return None
-    if last.get("kind") in ("cli", "desktop", "claude") and version(checked.get("installed")) and version(last.get("target")):
+    if last.get("kind") in CLI_KINDS + APP_KINDS and version(checked.get("installed")) and version(last.get("target")):
         if version(checked["installed"]) >= version(last["target"]):
             return None
     return last

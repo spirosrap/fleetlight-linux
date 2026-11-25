@@ -427,6 +427,101 @@ def claude_installation():
     return {"method": method}
 
 
+# Command-line agents that are updated where they already exist, never installed.
+#   mise:     the tool's name in mise
+#   native:   where the tool's own installer keeps the program, under the home folder
+#   shells:   which shell's answer to trust first. OpenCode's installer adds itself to PATH in the
+#             interactive shell's file only, and a terminal is interactive
+#   programs: where the program sits inside one of mise's release folders
+CLI_TOOLS = {
+    "agy": {"mise": "antigravity-cli", "native": ".local/bin/agy", "shells": ("-lc", "-ic"),
+            "programs": ("agy", "antigravity")},
+    "opencode": {"mise": "opencode", "native": ".opencode/bin/opencode", "shells": ("-ic", "-lc"),
+                 "programs": ("opencode", "bin/opencode", "node_modules/.bin/opencode")},
+}
+TOOL_VERSION = re.compile(r"\d+\.\d+\.\d+")
+
+
+def shell_commands(names):
+    """Where the login and the interactive shell find each command: {"-lc": {"agy": "/path"}, "-ic": {...}}.
+
+    One shell start per kind answers for every name, so a further tool adds nothing to a check.
+    """
+    shell = os.environ.get("SHELL", "/bin/sh")
+    script = "; ".join("echo FLEETLIGHT_PATH:%s=$(command -v %s 2>/dev/null | tail -n 1)" % (name, name) for name in names)
+    found = {}
+    for flag in ("-lc", "-ic"):
+        found[flag] = {}
+        for line in command([shell, flag, script], timeout=4).splitlines():
+            name, _, path = line.partition("FLEETLIGHT_PATH:")[2].partition("=")
+            if name in names and path and os.path.isfile(path) and os.access(path, os.X_OK):
+                found[flag][name] = path
+    return found
+
+
+def tool_executable(name, shells=None):
+    """The program a terminal would run for one of CLI_TOOLS."""
+    tool = CLI_TOOLS[name]
+    shells = shell_commands([name]) if shells is None else shells
+    for flag in tool["shells"]:
+        if shells.get(flag, {}).get(name):
+            return shells[flag][name]
+    found = shutil.which(name)
+    if found:
+        return found
+    path = Path.home() / tool["native"]
+    return str(path) if os.path.isfile(path) and os.access(path, os.X_OK) else None
+
+
+def tool_method(name, executable):
+    resolved = os.path.realpath(executable)
+    try:
+        with open(executable, "rb") as stream:
+            head = stream.read(500)
+    except OSError:
+        head = b""
+    # Only text launcher scripts count: a program itself may contain the word.
+    launcher = head.decode("utf-8", errors="replace") if head.startswith(b"#!") else ""
+    if "/mise/" in executable + ":" + resolved or os.path.basename(resolved) == "mise" or "mise " in launcher:
+        return "mise"
+    if resolved == os.path.realpath(Path.home() / CLI_TOOLS[name]["native"]):
+        return "native"
+    if shutil.which("pacman") and command(["pacman", "-Qqo", resolved]):
+        return "pacman"
+    return "unknown"
+
+
+def mise_tool_version(name, root=None):
+    """Newest release of a tool that mise has downloaded, read from its folder.
+
+    Omarchy lists these tools as lazy: running the shim of a release that is not there yet downloads
+    it (100 MB for agy), so a status check must never run one.
+    """
+    tool = CLI_TOOLS[name]
+    root = Path(root) if root else Path(os.environ.get("MISE_DATA_DIR") or Path.home() / ".local/share/mise") / "installs" / tool["mise"]
+    found = []
+    try:
+        for entry in os.scandir(root):
+            if TOOL_VERSION.fullmatch(entry.name) and not entry.is_symlink() and any(
+                    os.access(os.path.join(entry.path, program), os.X_OK) for program in tool["programs"]):
+                found.append(tuple(int(part) for part in entry.name.split(".")))
+    except OSError:
+        return None
+    return ".".join(str(part) for part in max(found)) if found else None
+
+
+def tool_status(name, shells=None):
+    """Installed version and how it is kept: ("1.5.17", {"method": "native"}); (None, {}) without one."""
+    executable = tool_executable(name, shells)
+    if not executable:
+        return None, {}
+    method = tool_method(name, executable)
+    if method == "mise":
+        return mise_tool_version(name), {"method": method}
+    match = TOOL_VERSION.search(command([executable, "--version"], timeout=5))
+    return (match[0] if match else None), {"method": method}
+
+
 def codex_installation():
     executable = codex_executable()
     if not executable:
@@ -511,11 +606,26 @@ def pacman_package(name):
     return result
 
 
-def grokbot(system):
-    """Grok Bot desktop agent; shipped as the grok-bot package in the Omarchy repository."""
-    if system != "Linux":
-        return {"version": None, "provider": None, "candidate": None, "status": "not detected"}
-    return pacman_package("grok-bot")
+def grokbot(system, folders=None):
+    """Grok Bot desktop agent: the grok-bot package of the Omarchy repository, or the app on a Mac."""
+    if system == "Linux":
+        return pacman_package("grok-bot")
+    result = {"version": None, "provider": None, "candidate": None, "status": "not detected"}
+    if system != "Darwin":
+        return result
+    for folder in folders or ("/Applications", Path.home() / "Applications"):
+        try:
+            with (Path(folder) / "Grok Bot.app/Contents/Info.plist").open("rb") as stream:
+                data = plistlib.load(stream)
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            continue
+        version = data.get("CFBundleShortVersionString")
+        # x.ai builds the app on Cursor's platform, which is where the identifier comes from.
+        if data.get("CFBundleIdentifier") == "com.anysphere.sand" and isinstance(version, str):
+            result.update(version=version, provider="macOS app", status="installed", writable=os.access(folder, os.W_OK),
+                          path=str(Path(folder) / "Grok Bot.app"))
+            break
+    return result
 
 
 def cpu_temperature(system, root="/sys"):
@@ -1038,9 +1148,13 @@ def collect(services=()):
                else next((name for name in ("pacman", "apt", "dnf") if shutil.which(name)), None))
     cli = codex_version()
     claude = claude_version()
+    shells = shell_commands(list(CLI_TOOLS))
+    tools = {}
+    for name in CLI_TOOLS:
+        tools[name], tools[name + "_installation"] = tool_status(name, shells)
     return {"schema": 1, "hostname": platform.node(), "os": system, "distribution": distro,
             "architecture": platform.machine(), "codex_installation": codex_installation(),
-            "claude_installation": claude_installation(),
+            "claude_installation": claude_installation(), **tools,
             "package_manager": manager,
             "boot_id": text("/proc/sys/kernel/random/boot_id").strip() if system == "Linux" else None,
             "kernel": platform.release(), "checked_at": time.time(), **metrics,

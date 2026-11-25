@@ -24,9 +24,9 @@ ERRORS = {
     "permission-required": "Passwordless permission is required for this installation; no credentials are stored.",
     "source-invalid": "The configured package source did not pass verification.",
     "source-missing": "The required package source or update helper is missing.",
-    "signature-invalid": "The downloaded application did not pass OpenAI signature verification.",
-    "app-busy": "ChatGPT could not close cleanly. Finish its work and retry.",
-    "unsupported-installation": "This Codex installation method needs a manual update.",
+    "signature-invalid": "The downloaded application did not pass its publisher's signature verification.",
+    "app-busy": "The application could not close cleanly. Finish its work and retry.",
+    "unsupported-installation": "This installation method needs a manual update.",
     "unsupported-architecture": "This macOS release requires Apple Silicon.",
     "rollback-failed": "Restoring the previous application failed. Manual recovery is required.",
     "post-install-invalid": "The installed application failed verification; inspect the update log.",
@@ -39,6 +39,16 @@ ERRORS = {
     "download-failed": "The application download failed.",
     "missing": "The application is no longer installed.",
 }
+
+# Kinds of job. The command-line tools report ACTIVE_VERSION when done, the applications AFTER_VERSION.
+CLI_KINDS = ("cli", "claude", "agy", "opencode")
+APP_KINDS = ("desktop", "grokbot")
+JOB_KINDS = CLI_KINDS + APP_KINDS + ("system", "restart")
+KIND_NAMES = {"cli": "Codex CLI", "claude": "Claude CLI", "agy": "Antigravity CLI", "opencode": "OpenCode",
+              "desktop": "ChatGPT", "grokbot": "Grok Bot", "system": "Linux packages"}
+MARKERS = {"cli": "FLEETLIGHT_CODEX_UPDATE", "claude": "FLEETLIGHT_CLAUDE_UPDATE", "agy": "FLEETLIGHT_AGY_UPDATE",
+           "opencode": "FLEETLIGHT_OPENCODE_UPDATE", "desktop": "FLEETLIGHT_CODEX_APP_UPDATE",
+           "grokbot": "FLEETLIGHT_GROKBOT_UPDATE"}
 
 
 def save(path, data):
@@ -127,7 +137,7 @@ def installation_changes(receipt):
     packages = package_changes(log)
     if packages:
         found = packages
-    kind = {"cli": "Codex CLI", "claude": "Claude CLI", "desktop": "ChatGPT", "system": "Linux packages"}.get(receipt.get("kind"), "Version")
+    kind = KIND_NAMES.get(receipt.get("kind"), "Version")
     if before and after and before != after:
         version_line = kind + " " + before + " → " + after
         if version_line not in found:
@@ -238,7 +248,7 @@ def history_report(root=None, limit=12):
     report = []
     for state in saved_installs(directory, limit=limit):
         kind = state.get("kind")
-        if kind not in ("cli", "desktop", "claude", "system", "restart"):
+        if kind not in JOB_KINDS:
             continue
         report.append({
             "id": state.get("id") if isinstance(state.get("id"), str) else "",
@@ -255,8 +265,8 @@ def history_report(root=None, limit=12):
 
 
 def visible_installs(records, os_name):
-    """Linux shows package, Codex CLI and ChatGPT installs. macOS shows only Codex CLI and ChatGPT."""
-    kinds = ("cli", "claude", "desktop") if os_name == "Darwin" else ("cli", "claude", "desktop", "system")
+    """Linux shows package, command-line tool and application installs. macOS has no package installs."""
+    kinds = CLI_KINDS + APP_KINDS + (() if os_name == "Darwin" else ("system",))
     return [item for item in records if isinstance(item, dict) and item.get("kind") in kinds]
 
 
@@ -314,18 +324,17 @@ def parse_result(kind, target, build, code, lines):
         if ":" in line:
             key, value = line.split(":", 1)
             values[key] = value
-    after = values.get("ACTIVE_VERSION" if kind in ("cli", "claude") else "AFTER_VERSION", "")
+    after = values.get("ACTIVE_VERSION" if kind in CLI_KINDS else "AFTER_VERSION", "")
     valid = bool(version(after)) and version(after) >= version(target)
-    if kind in ("cli", "claude"):
+    if kind in CLI_KINDS:
         valid = valid and values.get("VERIFY") == "ok"
     else:
         valid = valid and values.get("VERIFY") in ("updated", "current")
         if build:
             valid = valid and values.get("AFTER_BUILD", "").isdigit() and int(values["AFTER_BUILD"]) >= int(build)
-    marker = {"cli": "FLEETLIGHT_CODEX_UPDATE", "claude": "FLEETLIGHT_CLAUDE_UPDATE"}.get(kind, "FLEETLIGHT_CODEX_APP_UPDATE")
-    if code == 0 and marker in lines and valid:
+    if code == 0 and MARKERS[kind] in lines and valid:
         if values.get("RELAUNCH") == "failed":
-            return "failed", "Installed " + after + ", but ChatGPT did not reopen. Open it manually.", after
+            return "failed", "Installed " + after + ", but " + KIND_NAMES[kind] + " did not reopen. Open it manually.", after
         return "succeeded", "Verified " + after, after
     reason = values.get("UPDATE", "failed")
     return "failed", ERRORS.get(reason, "Update failed; the requested version was not verified. Inspect the log."), after
@@ -413,7 +422,7 @@ def handle(request):
                 stream.seek(max(0, log.stat().st_size - 12000))
                 state["log"] = stream.read(12000).decode(errors="replace")
         return state
-    if request.get("operation") != "start" or request.get("kind") not in ("cli", "desktop", "claude", "system", "restart"):
+    if request.get("operation") != "start" or request.get("kind") not in JOB_KINDS:
         raise ValueError("Unknown operation")
     if not version(request.get("target")) or (request.get("build") and not str(request["build"]).isdigit()):
         raise ValueError("Invalid target release")

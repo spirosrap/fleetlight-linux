@@ -146,7 +146,13 @@ def verify():
         assert button is not None
         assert not button.get_sensitive()
         assert app.app_updates["local"]["cli"]["state"] == "available"
+        app.update_row(parent, app.configuration["hosts"][0], "agy", "Antigravity CLI", None, "utilities-terminal-symbolic")
+        agy_row = find_widget(parent, lambda w: isinstance(w, Adw.ActionRow) and w.get_title() == "Antigravity CLI")
+        assert agy_row is not None and "Up to date · native" in agy_row.get_subtitle(), agy_row and agy_row.get_subtitle()
         assert "Update all Codex CLI" in app.batch_buttons["cli"].get_label()
+        assert "Update all Antigravity CLI" in app.batch_buttons["agy"].get_label()
+        assert "Update all OpenCode" in app.batch_buttons["opencode"].get_label()
+        assert "Update all Grok Bot" in app.batch_buttons["grokbot"].get_label()
         assert "Update all ChatGPT" in app.batch_buttons["desktop"].get_label()
         assert "Update all Linux packages" in app.batch_buttons["system"].get_label()
         assert "Restart required computers" in app.batch_buttons["restart"].get_label()

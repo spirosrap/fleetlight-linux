@@ -9,7 +9,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from fleetlight import update_job, updates
+from fleetlight import probe, update_job, updates
 from fleetlight.config import validate
 from fleetlight.monitor import issues, linux_update_issues
 
@@ -455,6 +455,302 @@ Unpacking hello (1.0)…
                        SHELL='/bin/sh', FLEETLIGHT_EXPECTED_VERSION='1.2.3')
             result = subprocess.run(['/bin/sh', '-c', script], env=env, text=True, capture_output=True)
             self.assertIn('UPDATE_MODE:native', result.stdout, result.stdout + result.stderr)
+
+
+    def agy_home(self, directory, version='1.2.2', served='1.2.3'):
+        """A home folder with Google's own agy in ~/.local/bin, whose `update` moves it to `served`."""
+        home = Path(directory)
+        local_bin = home / '.local/bin'
+        local_bin.mkdir(parents=True)
+        installed = home / 'installed'
+        installed.write_text(version + '\n')
+        (local_bin / 'agy').write_text('#!/bin/sh\n'
+                                       f'if [ "$1" = --version ]; then cat {installed}; exit 0; fi\n'
+                                       f'if [ "$1" = update ]; then cp "$0" "$0.1795619401735436200.old"; echo {served} > {installed}; exit 0; fi\n'
+                                       'exit 99\n')
+        (local_bin / 'agy').chmod(0o700)
+        return dict(os.environ, HOME=str(home), PATH=str(local_bin) + os.pathsep + os.environ['PATH'], SHELL='/bin/sh')
+
+    def run_agy_updater(self, env, target='1.2.3'):
+        return self.run_tool_updater('agy', env, target)
+
+    def run_tool_updater(self, tool, env, target='1.2.3'):
+        script = 'tool=' + tool + '\n' + Path(updates.ROOT / 'updaters/cli_tool.sh').read_text()
+        return subprocess.run(['/bin/sh', '-c', script], env=dict(env, FLEETLIGHT_EXPECTED_VERSION=target), text=True, capture_output=True)
+
+    def test_agy_native_install_uses_its_own_updater(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_agy_updater(self.agy_home(directory))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for line in ('FLEETLIGHT_AGY_UPDATE', 'BEFORE_VERSION:1.2.2', 'UPDATE_MODE:native', 'ACTIVE_VERSION:1.2.3', 'UPDATE:ok', 'VERIFY:ok'):
+                self.assertIn(line, result.stdout.splitlines())
+            lines = [line for line in result.stdout.splitlines() if line.startswith(('FLEETLIGHT_', 'ACTIVE_VERSION:', 'VERIFY:', 'UPDATE:'))]
+            self.assertEqual(update_job.parse_result('agy', '1.2.3', '', 0, lines), ('succeeded', 'Verified 1.2.3', '1.2.3'))
+            # The replaced program the updater leaves behind is removed once the new one is verified.
+            self.assertEqual(os.listdir(Path(directory) / '.local/bin'), ['agy'])
+
+    def test_agy_same_or_newer_version_never_installs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_agy_updater(self.agy_home(directory, version='1.2.4', served='0.0.1'))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('UPDATE:current', result.stdout)
+            self.assertIn('ACTIVE_VERSION:1.2.4', result.stdout)
+
+    def test_agy_updater_that_stays_behind_is_not_a_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_agy_updater(self.agy_home(directory, served='1.2.2'))
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn('UPDATE:verification-failed', result.stdout)
+            lines = result.stdout.splitlines()
+            self.assertEqual(update_job.parse_result('agy', '1.2.3', '', 1, lines)[0], 'failed')
+            self.assertEqual(len(os.listdir(Path(directory) / '.local/bin')), 2)
+
+    def test_agy_under_mise_is_installed_without_running_the_shim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            shims, data, ran = home / 'mise/shims', home / 'data', home / 'shim-ran'
+            shims.mkdir(parents=True)
+            old = data / 'installs/antigravity-cli/1.2.2'
+            old.mkdir(parents=True)
+            (old / 'agy').write_text('#!/bin/sh\n')
+            (old / 'agy').chmod(0o700)
+            (data / 'installs/antigravity-cli/latest').symlink_to(old)
+            # Running the real shim would download the newest release; this one records that it ran.
+            (shims / 'agy').write_text(f'#!/bin/sh\ntouch {ran}\nexit 99\n')
+            (shims / 'mise').write_text('#!/bin/sh\n'
+                                        '[ "$1" = reshim ] && exit 0\n'
+                                        '[ "$3" = --yes ] && [ "$4" = antigravity-cli@1.2.3 ] || exit 1\n'
+                                        f'mkdir -p {data}/installs/antigravity-cli/1.2.3 && cp {old}/agy {data}/installs/antigravity-cli/1.2.3/agy\n')
+            for name in ('agy', 'mise'):
+                (shims / name).chmod(0o700)
+            env = dict(os.environ, HOME=str(home), MISE_DATA_DIR=str(data), SHELL='/bin/sh',
+                       PATH=str(shims) + os.pathsep + os.environ['PATH'])
+            result = self.run_agy_updater(env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for line in ('BEFORE_VERSION:1.2.2', 'UPDATE_MODE:mise', 'ACTIVE_VERSION:1.2.3', 'UPDATE:ok'):
+                self.assertIn(line, result.stdout.splitlines())
+            self.assertFalse(ran.exists())
+            self.assertEqual(probe.mise_tool_version('agy', data / 'installs/antigravity-cli'), '1.2.3')
+
+    def test_agy_installed_some_other_way_needs_a_manual_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            elsewhere = home / 'opt/bin'
+            elsewhere.mkdir(parents=True)
+            (elsewhere / 'agy').write_text('#!/bin/sh\necho 1.2.2\n')
+            (elsewhere / 'agy').chmod(0o700)
+            env = dict(os.environ, HOME=str(home), SHELL='/bin/sh', PATH=str(elsewhere) + os.pathsep + os.environ['PATH'])
+            result = self.run_agy_updater(env)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('UPDATE:unsupported-installation', result.stdout)
+            self.assertEqual(probe.tool_method('agy', str(elsewhere / 'agy')), 'unknown')
+
+    def test_agy_status_reads_mise_folder_instead_of_running_the_shim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'installs/antigravity-cli'
+            for name in ('1.5.9', '1.5.17'):
+                (root / name).mkdir(parents=True)
+                (root / name / 'antigravity').write_text('')
+                (root / name / 'antigravity').chmod(0o700)
+            (root / '1.6.0').mkdir()  # A download that never finished has no program in it.
+            (root / 'latest').symlink_to(root / '1.5.17')
+            self.assertEqual(probe.mise_tool_version('agy', root), '1.5.17')
+            self.assertIsNone(probe.mise_tool_version('agy', root / 'missing'))
+            shim = Path(directory) / 'mise/shims/agy'
+            shim.parent.mkdir(parents=True)
+            shim.write_text('#!/bin/sh\nexit 99\n')
+            shim.chmod(0o700)
+            with patch.object(probe, 'tool_executable', return_value=str(shim)), \
+                    patch.object(probe, 'command', side_effect=AssertionError('The shim was run')), \
+                    patch.dict(os.environ, {'MISE_DATA_DIR': directory}):
+                self.assertEqual(probe.tool_status('agy'), ('1.5.17', {'method': 'mise'}))
+            with patch.object(probe, 'tool_executable', return_value=None):
+                self.assertEqual(probe.tool_status('agy'), (None, {}))
+
+    def test_agy_status_asks_a_native_install_for_its_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            native = Path(directory) / '.local/bin/agy'
+            native.parent.mkdir(parents=True)
+            native.write_bytes(b'\x7fELF' + b'\0' * 16 + b'run mise use' + b'\0' * 16)
+            native.chmod(0o700)
+            with patch.object(probe.Path, 'home', return_value=Path(directory)), \
+                    patch.object(probe, 'tool_executable', return_value=str(native)), \
+                    patch.object(probe, 'command', return_value='1.5.16') as command:
+                self.assertEqual(probe.tool_status('agy'), ('1.5.16', {'method': 'native'}))
+            self.assertEqual(command.call_args.args[0], [str(native), '--version'])
+
+    def test_agy_release_and_plan(self):
+        page = 'https://github.com/google-antigravity/antigravity-cli/releases/tag/'
+        self.assertEqual(updates.parse_agy_release(page + '1.5.17'), '1.5.17')
+        self.assertEqual(updates.parse_agy_release(page + 'v1.6.0'), '1.6.0')
+        for address in (page + '1.5', page + '1.5.17/extra', 'https://example.org/releases/tag/1.5.17', None):
+            with self.assertRaises(ValueError):
+                updates.parse_agy_release(address)
+        official = {'agy': {'version': '1.5.17'}}
+        plan = lambda **snapshot: updates.tool_plan('agy', {'status': 'online', **snapshot}, official)
+        native = plan(agy='1.5.16', agy_installation={'method': 'native'})
+        self.assertEqual((native['state'], native['installed'], native['latest'], native['provider']), ('available', '1.5.16', '1.5.17', 'native'))
+        self.assertEqual(plan(agy='1.5.17', agy_installation={'method': 'mise'})['state'], 'current')
+        # Listed by mise but never downloaded: nothing to update, and Fleetlight does not install it.
+        lazy = plan(agy=None, agy_installation={'method': 'mise'})
+        self.assertEqual((lazy['state'], lazy['detail']), ('missing', 'Not installed · mise downloads it on first use'))
+        self.assertEqual(plan()['detail'], 'Not installed')
+        self.assertEqual(plan(agy='1.5.16', agy_installation={'method': 'unknown'})['state'], 'unsupported')
+        self.assertEqual(updates.tool_plan('agy', {'status': 'offline', 'agy': '1.5.16'}, official)['state'], 'offline')
+        failed = updates.tool_plan('agy', {'status': 'online', 'agy': '1.5.16', 'agy_installation': {'method': 'native'}},
+                                  {'agy': {'error': 'Could not check the official Antigravity CLI release'}})
+        self.assertEqual((failed['state'], failed['detail']), ('unknown', 'Could not check the official Antigravity CLI release'))
+
+    def test_agy_is_updated_like_the_other_command_line_tools(self):
+        host = {'id': 'desk', 'name': 'Desk', 'local': True}
+        snapshots = {'desk': {'status': 'online', 'agy': '1.5.16', 'agy_installation': {'method': 'native'}}}
+        checks = {'desk': {'agy': updates.tool_plan('agy', snapshots['desk'], {'agy': {'version': '1.5.17'}})}}
+        eligible, skipped = updates.batch_candidates([host], snapshots, checks, 'agy')
+        self.assertEqual(([item['checked']['latest'] for item in eligible], skipped), (['1.5.17'], []))
+        self.assertEqual(updates.next_auto_batch([host], snapshots, checks)[0], 'agy')
+        self.assertEqual(updates.auto_target_key(host, 'agy', checks['desk']['agy']), ('desk', 'agy', '1.5.17', ''))
+        with patch.object(updates, 'job_request', side_effect=lambda host, request: request) as sent:
+            request = updates.start_job(host, 'agy', checks['desk']['agy'])
+        self.assertEqual((request['kind'], request['target']), ('agy', '1.5.17'))
+        self.assertTrue(request['script'].startswith('tool=agy\n'))
+        self.assertIn('FLEETLIGHT_AGY_UPDATE', request['script'])
+        self.assertEqual(sent.call_count, 1)
+        receipt = {'kind': 'agy', 'log': 'BEFORE_VERSION:1.5.16\nACTIVE_VERSION:1.5.17\n'}
+        self.assertEqual(update_job.installation_changes(receipt), ['Antigravity CLI 1.5.16 → 1.5.17'])
+        record = {'id': 'a', 'kind': 'agy', 'state': 'succeeded', 'changes': ['Antigravity CLI 1.5.16 → 1.5.17']}
+        self.assertEqual(updates.parse_install_history('FLEETLIGHT_HISTORY=' + json.dumps([record]))[0]['kind'], 'agy')
+        self.assertEqual(update_job.visible_installs([record], 'Darwin'), [record])
+        self.assertIsNone(updates.relevant_job({'kind': 'agy', 'state': 'failed', 'target': '1.5.17'},
+                                               {'agy': {'state': 'available', 'installed': '1.5.17'}}))
+
+
+    def test_grok_bot_is_found_on_a_mac(self):
+        import plistlib
+        with tempfile.TemporaryDirectory() as directory:
+            missing, other, apps = Path(directory) / 'none', Path(directory) / 'other', Path(directory) / 'Applications'
+            for folder, identifier in ((other, 'org.example.lookalike'), (apps, 'com.anysphere.sand')):
+                (folder / 'Grok Bot.app/Contents').mkdir(parents=True)
+                with (folder / 'Grok Bot.app/Contents/Info.plist').open('wb') as stream:
+                    plistlib.dump({'CFBundleIdentifier': identifier, 'CFBundleShortVersionString': '1.2.3'}, stream)
+            found = probe.grokbot('Darwin', folders=(missing, other, apps))
+            self.assertEqual((found['version'], found['provider'], found['status']), ('1.2.3', 'macOS app', 'installed'))
+            self.assertEqual(probe.grokbot('Darwin', folders=(missing, other))['status'], 'not detected')
+        behind = updates.grokbot_plan({'status': 'online', 'os': 'Darwin', 'grokbot': found}, {'grokbot': {'version': '1.3.0'}})
+        self.assertEqual((behind['state'], behind['installed'], behind['latest'], behind['provider']),
+                         ('available', '1.2.3', '1.3.0', 'macOS app'))
+        self.assertEqual(updates.grokbot_plan({'status': 'online', 'grokbot': found}, {'grokbot': {'version': '1.2.3'}})['state'], 'current')
+
+
+    def test_opencode_native_install_is_upgraded_to_the_checked_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            native = home / '.opencode/bin'
+            native.mkdir(parents=True)
+            installed, asked = home / 'installed', home / 'asked'
+            installed.write_text('opencode v1.2.2\n')
+            (native / 'opencode').write_text('#!/bin/sh\n'
+                                             f'if [ "$1" = --version ]; then cat {installed}; exit 0; fi\n'
+                                             f'if [ "$1" = upgrade ]; then echo "$2" > {asked}; echo "opencode v$2" > {installed}; exit 0; fi\n'
+                                             'exit 99\n')
+            (native / 'opencode').chmod(0o700)
+            env = dict(os.environ, HOME=str(home), SHELL='/bin/sh', PATH=str(native) + os.pathsep + os.environ['PATH'])
+            result = self.run_tool_updater('opencode', env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for line in ('FLEETLIGHT_OPENCODE_UPDATE', 'BEFORE_VERSION:1.2.2', 'UPDATE_MODE:native', 'ACTIVE_VERSION:1.2.3', 'UPDATE:ok'):
+                self.assertIn(line, result.stdout.splitlines())
+            self.assertEqual(asked.read_text().strip(), '1.2.3')
+            lines = [line for line in result.stdout.splitlines() if line.startswith(('FLEETLIGHT_', 'ACTIVE_VERSION:', 'VERIFY:', 'UPDATE:'))]
+            self.assertEqual(update_job.parse_result('opencode', '1.2.3', '', 0, lines), ('succeeded', 'Verified 1.2.3', '1.2.3'))
+            self.assertEqual(update_job.parse_result('agy', '1.2.3', '', 0, lines)[0], 'failed')
+
+    def test_opencode_under_mise_is_read_from_its_npm_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'installs/opencode'
+            program = root / '2.4.1/node_modules/.bin/opencode'
+            program.parent.mkdir(parents=True)
+            program.write_text('#!/bin/sh\n')
+            program.chmod(0o700)
+            (root / '2.5.0').mkdir()
+            (root / 'latest').symlink_to(root / '2.4.1')
+            self.assertEqual(probe.mise_tool_version('opencode', root), '2.4.1')
+            self.assertEqual(probe.tool_method('opencode', str(Path(directory) / 'mise/installs/opencode/latest/node_modules/.bin/opencode')), 'mise')
+
+    def test_tools_are_looked_up_in_one_shell_start_each(self):
+        calls = []
+
+        def command(args, timeout=4):
+            calls.append(args)
+            found = {'-lc': '/usr/bin/true', '-ic': '/usr/bin/env'}[args[1]]
+            return f'a greeting from the shell file\nFLEETLIGHT_PATH:agy=\nFLEETLIGHT_PATH:opencode={found}\nFLEETLIGHT_PATH:other=/usr/bin/true'
+
+        with patch.object(probe, 'command', side_effect=command):
+            shells = probe.shell_commands(['agy', 'opencode'])
+        self.assertEqual(shells, {'-lc': {'opencode': '/usr/bin/true'}, '-ic': {'opencode': '/usr/bin/env'}})
+        self.assertEqual(len(calls), 2)
+        self.assertIn('command -v agy', calls[0][2])
+        self.assertIn('command -v opencode', calls[0][2])
+        # OpenCode trusts the interactive shell first, agy the login shell.
+        self.assertEqual(probe.tool_executable('opencode', shells), '/usr/bin/env')
+        self.assertEqual(probe.tool_executable('agy', {'-lc': {'agy': '/usr/bin/true'}, '-ic': {'agy': '/usr/bin/env'}}), '/usr/bin/true')
+
+    def test_opencode_plan(self):
+        official = {'opencode': {'version': '2.4.1'}}
+        plan = lambda **snapshot: updates.tool_plan('opencode', {'status': 'online', **snapshot}, official)
+        native = plan(opencode='2.4.0', opencode_installation={'method': 'native'})
+        self.assertEqual((native['state'], native['latest'], native['detail']), ('available', '2.4.1', 'Official OpenCode release'))
+        self.assertEqual(plan(opencode='2.4.1', opencode_installation={'method': 'mise'})['state'], 'current')
+        # A distribution package is brought up to date by the Linux packages update, not by a job of its own.
+        packaged = plan(opencode='2.4.0', opencode_installation={'method': 'pacman'})
+        self.assertEqual((packaged['state'], packaged['detail']), ('packaged', 'Update available · installs with Linux packages'))
+        host = {'id': 'desk', 'name': 'Desk', 'local': True}
+        snapshots = {'desk': {'status': 'online'}}
+        self.assertEqual(updates.batch_candidates([host], snapshots, {'desk': {'opencode': packaged}}, 'opencode')[0], [])
+        self.assertEqual(len(updates.batch_candidates([host], snapshots, {'desk': {'opencode': native}}, 'opencode')[0]), 1)
+        with patch.object(updates, 'job_request', side_effect=lambda host, request: request):
+            self.assertTrue(updates.start_job(host, 'opencode', native)['script'].startswith('tool=opencode\n'))
+        self.assertIn('opencode', updates.AUTO_UPDATE_KINDS)
+
+    def test_grok_bot_on_a_mac_is_installed_by_a_job_and_on_linux_by_the_packages(self):
+        official = {'grokbot': {'version': '1.3.0'}}
+        mac_app = {'version': '1.2.3', 'provider': 'macOS app', 'candidate': None, 'status': 'installed', 'writable': True,
+                   'path': '/Applications/Grok Bot.app'}
+        mac = updates.grokbot_plan({'status': 'online', 'os': 'Darwin', 'grokbot': mac_app}, official)
+        linux = updates.grokbot_plan({'status': 'online', 'os': 'Linux', 'grokbot': {
+            'version': '1.2.3', 'provider': 'pacman', 'candidate': '1.3.0', 'status': 'update available'}}, official)
+        self.assertEqual((mac['state'], mac['detail']), ('available', 'Official Grok Bot release'))
+        self.assertEqual((linux['state'], linux['detail']), ('available', 'Update available · installs with Linux packages'))
+        hosts = [{'id': 'air', 'name': 'Air', 'alias': 'air'}, {'id': 'desk', 'name': 'Desk', 'local': True}]
+        snapshots = {'air': {'status': 'online'}, 'desk': {'status': 'online'}}
+        checks = {'air': {'grokbot': mac}, 'desk': {'grokbot': linux}}
+        eligible, skipped = updates.batch_candidates(hosts, snapshots, checks, 'grokbot')
+        self.assertEqual([item['host']['id'] for item in eligible], ['air'])
+        self.assertEqual(skipped, [{'name': 'Desk', 'reason': 'updates with Linux packages'}])
+        # Unattended updates pick it up, after the command-line tools and ChatGPT.
+        self.assertEqual(updates.next_auto_batch(hosts, snapshots, checks)[0], 'grokbot')
+        with patch.object(updates, 'job_request', side_effect=lambda host, request: request):
+            request = updates.start_job(hosts[0], 'grokbot', mac)
+            with self.assertRaises(ValueError):
+                updates.start_job(hosts[1], 'grokbot', linux)
+        self.assertEqual((request['kind'], request['target']), ('grokbot', '1.3.0'))
+        for expected in ('FLEETLIGHT_GROKBOT_UPDATE', 'com.anysphere.sand', 'team=DCNK4UB866', 'spctl --assess', 'restore_previous_app'):
+            self.assertIn(expected, request['script'])
+        locked = updates.grokbot_plan({'status': 'online', 'grokbot': dict(mac_app, writable=False)}, official)
+        self.assertEqual((locked['state'], locked['detail']), ('protected', 'This account cannot replace /Applications/Grok Bot.app'))
+
+    def test_grok_bot_job_results(self):
+        done = ['FLEETLIGHT_GROKBOT_UPDATE', 'BEFORE_VERSION:1.2.3', 'AFTER_VERSION:1.3.0', 'RELAUNCH:not-needed', 'UPDATE:ok', 'VERIFY:updated']
+        self.assertEqual(update_job.parse_result('grokbot', '1.3.0', '', 0, done), ('succeeded', 'Verified 1.3.0', '1.3.0'))
+        closed = [line.replace('not-needed', 'failed') for line in done]
+        self.assertEqual(update_job.parse_result('grokbot', '1.3.0', '', 0, closed),
+                         ('failed', 'Installed 1.3.0, but Grok Bot did not reopen. Open it manually.', '1.3.0'))
+        forged = ['FLEETLIGHT_GROKBOT_UPDATE', 'BEFORE_VERSION:1.2.3', 'UPDATE:signature-invalid', 'VERIFY:failed']
+        self.assertEqual(update_job.parse_result('grokbot', '1.3.0', '', 3, forged)[:2], ('failed', update_job.ERRORS['signature-invalid']))
+        self.assertEqual(update_job.installation_changes({'kind': 'grokbot', 'log': '\n'.join(done)}), ['Grok Bot 1.2.3 → 1.3.0'])
+        # The Mac installer refuses to run anywhere else.
+        script = Path(updates.ROOT / 'updaters/grokbot_mac.sh').read_text()
+        result = subprocess.run(['/bin/sh', '-c', script], env=dict(os.environ, FLEETLIGHT_EXPECTED_VERSION='1.3.0'), text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('UPDATE:unsupported', result.stdout)
 
 
 if __name__ == '__main__':
