@@ -10,6 +10,6 @@ run only through an explicit update job, except desktop_check.sh, which refreshe
 repository metadata without installing packages. Do not invoke update scripts
 without the expected-version environment supplied by the controller.
 
-`cli_tool.sh` serves both the Antigravity CLI and OpenCode: the controller puts `tool=agy` or
-`tool=opencode` on a line before it. `grokbot_mac.sh` is new here and follows the macOS
+`cli_tool.sh` serves the Antigravity CLI, OpenCode and the Grok CLI: the controller puts `tool=agy`,
+`tool=opencode` or `tool=grok` on a line before it. `grokbot_mac.sh` is new here and follows the macOS
 replacement steps of desktop.sh: verify the staged bundle, swap by rename, restore on failure.

@@ -41,13 +41,13 @@ ERRORS = {
 }
 
 # Kinds of job. The command-line tools report ACTIVE_VERSION when done, the applications AFTER_VERSION.
-CLI_KINDS = ("cli", "claude", "agy", "opencode")
+CLI_KINDS = ("cli", "claude", "agy", "opencode", "grok")
 APP_KINDS = ("desktop", "grokbot")
 JOB_KINDS = CLI_KINDS + APP_KINDS + ("system", "restart")
 KIND_NAMES = {"cli": "Codex CLI", "claude": "Claude CLI", "agy": "Antigravity CLI", "opencode": "OpenCode",
-              "desktop": "ChatGPT", "grokbot": "Grok Bot", "system": "Linux packages"}
+              "grok": "Grok CLI", "desktop": "ChatGPT", "grokbot": "Grok Bot", "system": "Linux packages"}
 MARKERS = {"cli": "FLEETLIGHT_CODEX_UPDATE", "claude": "FLEETLIGHT_CLAUDE_UPDATE", "agy": "FLEETLIGHT_AGY_UPDATE",
-           "opencode": "FLEETLIGHT_OPENCODE_UPDATE", "desktop": "FLEETLIGHT_CODEX_APP_UPDATE",
+           "opencode": "FLEETLIGHT_OPENCODE_UPDATE", "grok": "FLEETLIGHT_GROK_UPDATE", "desktop": "FLEETLIGHT_CODEX_APP_UPDATE",
            "grokbot": "FLEETLIGHT_GROKBOT_UPDATE"}
 
 

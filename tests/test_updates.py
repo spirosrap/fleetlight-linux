@@ -753,5 +753,59 @@ Unpacking hello (1.0)…
         self.assertIn('UPDATE:unsupported', result.stdout)
 
 
+    def test_grok_cli_native_install_is_updated_to_the_checked_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            downloads, links = home / '.grok/downloads', home / '.grok/bin'
+            downloads.mkdir(parents=True)
+            links.mkdir()
+            asked = home / 'asked'
+            # x.ai's layout: the command is a link to the release, and an update points the link at a new one.
+            for release in ('1.2.2', '1.2.3'):
+                program = downloads / f'grok-{release}-linux-x86_64'
+                program.write_text('#!/bin/sh\n'
+                                   f'if [ "$1" = --version ]; then echo "grok {release} (abc123) [alpha]"; exit 0; fi\n'
+                                   f'if [ "$1" = update ]; then echo "$2 $3" > {asked}; ln -sf ../downloads/grok-$3-linux-x86_64 {links}/grok; exit 0; fi\n'
+                                   'exit 99\n')
+                program.chmod(0o700)
+            (links / 'grok').symlink_to('../downloads/grok-1.2.2-linux-x86_64')
+            # A bare environment: the developer's own may point the login shell at a mise wrapper for grok.
+            env = {'HOME': str(home), 'SHELL': '/bin/sh', 'PATH': str(links) + os.pathsep + '/usr/bin:/bin'}
+            self.assertEqual(probe.tool_method('grok', str(links / 'grok')), 'unknown')  # Not this account's home folder.
+            with patch.object(probe.Path, 'home', return_value=home):
+                self.assertEqual(probe.tool_method('grok', str(links / 'grok')), 'native')
+            result = self.run_tool_updater('grok', env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for line in ('FLEETLIGHT_GROK_UPDATE', 'BEFORE_VERSION:1.2.2', 'UPDATE_MODE:native', 'ACTIVE_VERSION:1.2.3', 'UPDATE:ok'):
+                self.assertIn(line, result.stdout.splitlines())
+            self.assertEqual(asked.read_text().strip(), '--version 1.2.3')
+            lines = [line for line in result.stdout.splitlines() if line.startswith(('FLEETLIGHT_', 'ACTIVE_VERSION:', 'VERIFY:', 'UPDATE:'))]
+            self.assertEqual(update_job.parse_result('grok', '1.2.3', '', 0, lines), ('succeeded', 'Verified 1.2.3', '1.2.3'))
+
+    def test_grok_cli_release_and_plan(self):
+        self.assertEqual(updates.parse_grok_release('1.0.92\n'), '1.0.92')
+        self.assertEqual(updates.parse_grok_release('1.0.89\n1.0.92\n1.0.9\n0.1.151-alpha.2\n'), '1.0.92')
+        for text in ('', '<html>Not found</html>', 'latest'):
+            with self.assertRaises(ValueError):
+                updates.parse_grok_release(text)
+        official = {'grok': {'version': '1.0.92'}}
+        behind = updates.tool_plan('grok', {'status': 'online', 'grok': '1.0.89', 'grok_installation': {'method': 'native'}}, official)
+        self.assertEqual((behind['state'], behind['latest'], behind['detail']), ('available', '1.0.92', 'Official Grok CLI release'))
+        lazy = updates.tool_plan('grok', {'status': 'online', 'grok': None, 'grok_installation': {'method': 'mise'}}, official)
+        self.assertEqual(lazy['detail'], 'Not installed · mise downloads it on first use')
+        host = {'id': 'desk', 'name': 'Desk', 'local': True}
+        with patch.object(updates, 'job_request', side_effect=lambda host, request: request):
+            self.assertTrue(updates.start_job(host, 'grok', behind)['script'].startswith('tool=grok\n'))
+        # Every tool the probe looks for has a job kind, a name and a place in the unattended queue.
+        for kind in probe.CLI_TOOLS:
+            self.assertIn(kind, update_job.CLI_KINDS)
+            self.assertIn(kind, update_job.KIND_NAMES)
+            self.assertIn(kind, update_job.MARKERS)
+            self.assertIn(kind, updates.AUTO_UPDATE_KINDS)
+            self.assertIn(update_job.MARKERS[kind], Path(updates.ROOT / 'updaters/cli_tool.sh').read_text())
+        self.assertEqual(update_job.installation_changes({'kind': 'grok', 'log': 'BEFORE_VERSION:1.0.89\nACTIVE_VERSION:1.0.92\n'}),
+                         ['Grok CLI 1.0.89 → 1.0.92'])
+
+
 if __name__ == '__main__':
     unittest.main()

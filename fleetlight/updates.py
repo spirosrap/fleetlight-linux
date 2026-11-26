@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from . import net
 from .config import validate
 from .monitor import python_command, run_process
+from .probe import CLI_TOOLS
 from .update_job import APP_KINDS, CLI_KINDS, ERRORS, JOB_KINDS, KIND_NAMES, version, history_report, visible_installs
 
 net.install()
@@ -29,6 +30,8 @@ AGY_RELEASE = "https://github.com/google-antigravity/antigravity-cli/releases/la
 # OpenCode 2 ships as this npm package, which its own installer and upgrade command read too.
 # (GitHub's "latest release" and the opencode-ai package are still OpenCode 1.)
 OPENCODE_REGISTRY = "https://registry.npmjs.org/@opencode/cli/latest"
+# x.ai's stable channel for the Grok CLI (Grok Build): plain text, read by its installer, its `grok update` and mise.
+GROK_RELEASE = "https://x.ai/cli/stable"
 
 
 MAX_PARALLEL_UPDATES = 3
@@ -129,7 +132,22 @@ def releases():
         result["opencode"] = {"version": data["version"]}
     except Exception:
         result["opencode"] = {"error": "Could not check the official OpenCode release"}
+    try:
+        request = urllib.request.Request(GROK_RELEASE, headers={"User-Agent": "Fleetlight/0.2"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result["grok"] = {"version": parse_grok_release(response.read(100_000).decode("utf-8", errors="replace"))}
+    except Exception:
+        result["grok"] = {"error": "Could not check the official Grok CLI release"}
     return result
+
+
+def parse_grok_release(text):
+    """Newest release in x.ai's stable list, which holds one version to a line."""
+    found = [version(line.strip()) for line in str(text).splitlines()]
+    newest = max((item for item in found if item), default=None)
+    if not newest:
+        raise ValueError("Invalid Grok CLI release")
+    return ".".join(str(part) for part in newest)
 
 
 def parse_agy_release(address):
@@ -141,7 +159,7 @@ def parse_agy_release(address):
 
 
 def tool_plan(kind, snapshot, official):
-    """An installed command-line agent (agy, opencode) against its latest release. Updated where it exists, never installed."""
+    """An installed command-line agent (agy, opencode, grok) against its latest release. Updated where it exists, never installed."""
     name = KIND_NAMES[kind]
     info = snapshot.get(kind + "_installation") if isinstance(snapshot.get(kind + "_installation"), dict) else {}
     release = official.get(kind) or {}
@@ -231,7 +249,7 @@ def check_host(host, snapshot, official):
         cli.update(state="offline", detail="Computer is offline")
         return {"cli": cli, "desktop": {**cli, "installed": None, "latest": None},
                 "claude": {**cli, "installed": snapshot.get("claude"), "latest": (official.get("claude") or {}).get("version")},
-                "agy": tool_plan("agy", snapshot, official), "opencode": tool_plan("opencode", snapshot, official),
+                **{kind: tool_plan(kind, snapshot, official) for kind in CLI_TOOLS},
                 "grokbot": grokbot_plan(snapshot, official)}
     app = snapshot.get("chatgpt", {})
     if snapshot.get("os") == "Darwin":
@@ -260,8 +278,8 @@ def check_host(host, snapshot, official):
         claude.update(state="unsupported", detail="This installation method requires a manual update")
     if snapshot.get("status") != "online":
         claude.update(state="offline", detail="Computer is offline")
-    result = {"cli": cli, "desktop": desktop, "claude": claude, "agy": tool_plan("agy", snapshot, official),
-              "opencode": tool_plan("opencode", snapshot, official), "grokbot": grokbot_plan(snapshot, official)}
+    result = {"cli": cli, "desktop": desktop, "claude": claude, **{kind: tool_plan(kind, snapshot, official) for kind in CLI_TOOLS},
+              "grokbot": grokbot_plan(snapshot, official)}
     if snapshot.get("os") == "Linux":
         result.update(check_system(host))
     return result
@@ -368,7 +386,7 @@ def start_job(host, kind, checked, ident=None):
     if kind in ("system", "restart"):
         operation = "update" if kind == "system" else "reboot" if checked.get("manual") else "restart"
         script = python_command((ROOT / "system_ops.py").read_text(), operation)
-    elif kind in ("agy", "opencode"):
+    elif kind in CLI_TOOLS:
         # One script serves both; its first line says which tool this job is for.
         script = "tool=" + kind + "\n" + (ROOT / "updaters/cli_tool.sh").read_text()
     else:

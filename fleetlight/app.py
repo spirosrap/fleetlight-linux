@@ -18,7 +18,7 @@ from . import actions, config, mobile_feed
 from . import agents as agent_quota
 from .monitor import (History, MemoryWatch, OomWatch, PRESSURE_LIMITS, ServiceWatch, clock, duration, issues, linux_update_issues,
                       has_crash_issues, presence_summary, probe_host, refresh, regression_cause, service_label)
-from .probe import collect_metrics
+from .probe import CLI_TOOLS, collect_metrics
 from . import sites
 from .tray import Tray
 from . import updates
@@ -1850,8 +1850,8 @@ class Fleetlight(Adw.Application):
         apps = self.section("Applications", "Installed and available versions")
         self.update_row(apps, host, "cli", "Codex CLI", installed.get("codex"), "utilities-terminal-symbolic")
         self.update_row(apps, host, "claude", "Claude CLI", installed.get("claude"), "utilities-terminal-symbolic")
-        self.update_row(apps, host, "agy", "Antigravity CLI", installed.get("agy"), "utilities-terminal-symbolic")
-        self.update_row(apps, host, "opencode", "OpenCode", installed.get("opencode"), "utilities-terminal-symbolic")
+        for kind in CLI_TOOLS:
+            self.update_row(apps, host, kind, ACTION_NAMES[kind], installed.get(kind), "utilities-terminal-symbolic")
         desktop = installed.get("chatgpt", {})
         self.update_row(apps, host, "desktop", "ChatGPT", desktop.get("version"), "web-browser-symbolic")
         grokbot = installed.get("grokbot") if isinstance(installed.get("grokbot"), dict) else {}

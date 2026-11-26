@@ -1,5 +1,5 @@
 # Update a command-line agent that is already installed to at least the checked release.
-# The controller puts `tool=agy` or `tool=opencode` on a line before this script.
+# The controller puts `tool=agy`, `tool=opencode` or `tool=grok` on a line before this script.
 case "${tool:-}" in
   agy)
     label='Antigravity CLI'; marker=FLEETLIGHT_AGY_UPDATE; mise_name=antigravity-cli
@@ -8,6 +8,10 @@ case "${tool:-}" in
     label=OpenCode; marker=FLEETLIGHT_OPENCODE_UPDATE; mise_name=opencode
     # OpenCode's installer adds itself to PATH in the interactive shell's file only.
     native_home=.opencode/bin/opencode; shells='-ic -lc'; programs='opencode bin/opencode node_modules/.bin/opencode' ;;
+  grok)
+    # x.ai's installer links ~/.grok/bin/grok to the release it keeps in ~/.grok/downloads.
+    label='Grok CLI'; marker=FLEETLIGHT_GROK_UPDATE; mise_name=grok
+    native_home=.grok/bin/grok; shells='-lc -ic'; programs=grok ;;
   *) printf 'UPDATE:target-invalid\nVERIFY:failed\n'; exit 2 ;;
 esac
 printf '%s\nPHASE:Inspecting %s\n' "$marker" "$label"
@@ -93,6 +97,7 @@ case "$mode" in
       # `agy update` takes no version, so the result is checked against the release Fleetlight saw.
       agy) "$active_path" update </dev/null ;;
       opencode) "$active_path" upgrade "$target_version" </dev/null ;;
+      grok) "$active_path" update --version "$target_version" </dev/null ;;
     esac
     status=$?
     ;;

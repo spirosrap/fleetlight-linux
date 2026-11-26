@@ -152,6 +152,7 @@ def verify():
         assert "Update all Codex CLI" in app.batch_buttons["cli"].get_label()
         assert "Update all Antigravity CLI" in app.batch_buttons["agy"].get_label()
         assert "Update all OpenCode" in app.batch_buttons["opencode"].get_label()
+        assert "Update all Grok CLI" in app.batch_buttons["grok"].get_label()
         assert "Update all Grok Bot" in app.batch_buttons["grokbot"].get_label()
         assert "Update all ChatGPT" in app.batch_buttons["desktop"].get_label()
         assert "Update all Linux packages" in app.batch_buttons["system"].get_label()

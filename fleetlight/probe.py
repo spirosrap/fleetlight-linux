@@ -438,6 +438,8 @@ CLI_TOOLS = {
             "programs": ("agy", "antigravity")},
     "opencode": {"mise": "opencode", "native": ".opencode/bin/opencode", "shells": ("-ic", "-lc"),
                  "programs": ("opencode", "bin/opencode", "node_modules/.bin/opencode")},
+    # x.ai's installer links ~/.grok/bin/grok (and ~/.local/bin/grok) to the release in ~/.grok/downloads.
+    "grok": {"mise": "grok", "native": ".grok/bin/grok", "shells": ("-lc", "-ic"), "programs": ("grok",)},
 }
 TOOL_VERSION = re.compile(r"\d+\.\d+\.\d+")
 
